@@ -1,0 +1,14 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+defaults: { run: { working-directory: rust } }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust }
+      - run: cargo test --release -p typethai-core -p typethai-desktop

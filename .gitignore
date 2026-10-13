@@ -1,0 +1,13 @@
+node_modules/
+rust/target/
+*.ttm
+# training / evaluation data (not distributed; see DATA_LICENSES.md for how to obtain it)
+data/raw/
+data/splits/
+data/model/
+data/chat/
+data/fresh/
+data/parity/
+*-results.json
+*-results.txt
+shots/

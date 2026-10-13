@@ -1,0 +1,23 @@
+// TS-side latency on the same parity inputs, for comparison with rust tt-bench.
+import { readFileSync } from "node:fs";
+import { Detector } from "../src/detector.ts";
+import { Corrector } from "../src/corrector.ts";
+import { lineProbs, type FlipModel } from "../src/classifier.ts";
+import { loadBundle } from "./evallib.ts";
+const m0 = process.memoryUsage().rss;
+let t = performance.now();
+const { bundle } = loadBundle(); const cj = JSON.parse(readFileSync("data/model/corrector.json", "utf8"));
+const rules = new Detector({ ...bundle, params: { ...bundle.params, normalize: true, wNorm: cj.wNorm } });
+const learn = new Detector({ ...bundle, brands: [], params: { ...bundle.params, normalize: true } });
+const model = JSON.parse(readFileSync("data/model/flip-classifier.json", "utf8")) as FlipModel;
+const corr = new Corrector(bundle.thaiWords, JSON.parse(readFileSync("data/model/wordfreq.json", "utf8")), bundle.thai, cj);
+console.log(`load+build ${(performance.now() - t).toFixed(1)} ms, rss ${(process.memoryUsage().rss / 1024) | 0} kB (start ${(m0 / 1024) | 0})`);
+const lines = readFileSync("data/parity/lines.jsonl", "utf8").trim().split("\n").map((l) => JSON.parse(l).line as string);
+const cw = readFileSync("data/parity/corrector.jsonl", "utf8").trim().split("\n").map((l) => JSON.parse(l).w as string);
+const st = (name: string, v: number[]) => { const s = [...v].sort((a, b) => a - b); console.log(`${name}: n=${v.length} mean ${(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)} us p50 ${s[Math.floor((s.length - 1) * 0.5)].toFixed(2)} p99 ${s[Math.floor((s.length - 1) * 0.99)].toFixed(2)}`); };
+const time = (f: () => void) => { const t = performance.now(); f(); return (performance.now() - t) * 1000; };
+st("score_token (per word)", lines.flatMap((l) => l.split(/\s+/).filter(Boolean)).slice(0, 20000).map((w) => time(() => rules.scoreToken(w))));
+st("rules convert (per line)", lines.map((l) => time(() => rules.convert(l))));
+st("classifier detect+lineProbs (per line)", lines.map((l) => time(() => lineProbs(model, learn.convert(l).decisions))));
+st("corrector suggest (per word)", cw.map((w) => time(() => corr.suggest(w, 3))));
+console.log(`final rss ${(process.memoryUsage().rss / 1024) | 0} kB`);

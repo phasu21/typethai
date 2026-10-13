@@ -1,0 +1,89 @@
+# Release on tag v*: tests, macOS .app (arm64 + x86_64, ad-hoc signed) and a Windows zip, each with the model.
+# The model is not in git: it is a pinned asset of the `model-v1` release (sha256 checked).
+name: release
+on:
+  push: { tags: ["v*"] }
+  workflow_dispatch:
+permissions: { contents: write }
+env:
+  MODEL_TAG: model-v1
+  MODEL_SHA256: 5c279d33db620253eb5f8e906b7177aba5bf501d80d03c979a04132ceb065599
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: rust } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust }
+      - run: cargo test --release -p typethai-core -p typethai-desktop
+      - name: simulate with the release model
+        run: |
+          gh release download "$MODEL_TAG" -R "$GITHUB_REPOSITORY" -p typethai.ttm -D /tmp/m
+          echo "$MODEL_SHA256  /tmp/m/typethai.ttm" | sha256sum -c
+          out=$(printf 'l;ylfu <Tab>\n' | cargo run -q --release -p typethai-desktop -- --simulate --model /tmp/m/typethai.ttm | tail -1)
+          echo "$out"; test "$out" = "สวัสดี "
+  macos:
+    needs: test
+    runs-on: macos-14
+    strategy: { fail-fast: false, matrix: { target: [aarch64-apple-darwin, x86_64-apple-darwin] } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust, key: "${{ matrix.target }}" }
+      - name: model
+        run: |
+          gh release download "$MODEL_TAG" -R "$GITHUB_REPOSITORY" -p typethai.ttm -D model
+          echo "$MODEL_SHA256  model/typethai.ttm" | shasum -a 256 -c
+      - name: build + bundle
+        env: { MACOSX_DEPLOYMENT_TARGET: "12.0" }
+        run: |
+          (cd rust && cargo build --release -p typethai-desktop --target ${{ matrix.target }})
+          scripts/package-macos.sh ${{ matrix.target }} "${GITHUB_REF_NAME}" model/typethai.ttm dist
+      - name: smoke test (native arch only)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          rm -rf /tmp/chk && mkdir /tmp/chk && ditto -x -k dist/*.zip /tmp/chk
+          out=$(printf 'l;ylfu <Tab>\n' | /tmp/chk/typeThai.app/Contents/MacOS/typethai-desktop --simulate | tail -1)
+          echo "$out"; test "$out" = "สวัสดี "
+      - uses: actions/upload-artifact@v4
+        with: { name: "macos-${{ matrix.target }}", path: "dist/*.zip" }
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust }
+      - name: build
+        working-directory: rust
+        run: cargo build --release -p typethai-desktop
+      - name: package
+        shell: pwsh
+        run: |
+          gh release download $env:MODEL_TAG -R $env:GITHUB_REPOSITORY -p typethai.ttm -D model
+          if ((Get-FileHash model/typethai.ttm -Algorithm SHA256).Hash.ToLower() -ne $env:MODEL_SHA256) { throw "model sha256 mismatch" }
+          $d = "dist/typeThai-$env:GITHUB_REF_NAME-windows-x86_64"; New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item rust/target/release/typethai-desktop.exe, model/typethai.ttm, LICENSE, DATA_LICENSES.md, README.md $d
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: windows-x86_64, path: "dist/*.zip" }
+  release:
+    needs: [macos, windows]
+    if: always() && needs.macos.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: publish
+        run: |
+          tag="${GITHUB_REF_NAME}"; pre=""; case "$tag" in *-*) pre="--prerelease";; esac
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" $pre --title "typeThai $tag" --notes-file .github/release-notes.md
+          gh release download "$MODEL_TAG" -p typethai.ttm -D artifacts/model
+          gh release upload "$tag" --clobber artifacts/*/*.zip artifacts/model/typethai.ttm

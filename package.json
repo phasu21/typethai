@@ -1,0 +1,16 @@
+{
+  "name": "typethai",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "description": "Detect and fix Thai (Kedmanee) text typed on the English QWERTY layout",
+  "main": "src/index.ts",
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "prepare-data": "node scripts/prepare.ts",
+    "build-model": "node scripts/train.ts",
+    "bench": "node scripts/bench.ts",
+    "test": "node --test test/*.test.ts"
+  }
+}
