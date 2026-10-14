@@ -185,10 +185,11 @@ pub fn run(rx: Receiver<UiMsg>) {
                     } }
                     ui.reconcile(cx);
                     match tray.as_ref().and_then(|t| t.poll()) {
-                        Some(super::platform::tray::TrayCmd::TogglePause) => bridge::REQ_TOGGLE_PAUSE.store(true, std::sync::atomic::Ordering::SeqCst),
-                        Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
-                        None => {}
-                    }
+        Some(super::platform::tray::TrayCmd::TogglePause) => bridge::REQ_TOGGLE_PAUSE.store(true, std::sync::atomic::Ordering::SeqCst),
+        Some(super::platform::tray::TrayCmd::CheckUpdate) => { std::thread::spawn(|| { crate::platform::check_for_updates(); }); }
+        Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
+        None => {}
+    }
                     if stop || quit_at.is_some_and(|t| Instant::now() > t) { cx.quit(); }
                 });
                 if stop { break }

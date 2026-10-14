@@ -23,6 +23,21 @@ fn pos_map() -> &'static HashMap<char, Pos> {
         m
     })
 }
+fn pos_map_en() -> &'static HashMap<char, Pos> {
+    static M: OnceLock<HashMap<char, Pos>> = OnceLock::new();
+    M.get_or_init(|| {
+        let mut m = HashMap::new();
+        let en: Vec<char> = EN_UNSHIFTED.chars().collect();
+        let ens: Vec<char> = EN_SHIFTED.chars().collect();
+        for (i, k) in en.iter().enumerate() {
+            let r = ROWS.iter().position(|row| row.contains(*k)).unwrap();
+            let c = ROWS[r].chars().position(|x| x == *k).unwrap();
+            m.entry(*k).or_insert(Pos { r: r as i32, c: c as i32, shift: false });
+            if let Some(sk) = ens.get(i) { m.entry(*sk).or_insert(Pos { r: r as i32, c: c as i32, shift: true }); }
+        }
+        m
+    })
+}
 fn adjacent(a: Pos, b: Pos) -> bool {
     if a.r == b.r { return (a.c - b.c).abs() == 1 }
     if b.r == a.r - 1 { return b.c == a.c || b.c == a.c + 1 }
@@ -34,9 +49,16 @@ pub struct Costs { pub shift: f64, pub adj: f64, pub adj_shift: f64, pub sub: f6
 pub const DEFAULT_COSTS: Costs = Costs { shift: 0.3, adj: 0.5, adj_shift: 0.8, sub: 1.0, dup: 0.4, ins_adj: 0.7, ins: 1.0, del: 0.8, trans: 0.5 };
 fn sub_cost(a: char, b: char, k: &Costs) -> f64 {
     if a == b { return 0.0 }
-    let (p, q) = match (pos_map().get(&a), pos_map().get(&b)) { (Some(p), Some(q)) => (*p, *q), _ => return k.sub };
-    if p.r == q.r && p.c == q.c { return k.shift }
-    if adjacent(p, q) { return if p.shift == q.shift { k.adj } else { k.adj_shift } }
+    // Thai (Kedmanee) key layout first, then the plain QWERTY layout for Latin text.
+    let maps = [pos_map(), pos_map_en()];
+    for m in maps {
+        if let (Some(p), Some(q)) = (m.get(&a), m.get(&b)) {
+            if p.r == q.r && p.c == q.c { return k.shift }
+            if adjacent(*p, *q) { return if p.shift == q.shift { k.adj } else { k.adj_shift } }
+            // same known layout but not adjacent: explicit substitution cost (no further map needed)
+            return k.sub;
+        }
+    }
     k.sub
 }
 /// Weighted Damerau-Levenshtein: cost of turning intended `w` into observed `t`.
@@ -47,9 +69,10 @@ pub fn key_distance(t: &str, w: &str, k: &Costs) -> f64 {
         let x = a[i - 1];
         let prev = get(&a, i as isize - 2).or_else(|| get(&b, j as isize - 1));
         if prev == Some(x) { return k.dup }
-        if let Some(px) = pos_map().get(&x) {
+        let m = if pos_map().contains_key(&x) { pos_map() } else { pos_map_en() };
+        if let Some(px) = m.get(&x) {
             for c in [get(&b, j as isize - 1), get(&b, j as isize)].into_iter().flatten() {
-                if let Some(q) = pos_map().get(&c) { if adjacent(*px, *q) { return k.ins_adj } }
+                if let Some(q) = m.get(&c) { if adjacent(*px, *q) { return k.ins_adj } }
             }
         }
         k.ins

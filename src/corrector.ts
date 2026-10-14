@@ -15,6 +15,18 @@ const POS = new Map<string, Pos>();
     if (!POS.has(ths[i])) POS.set(ths[i], { r, c, shift: true });
   });
 }
+// Plain QWERTY layout positions for Latin text (English typo suggestions).
+const POS_EN = new Map<string, Pos>();
+{
+  const en = [...EN_UNSHIFTED], ens = [...EN_SHIFTED];
+  en.forEach((k, i) => {
+    const r = ROWS.findIndex((row) => row.includes(k)), c = ROWS[r].indexOf(k);
+    if (!POS_EN.has(k)) POS_EN.set(k, { r, c, shift: false });
+    const sk = ens[i];
+    if (sk !== undefined && !POS_EN.has(sk)) POS_EN.set(sk, { r, c, shift: true });
+  });
+}
+
 export function keyPos(ch: string): Pos | undefined { return POS.get(ch); }
 /** Physical neighbours on a staggered QWERTY grid (same row +-1; row above c, c+1; row below c-1, c). */
 export function adjacent(a: Pos, b: Pos): boolean {
@@ -42,10 +54,15 @@ export const DEFAULT_COSTS: Costs = { shift: 0.3, adj: 0.5, adjShift: 0.8, sub: 
 
 function subCost(a: string, b: string, k: Costs): number {
   if (a === b) return 0;
-  const p = POS.get(a), q = POS.get(b);
-  if (!p || !q) return k.sub;
-  if (p.r === q.r && p.c === q.c) return k.shift;
-  if (adjacent(p, q)) return p.shift === q.shift ? k.adj : k.adjShift;
+  const maps = [POS, POS_EN];
+  for (const m of maps) {
+    const p = m.get(a), q = m.get(b);
+    if (p && q) {
+      if (p.r === q.r && p.c === q.c) return k.shift;
+      if (adjacent(p, q)) return p.shift === q.shift ? k.adj : k.adjShift;
+      return k.sub;
+    }
+  }
   return k.sub;
 }
 /** Weighted Damerau-Levenshtein: cost of turning intended word `w` into observed `t`. */
@@ -55,8 +72,9 @@ export function keyDistance(t: string, w: string, k: Costs = DEFAULT_COSTS): num
   const insCost = (i: number, j: number) => { // extra char a[i-1] in t; context b[j-1] (prev intended) / a[i-2]
     const x = a[i - 1], prev = a[i - 2] ?? b[j - 1];
     if (prev === x) return k.dup;
-    const px = POS.get(x);
-    const nb = [b[j - 1], b[j]].filter(Boolean).map((c) => POS.get(c!));
+    const m = POS.has(x) ? POS : (POS_EN.has(x) ? POS_EN : POS);
+    const px = m.get(x);
+    const nb = [b[j - 1], b[j]].filter(Boolean).map((c) => m.get(c!));
     if (px && nb.some((q) => q && adjacent(px, q))) return k.insAdj;
     return k.ins;
   };

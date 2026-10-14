@@ -249,7 +249,10 @@ impl Engine {
         if !self.opts.live { return }
         if self.live_confident() {
             self.live_streak += 1;
-            if self.live_streak >= self.opts.live_stable { self.show_live(0, acts); }
+            // Reverse (Thai layout -> English): confident means >= rev_live (very high), so show immediately
+            // instead of waiting for `live_stable` consecutive keystrokes.
+            let need = if self.thai_active { 1 } else { self.opts.live_stable };
+            if self.live_streak >= need { self.show_live(0, acts); }
         } else { self.live_streak = 0; if self.live_visible() { self.show(vec![], acts); } }
     }
     /// After an edit that left the buffer (possibly) non-empty: re-offer what is still pending, without re-stabilising.
