@@ -53,7 +53,7 @@ const kAXValueCGSizeType: u32 = 2;
 const kAXValueCGRectType: u32 = 3;
 const kAXValueCFRangeType: u32 = 4;
 
-struct State { app: App, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, last_move: Option<std::time::Instant>, last_src: &'static str }
+struct State { app: App, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static TX: RefCell<Option<Sender<UiMsg>>> = const { RefCell::new(None) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -167,16 +167,28 @@ unsafe fn focused_element(app: Option<AXUIElementRef>) -> Option<CFType> {
 }
 unsafe fn ax_point(v: &CFType) -> Option<CGPoint> { let mut pt = CGPoint::new(0.0, 0.0); if AXValueGetValue(v.as_CFTypeRef(), kAXValueCGPointType, &mut pt as *mut _ as *mut c_void) { Some(pt) } else { None } }
 unsafe fn ax_size(v: &CFType) -> Option<core_graphics::geometry::CGSize> { let mut s = core_graphics::geometry::CGSize::new(0.0, 0.0); if AXValueGetValue(v.as_CFTypeRef(), kAXValueCGSizeType, &mut s as *mut _ as *mut c_void) { Some(s) } else { None } }
-/// Caret rect from the selected range. Empty range: its own bounds if non-empty, else the char before (right edge),
-/// else the char after (left edge). Everything AX returns is already in global top-left points (primary screen origin).
+/// Caret rect from the selected range. See `placement::caret_top` for the one-line AppKit correction.
 unsafe fn caret_rect(fe: AXUIElementRef) -> Option<(Rect, &'static str)> {
     let rv = ax_attr(fe, "AXSelectedTextRange")?;
     let mut range = CFRange { location: 0, length: 0 };
     if !AXValueGetValue(rv.as_CFTypeRef(), kAXValueCFRangeType, &mut range as *mut _ as *mut c_void) { return None }
-    if range.length > 0 { if let Some(r) = bounds_for(fe, range.location + range.length - 1, 1) { return Some((Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "range-end")) } }
-    if let Some(r) = bounds_for(fe, range.location, 0) { return Some((Rect::new(r.origin.x, r.origin.y, 1.0, r.size.height), "range-0")) }
-    if range.location > 0 { if let Some(r) = bounds_for(fe, range.location - 1, 1) { return Some((Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "prev-char")) } }
-    bounds_for(fe, range.location, 1).map(|r| (Rect::new(r.origin.x, r.origin.y, 1.0, r.size.height), "next-char"))
+    if range.length > 0 {
+        if let Some(r) = bounds_for(fe, range.location + range.length - 1, 1) {
+            return Some((Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "range-end"));
+        }
+    }
+    let zero = bounds_for(fe, range.location, 0);
+    let prev = if range.location > 0 { bounds_for(fe, range.location - 1, 1) } else { None };
+    let next = bounds_for(fe, range.location, 1);
+    let glyphs: Vec<f64> = [prev, next].into_iter().flatten().map(|r| r.origin.y).collect();
+    if let Some(z) = zero {
+        let y = crate::placement::caret_top(z.origin.y, &glyphs);
+        let h = [prev, next].into_iter().flatten().find(|r| (r.origin.y - y).abs() < 0.5).map(|r| r.size.height).unwrap_or(z.size.height);
+        let how = if (y - z.origin.y).abs() < 0.5 { "range-0" } else { "glyph-line" };
+        return Some((Rect::new(z.origin.x, y, 1.0, h), how));
+    }
+    prev.map(|r| (Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "prev-char"))
+        .or_else(|| next.map(|r| (Rect::new(r.origin.x, r.origin.y, 1.0, r.size.height), "next-char")))
 }
 /// Caret rect + focused element frame + mouse (global top-left points), plus a description of what was found.
 pub fn caret_anchor() -> (Anchor, String) {
@@ -192,7 +204,11 @@ pub fn caret_anchor() -> (Anchor, String) {
                 a.field = Some(Rect::new(p.x, p.y, sz.width, sz.height));
             }
             how = "no-caret-bounds";
-            if let Some((c, h)) = caret_rect(fe) {
+            if let Some((mut c, mut h)) = caret_rect(fe) {
+                // No neighboring glyph (empty field): AppKit's empty range still sits one line above the frame.
+                if let Some(f) = a.field {
+                    if c.bottom() <= f.y + 1.0 && c.y + c.h < f.bottom() { c = Rect::new(c.x, c.y + c.h, c.w, c.h); h = "above-field"; }
+                }
                 let mons = crate::ui::native::monitors_any_thread();
                 if crate::placement::plausible_caret(c, a.field, &mons) { a.caret = Some(c); how = h } else { how = "caret-implausible" }
             }
@@ -213,6 +229,14 @@ fn mouse_location() -> Option<(f64, f64)> {
     let s = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?; let e = CGEvent::new(s).ok()?; let p = e.location(); Some((p.x, p.y))
 }
 fn send(m: UiMsg) { TX.with(|t| if let Some(t) = t.borrow().as_ref() { let _ = t.send(m); }) }
+/// Schedule a few caret re-reads. The event tap runs before the focused app lays out the new glyph, so the first
+/// AX rect is still the previous caret; later samples land on it. Does not restart a follow that's already armed.
+fn arm_caret_follow(st: &mut State) {
+    if st.move_due.is_none() {
+        st.move_left = 3;
+        st.move_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(30));
+    }
+}
 fn run_actions(_st: &mut State, acts: Vec<Action>) {
     for a in acts { match a {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
@@ -220,8 +244,8 @@ fn run_actions(_st: &mut State, acts: Vec<Action>) {
         Action::Select(i) => send(UiMsg::Select(i)),
         Action::ShowBubble(items) => {
             send(UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), anchor: unsafe { anchor() } });
-            // the tap sees the key before the app moves its caret: re-check shortly after
-            _st.move_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(40));
+            // the tap sees the key before the app moves its caret
+            arm_caret_follow(_st);
         }
         Action::HideBubble => { bridge::set_geom(None); send(UiMsg::Hide) }
     } }
@@ -273,7 +297,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             if was != st.app.engine.paused { send(UiMsg::Paused(st.app.engine.paused)) }
             run_actions(st, o.actions); st.app.maybe_save();
             // caret moves with every keystroke: follow it while the bubble is up (after the app handled the key)
-            if st.app.engine.bubble_visible() && st.move_due.is_none() { st.move_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(40)); }
+            if st.app.engine.bubble_visible() { arm_caret_follow(st); }
             o.swallow
         }
         _ => false,
@@ -285,10 +309,14 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
     with(|st| {
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
-        // throttled caret follow: at most one AX lookup per 60 ms while the bubble is shown
-        if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 60) {
+        // a few AX reads after each key: the first is often still the pre-keystroke caret
+        if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
             st.move_due = None; st.last_move = Some(now);
-            if st.app.engine.bubble_visible() { send(UiMsg::Move(unsafe { anchor() })) }
+            if st.app.engine.bubble_visible() {
+                send(UiMsg::Move(unsafe { anchor() }));
+                if st.move_left > 1 { st.move_left -= 1; st.move_due = Some(now + std::time::Duration::from_millis(70)); }
+                else { st.move_left = 0; }
+            } else { st.move_left = 0; }
         }
         if bridge::take(&bridge::REQ_QUIT) { st.app.save(); send(UiMsg::Stopped); CFRunLoop::get_current().stop(); }
     });
@@ -307,7 +335,7 @@ fn capture_thread(app: App, tx: Sender<UiMsg>) {
     let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
     let rl = CFRunLoop::get_current();
     rl.add_source(&src, unsafe { kCFRunLoopCommonModes }); tap.enable();
-    ST.with(|s| *s.borrow_mut() = Some(State { app, last_pid: -1, tap_port: port, move_due: None, last_move: None, last_src: "" }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "" }));
     let timer = CFRunLoopTimer::new(core_foundation::date::CFDate::now().abs_time() + 0.2, 0.025, 0, 0, timer_cb, std::ptr::null_mut());
     rl.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
     CFRunLoop::run_current();

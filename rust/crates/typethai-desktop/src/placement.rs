@@ -67,6 +67,15 @@ impl Source { pub fn name(self) -> &'static str { match self { Source::Caret => 
 /// AppKit (bottom-left origin, y up, primary screen at the origin) -> global top-left units. `primary_h` is the primary
 /// screen's height. Accessibility (AX) rects are already top-left global and need no conversion.
 pub fn ns_to_global(r: Rect, primary_h: f64) -> Rect { Rect::new(r.x, primary_h - (r.y + r.h), r.w, r.h) }
+
+/// Caret top from a zero-length `AXBoundsForRange` (`zero_y`) and the neighboring glyphs' tops.
+///
+/// AppKit reports the empty range one line above the glyphs, so the nearest glyph that sits lower is the line.
+/// A glyph above the empty range (the newline at the end of the previous line) is ignored. WebKit reports the
+/// empty range on the glyphs already, and nothing is lower, so `zero_y` is kept.
+pub fn caret_top(zero_y: f64, glyph_ys: &[f64]) -> f64 {
+    glyph_ys.iter().copied().filter(|y| *y > zero_y + 1.0).reduce(f64::min).unwrap_or(zero_y)
+}
 /// Inverse of `ns_to_global` (for NSWindow setFrame:).
 pub fn global_to_ns(r: Rect, primary_h: f64) -> Rect { Rect::new(r.x, primary_h - r.y - r.h, r.w, r.h) }
 
@@ -116,13 +125,9 @@ pub fn place(anchor: &Anchor, size: (f64, f64), monitors: &[Monitor], o: &Opts) 
     let m = monitors[mi]; let s = m.size_scale.max(0.01); let v = m.visible;
     let (w, h) = (size.0 * s, size.1 * s); let gap = o.gap * s; let margin = o.margin * s;
     let line = if source == Source::Mouse { Rect::new(line.x, line.y, 0.0, o.mouse_h * s) } else { line };
-    // vertical extent to avoid: the caret line, widened to the field if the field is a single-line-ish box around it
-    let (mut top, mut bottom) = (line.y, line.bottom());
-    if source == Source::Caret {
-        if let Some(f) = anchor.field.filter(|f| f.is_valid() && f.h <= o.max_field_h * s && f.y <= line.bottom() && f.bottom() >= line.y) {
-            top = top.min(f.y); bottom = bottom.max(f.bottom());
-        }
-    }
+    // Sit on the caret line itself. A short text field is taller than the glyphs; stretching to the field
+    // frame drops the bubble below the caret.
+    let (top, bottom) = (line.y, line.bottom());
     let below_y = bottom + gap; let above_y = top - gap - h;
     let fits_below = below_y + h <= v.bottom() - margin; let fits_above = above_y >= v.y + margin;
     let in_lower_part = cy > v.y + o.lower_fraction * v.h;
@@ -153,10 +158,16 @@ mod tests {
         let r = p(caret(400.0, 200.0), &[MAC]);
         assert!(!r.above); assert_eq!(r.rect.y, 200.0 + 18.0 + 6.0); assert_eq!(r.rect.x, 383.0); assert_eq!(r.source, Source::Caret);
     }
-    #[test] fn below_the_field_not_just_the_caret() {
+    #[test] fn short_field_still_uses_the_caret_line() {
+        // a 36pt field around an 18pt caret must not push the bubble down to the field's bottom edge
         let a = Anchor { caret: Some(Rect::new(400.0, 205.0, 2.0, 18.0)), field: Some(Rect::new(380.0, 196.0, 500.0, 36.0)), mouse: None };
-        let r = p(a, &[MAC]); assert!(!r.above); assert_eq!(r.rect.y, 232.0 + 6.0);
-        assert!(!r.rect.intersects(&a.field.unwrap()));
+        let r = p(a, &[MAC]); assert!(!r.above); assert_eq!(r.rect.y, 205.0 + 18.0 + 6.0);
+    }
+    #[test] fn caret_top_uses_the_glyph_line_when_the_empty_range_is_high() {
+        assert_eq!(caret_top(212.0, &[228.8]), 228.8); // AppKit: empty range one line above the character
+        assert_eq!(caret_top(212.0, &[195.0, 228.8]), 228.8); // newline on the previous line is ignored
+        assert_eq!(caret_top(222.0, &[222.0]), 222.0); // WebKit: glyph and caret agree
+        assert_eq!(caret_top(222.0, &[]), 222.0);
     }
     #[test] fn tall_field_uses_caret_line() {
         let a = Anchor { caret: Some(Rect::new(400.0, 300.0, 2.0, 18.0)), field: Some(Rect::new(0.0, 25.0, 1440.0, 875.0)), mouse: None };
@@ -169,7 +180,7 @@ mod tests {
     #[test] fn chat_box_in_lower_part_prefers_above_even_with_room() {
         // caret at y=700 (> 72% of the visible height) inside a bottom chat field: room below exists, still go above
         let a = Anchor { caret: Some(Rect::new(300.0, 700.0, 2.0, 18.0)), field: Some(Rect::new(200.0, 690.0, 800.0, 40.0)), mouse: None };
-        let r = p(a, &[MAC]); assert!(r.above); assert_eq!(r.rect.bottom(), 690.0 - 6.0);
+        let r = p(a, &[MAC]); assert!(r.above); assert_eq!(r.rect.bottom(), 700.0 - 6.0);
     }
     #[test] fn top_edge_below_menu_bar() {
         let r = p(caret(400.0, 26.0), &[MAC]); assert!(!r.above); assert!(r.rect.y >= 25.0 + 4.0);

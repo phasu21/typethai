@@ -18,8 +18,8 @@ unless you press a key.
   conversion for the word you are typing or the one you just finished. **Tab** applies it, and **⌃⌥Z** undoes it.
 - **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose a row, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply row 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
-- **Mid-word suggestions.** The bubble can appear while you are still typing (after about 4 keys) once the word is
-  clearly Thai.
+- **Mid-word suggestions.** The bubble appears while you are still typing, from about the second character, once
+  the word is clearly Thai. You do not have to press Space first.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
 - **Caret anchoring.** The bubble sits right under the text caret (via Accessibility / UI Automation). It flips above

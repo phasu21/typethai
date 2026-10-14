@@ -81,8 +81,9 @@ impl Committed {
 
 pub struct Options {
     pub auto_convert: bool, pub switch_input: bool, pub suggest_band: f64, pub typo_suggestions: bool, pub context_words: usize,
-    /// Live (mid-word) bubble: show when the current prefix's flip probability > `live_show`, the prefix has at least
-    /// `live_min_len` keys, and that has held for `live_stable` consecutive keystrokes (anti-flicker).
+    /// Live (mid-word) bubble: show when the current prefix's flip probability > `live_show` and the prefix has at
+    /// least `live_min_len` keys. `live_show` matches the post-space suggestion band, and `live_stable` is 1, so the
+    /// bubble appears on the keystroke that crosses the band. Space is not required.
     pub live: bool, pub live_show: f64, pub live_min_len: usize, pub live_stable: usize,
     /// Reverse direction (English typed on the Thai layout): auto-convert at a boundary above `rev_auto`, live bubble
     /// above `rev_live` (calibrated on dev, see README v11).
@@ -92,9 +93,10 @@ pub struct Options {
     pub rev_prev: f64,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
-    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 2, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV } } }
-/// Default live-show threshold (tuned on dev with `--eval-live`, see README).
-pub const LIVE_SHOW: f64 = 0.9;
+    live: true, live_show: LIVE_SHOW, live_min_len: 2, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV } } }
+/// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
+/// is offered while it is still being typed.
+pub const LIVE_SHOW: f64 = 0.5;
 /// Reverse auto-convert threshold: false flips on dev Thai (wiki, chat, typo'd) <= 0.1%.
 pub const REV_AUTO: f64 = 0.98;
 /// Reverse live-bubble threshold.
@@ -589,6 +591,20 @@ mod tests {
         let o = e.on_key(Key::Tab); assert!(o.swallow);
         assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
         assert!(o.actions.contains(&Action::SwitchInput(InputLang::Thai))); assert!(!e.bubble_visible()); assert_eq!(e.buffer(), "");
+    }
+    #[test] fn suggestion_shows_before_space() {
+        let Some(mut e) = engine() else { return };
+        let mut first = None;
+        for (i, c) in "l;ylfu".chars().enumerate() {
+            let o = e.on_key(Key::Char(c));
+            if first.is_none() && bubble_items(&o).is_some() { first = Some(i + 1); }
+        }
+        let k = first.expect("bubble before space");
+        assert!(k < 6, "showed on key {k}; space would be the next key");
+        assert!(e.live_visible());
+        e.reset();
+        let o = typ(&mut e, ";b");
+        assert!(bubble_items(o.last().unwrap()).is_some(), "a 2-character word is offered on its last letter");
     }
     #[test] fn live_bubble_stays_off_for_english_and_hides_when_confidence_drops() {
         let Some(mut e) = engine() else { return };
