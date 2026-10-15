@@ -1,6 +1,7 @@
 //! User preferences: words typeThai should not translate, and when word completions show.
 //! Stored beside `personal.json` so a learning reset does not clear them, and so `personal.json`
 //! stays compatible with the TypeScript app.
+use crate::bridge::BubbleLayout;
 use crate::engine::{AcceptKeys, Action, CompleteMode, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS};
 use crate::rewrite;
 use std::collections::BTreeSet;
@@ -20,13 +21,14 @@ pub enum SettingsCmd {
     SetLearnWords(bool),
     SetAccept(AcceptKeys),
     SetPickCtrl(bool),
+    SetBubbleLayout(BubbleLayout),
     ForgetWords,
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
     SetRewrite(rewrite::Config),
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetRewrite(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_))
     }
 }
 
@@ -40,6 +42,7 @@ pub struct SettingsSnap {
     pub learn_words: bool,
     pub accept: AcceptKeys,
     pub pick_ctrl: bool,
+    pub bubble: BubbleLayout,
     /// Distinct words in the word memory.
     pub words_learned: usize,
     pub rewrite: rewrite::Config,
@@ -57,14 +60,16 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub rewrite: rewrite::Config }
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, rewrite: rewrite::Config::default() } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default() } }
 }
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
 /// `prefs.json` spelling of the accept keys.
 const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "tab"), (AcceptKeys::TabOrSpace, "tab_or_space")];
+/// `prefs.json` spelling of the bubble layout.
+const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "horizontal"), (BubbleLayout::Vertical, "vertical")];
 impl Prefs {
     pub fn load(path: &Path) -> Prefs {
         let Ok(text) = std::fs::read_to_string(path) else { return Prefs::default() };
@@ -79,7 +84,8 @@ impl Prefs {
     pub fn to_json(&self) -> String {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "rewrite": self.rewrite.to_json() }).to_string()
+        let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "bubble_layout": bubble, "rewrite": self.rewrite.to_json() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -88,7 +94,7 @@ impl Prefs {
     }
 }
 /// None when the file is not JSON or `never` is not a list; an unknown or missing `completion`, `complete_idle_ms`,
-/// `learn_words`, `accept_with` or `pick_with_ctrl` is the default.
+/// `learn_words`, `accept_with`, `pick_with_ctrl` or `bubble_layout` is the default.
 fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let never = match v.get("never") {
@@ -102,7 +108,9 @@ fn parse(text: &str) -> Option<Prefs> {
     let a = v.get("accept_with").and_then(|a| a.as_str());
     let accept = ACCEPT.iter().find(|(_, s)| Some(*s) == a).map_or(AcceptKeys::default(), |(k, _)| *k);
     let pick_ctrl = v.get("pick_with_ctrl").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, accept, pick_ctrl, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
+    let b = v.get("bubble_layout").and_then(|b| b.as_str());
+    let bubble = BUBBLE.iter().find(|(_, s)| Some(*s) == b).map_or(BubbleLayout::default(), |(l, _)| *l);
+    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, accept, pick_ctrl, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -215,6 +223,27 @@ mod tests {
         assert!(!Prefs::load(&path).pick_ctrl, "file from before the setting");
         std::fs::write(&path, r#"{"never":[],"pick_with_ctrl":"yes"}"#).unwrap();
         assert!(!Prefs::load(&path).pick_ctrl, "not a boolean");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn bubble_layout_round_trips_and_an_old_file_gets_horizontal() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let rows = Prefs { bubble: BubbleLayout::Vertical, ..Prefs::default() };
+        rows.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["bubble_layout"], "vertical");
+        assert_eq!(Prefs::load(&path), rows);
+        Prefs::default().save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["bubble_layout"], "horizontal");
+        std::fs::write(&path, r#"{"never":["ok"],"completion":"pause","accept_with":"tab","pick_with_ctrl":true}"#).unwrap();
+        assert_eq!(Prefs::load(&path).bubble, BubbleLayout::Horizontal, "file from before the setting");
+        std::fs::write(&path, r#"{"never":["ok"],"bubble_layout":"vertical"}"#).unwrap();
+        assert_eq!(Prefs::load(&path).bubble, BubbleLayout::Vertical, "a file that only sets the layout");
+        std::fs::write(&path, r#"{"never":[],"bubble_layout":"diagonal"}"#).unwrap();
+        assert_eq!(Prefs::load(&path).bubble, BubbleLayout::Horizontal, "a value Settings never offers");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]

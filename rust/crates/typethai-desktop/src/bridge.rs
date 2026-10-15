@@ -20,6 +20,11 @@ pub enum UiMsg {
     Settings(SettingsSnap),
 }
 
+/// How the bubble lays out its options: one horizontal strip of buttons, or stacked rows. As a setting it is what the
+/// user asked for; a bubble whose options do not suit a strip is laid out vertically anyway (see `layout`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BubbleLayout { #[default] Horizontal, Vertical }
+
 /// Bubble layout constants (logical px) shared by the view and the click hit-test.
 pub const PAD: f64 = 6.0;
 pub const ROW_H: f64 = 30.0;
