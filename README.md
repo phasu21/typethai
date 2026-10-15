@@ -106,7 +106,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b"] [--screenshot PNG]` | Show the bubble with sample rows (no key capture) |

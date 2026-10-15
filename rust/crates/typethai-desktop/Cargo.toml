@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 serde_json = "1"
+unicode-segmentation = "1"
 typethai-core = { path = "../typethai-core" }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]

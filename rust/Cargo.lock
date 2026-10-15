@@ -7340,6 +7340,7 @@ dependencies = [
  "serde_json",
  "tray-icon",
  "typethai-core",
+ "unicode-segmentation",
  "ureq",
  "windows 0.62.2",
 ]

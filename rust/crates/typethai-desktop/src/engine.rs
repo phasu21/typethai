@@ -1,6 +1,7 @@
 //! Platform-independent typing engine: per-word key buffer -> decisions -> actions for the platform layer.
 //! The platform layer feeds `Key`s (already mapped to the US-QWERTY character the key would produce), and executes the
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
+use crate::backspace::{self, DeleteUnit};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
@@ -49,6 +50,12 @@ pub enum Key {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputLang { Thai, Latin }
 pub fn lang_of(s: &str) -> InputLang { if s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) { InputLang::Thai } else { InputLang::Latin } }
+/// The input source fitting inserted text; None when it has no letters of either script (only a space or punctuation
+/// changed), and the current source stays.
+fn layout_of(insert: &str) -> Option<InputLang> {
+    let l = lang_of(insert);
+    (l == InputLang::Thai || insert.chars().any(|c| c.is_ascii_alphabetic())).then_some(l)
+}
 
 /// Bubble selection: index into the visible items, wrapping. Pure state machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,7 +77,8 @@ enum TabChord {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Delete `delete` chars before the caret (backspaces), then type `insert`; then re-send the swallowed boundary key.
+    /// Send `delete` Backspaces (counted in the engine's `delete_unit`), then type `insert`; then re-send the swallowed
+    /// boundary key.
     Replace { delete: usize, insert: String, then: Option<Boundary> },
     ShowBubble(Vec<BubbleItem>),
     HideBubble,
@@ -221,11 +229,13 @@ pub struct Engine {
     last_key: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
     comp_muted: bool,
+    /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
+    pub delete_unit: DeleteUnit,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default() }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -242,6 +252,11 @@ impl Engine {
     pub fn set_thai_active(&mut self, on: bool) { if on != self.thai_active { self.thai_active = on; self.word.clear(); self.live_streak = 0; } }
     /// What `typed` keys put on screen in the current mode, and what a conversion would replace it with.
     fn screen_of(&self, typed: &str) -> String { if self.thai_active { en_to_th(typed) } else { typed.to_string() } }
+    /// Replace `old`, the text right before the caret, with `new`; what they share stays on screen.
+    fn replace(&self, old: &str, new: &str, then: Option<Boundary>) -> Action {
+        let (delete, insert) = backspace::edit(old, new, self.delete_unit);
+        Action::Replace { delete, insert: insert.to_string(), then }
+    }
     /// Reverse line probabilities for the reverse-mode tail of the line plus `last` (None without a model).
     fn rev_line_probs_with(&self, last: &str) -> Option<Vec<f64>> {
         let r = self.rev.as_ref()?;
@@ -344,7 +359,7 @@ impl Engine {
         // after inserting text, switch the OS input source to match it (Thai after a conversion, Latin after an undo)
         if self.opts.switch_input {
             if let Some(Action::Replace { insert, .. }) = o.actions.iter().rev().find(|a| matches!(a, Action::Replace { .. })) {
-                let l = lang_of(insert); o.actions.push(Action::SwitchInput(l));
+                if let Some(l) = layout_of(insert) { o.actions.push(Action::SwitchInput(l)); }
             }
         }
         o
@@ -420,7 +435,7 @@ impl Engine {
         let mut o;
         if let Some(Action::Replace { insert, then, .. }) = acts.iter_mut().rev().find(|a| matches!(a, Action::Replace { .. })) {
             // the key arrives in the layout the replacement switches to
-            if self.opts.switch_input { self.set_thai_active(lang_of(insert) == InputLang::Thai) }
+            if let Some(l) = layout_of(insert).filter(|_| self.opts.switch_input) { self.set_thai_active(l == InputLang::Thai) }
             o = self.on_key_inner(k.clone());
             if !o.swallow {
                 match k { Key::Boundary(b) => *then = Some(b), Key::Char(c) => insert.push_str(&self.screen_of(&c.to_string())), _ => unreachable!() }
@@ -710,7 +725,7 @@ impl Engine {
         if self.opts.auto_convert && p > self.personal.base.threshold && d.valid {
             // legacy (--auto-convert): replace at the boundary
             swallow = true; converted = Some(thai.clone());
-            acts.push(Action::Replace { delete: typed.chars().count(), insert: thai.clone(), then: Some(b) });
+            acts.push(self.replace(&typed, &thai, Some(b)));
             let mut items = vec![BubbleItem { label: typed.clone(), kind: BubbleKind::UndoConversion }];
             items.extend(self.typo_items(&thai));
             self.show(items, &mut acts);
@@ -753,10 +768,10 @@ impl Engine {
                 // legacy (--auto-convert): flip at the boundary
                 swallow = true; converted = Some(typed.clone()); with_prev = k;
                 let start = self.line.len() - k;
-                let (mut del, mut ins, mut was) = (thai.chars().count(), String::new(), String::new());
-                for c in &self.line[start..] { del += c.orig.chars().count() + c.after().chars().count(); ins += &c.typed; ins += &c.after(); was += &c.orig; was += &c.after(); }
+                let (mut ins, mut was) = (String::new(), String::new());
+                for c in &self.line[start..] { ins += &c.typed; ins += &c.after(); was += &c.orig; was += &c.after(); }
                 for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
-                acts.push(Action::Replace { delete: del, insert: format!("{ins}{typed}"), then: Some(b) });
+                acts.push(self.replace(&format!("{was}{thai}"), &format!("{ins}{typed}"), Some(b)));
                 self.show(vec![BubbleItem { label: format!("{was}{thai}"), kind: BubbleKind::UndoConversion }], &mut acts);
             } else {
                 let start = self.line.len() - k;
@@ -779,16 +794,16 @@ impl Engine {
     fn flip_prev(&mut self, k: usize, acts: &mut Vec<Action>) {
         if !self.word.is_empty() || self.line.len() < k + 1 { return }
         let start = self.line.len() - 1 - k;
-        let (mut del, mut ins) = (0usize, String::new());
-        for c in &self.line[start..] { if c.converted.is_some() || !c.rev { return } del += c.orig.chars().count() + c.after().chars().count(); ins += &c.typed; ins += &c.after(); }
-        acts.push(Action::Replace { delete: del, insert: ins, then: None });
+        let (mut old, mut ins) = (String::new(), String::new());
+        for c in &self.line[start..] { if c.converted.is_some() || !c.rev { return } old += &c.orig; old += &c.after(); ins += &c.typed; ins += &c.after(); }
+        acts.push(self.replace(&old, &ins, None));
         for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
         if let Some(c) = self.line.last_mut() { c.with_prev = k; }
     }
-    /// Length (chars) of the last committed word as it is on screen, plus its boundary.
-    fn last_on_screen(&self) -> Option<(usize, &Committed)> {
+    /// The last committed word as it is on screen, plus its boundary.
+    fn last_on_screen(&self) -> Option<(String, &Committed)> {
         let c = self.line.last()?; if !self.word.is_empty() { return None }
-        Some((c.converted.as_deref().unwrap_or(&c.orig).chars().count() + c.after().chars().count(), c))
+        Some((format!("{}{}", c.shown(), c.after()), c))
     }
     /// The buffer `typed` was just replaced mid-word by `converted`: record it with no boundary, so the next Tab /
     /// Undo / Guess measure from it instead of from the word before it.
@@ -851,10 +866,10 @@ impl Engine {
         if self.line[start..].iter().any(|c| c.converted.is_some()) { return }
         let rev = self.thai_active;
         if !rev { let a = typed.clone().unwrap_or_else(|| self.line[self.line.len() - 1].typed.clone()); self.feedback(&a, Feedback::Retype); } // forward only
-        let (mut del, mut ins) = (0usize, String::new());
-        for (c, t) in self.line[start..].iter().zip(&targets) { del += c.orig.chars().count() + c.after().chars().count(); ins += t; ins += &c.after(); }
-        if let Some(t) = &typed { del += self.screen_of(t).chars().count(); ins += &targets[k]; }
-        acts.push(Action::Replace { delete: del, insert: ins, then: None });
+        let (mut old, mut ins) = (String::new(), String::new());
+        for (c, t) in self.line[start..].iter().zip(&targets) { old += &c.orig; old += &c.after(); ins += t; ins += &c.after(); }
+        if let Some(t) = &typed { old += &self.screen_of(t); ins += &targets[k]; }
+        acts.push(self.replace(&old, &ins, None));
         for (c, t) in self.line[start..].iter_mut().zip(&targets) { c.converted = Some(t.clone()); }
         if let Some(t) = typed { self.commit_glued(t, targets[k].clone(), k); }
         else if let Some(c) = self.line.last_mut() { c.with_prev = k - 1; }
@@ -864,16 +879,16 @@ impl Engine {
         let mut acts = vec![];
         match h {
             Hotkey::Undo => {
-                let Some((n, c)) = self.last_on_screen() else { return Outcome { swallow: true, actions: acts } };
+                let Some((shown, c)) = self.last_on_screen() else { return Outcome { swallow: true, actions: acts } };
                 let c = c.clone(); if c.converted.is_none() { return Outcome { swallow: true, actions: acts } }
                 if c.with_prev > 0 && self.line.len() > c.with_prev {
                     let start = self.line.len() - 1 - c.with_prev;
-                    let (mut del, mut ins) = (n, String::new());
-                    for pc in &self.line[start..self.line.len() - 1] { del += pc.converted.as_deref().unwrap_or(&pc.orig).chars().count() + pc.after().chars().count(); ins += &pc.orig; ins += &pc.after(); }
-                    acts.push(Action::Replace { delete: del, insert: format!("{ins}{}{}", c.orig, c.after()), then: None });
+                    let (mut old, mut ins) = (String::new(), String::new());
+                    for pc in &self.line[start..self.line.len() - 1] { old += pc.shown(); old += &pc.after(); ins += &pc.orig; ins += &pc.after(); }
+                    acts.push(self.replace(&format!("{old}{shown}"), &format!("{ins}{}{}", c.orig, c.after()), None));
                     let end = self.line.len() - 1; for pc in &mut self.line[start..end] { pc.converted = None; }
                 } else {
-                    acts.push(Action::Replace { delete: n, insert: format!("{}{}", c.orig, c.after()), then: None });
+                    acts.push(self.replace(&shown, &format!("{}{}", c.orig, c.after()), None));
                 }
                 self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Undo); }
                 // a word converted mid-word (Guess on the buffer) is still being typed: it is the buffer again
@@ -885,13 +900,13 @@ impl Engine {
                 if !self.word.is_empty() {
                     let typed = std::mem::take(&mut self.word);
                     let (shown, target) = if self.thai_active { (en_to_th(&typed), typed.clone()) } else { (typed.clone(), en_to_th(&typed)) };
-                    acts.push(Action::Replace { delete: shown.chars().count(), insert: target.clone(), then: None });
+                    acts.push(self.replace(&shown, &target, None));
                     if !self.thai_active { self.feedback(&typed, Feedback::Retype); } // personal model: forward only
                     self.commit_glued(typed, target, 0);
-                } else if let Some((n, c)) = self.last_on_screen() {
+                } else if let Some((shown, c)) = self.last_on_screen() {
                     let c = c.clone(); if c.converted.is_some() { return Outcome { swallow: true, actions: acts } }
                     let target = if c.rev { c.typed.clone() } else { en_to_th(&c.typed) };
-                    acts.push(Action::Replace { delete: n, insert: format!("{target}{}", c.after()), then: None });
+                    acts.push(self.replace(&shown, &format!("{target}{}", c.after()), None));
                     self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Retype); }
                     self.line.push(Committed { converted: Some(target), ..c });
                 }
@@ -909,10 +924,10 @@ impl Engine {
                         // replace the typed prefix (and, for a reverse phrase, the words before it); the rest of the
                         // word arrives in the new layout (input source switched)
                         let start = self.line.len() - prev;
-                        let (mut del, mut ins) = (self.screen_of(&typed).chars().count(), String::new());
-                        for c in &self.line[start..] { del += c.converted.as_deref().unwrap_or(&c.orig).chars().count() + c.after().chars().count(); ins += &c.typed; ins += &c.after(); }
+                        let (mut old, mut ins) = (String::new(), String::new());
+                        for c in &self.line[start..] { old += c.shown(); old += &c.after(); ins += &c.typed; ins += &c.after(); }
                         for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
-                        acts.push(Action::Replace { delete: del, insert: format!("{ins}{thai}"), then: None });
+                        acts.push(self.replace(&format!("{old}{}", self.screen_of(&typed)), &format!("{ins}{thai}"), None));
                         self.commit_glued(typed, thai, prev);
                     }
                     BubbleKind::UndoConversion => return self.on_hotkey(Hotkey::Undo),
@@ -922,12 +937,12 @@ impl Engine {
                     BubbleKind::Rewrite(row) => return self.accept_rewrite(row),
                     BubbleKind::Complete { typed, insert } => {
                         if self.word != typed { return Outcome::pass() }
-                        acts.push(Action::Replace { delete: self.screen_of(&typed).chars().count(), insert: insert.clone(), then: None });
+                        acts.push(self.replace(&self.screen_of(&typed), &insert, None));
                         self.commit_glued(typed, insert, 0);
                     }
-                    BubbleKind::Typo { word } => if let Some((n, c)) = self.last_on_screen() {
+                    BubbleKind::Typo { word } => if let Some((shown, c)) = self.last_on_screen() {
                         let c = c.clone();
-                        acts.push(Action::Replace { delete: n, insert: format!("{word}{}", c.after()), then: None });
+                        acts.push(self.replace(&shown, &format!("{word}{}", c.after()), None));
                         self.line.pop(); self.line.push(Committed { converted: Some(word), ..c });
                     },
                 }
@@ -1219,8 +1234,10 @@ mod tests {
         assert_eq!(e.personal.state.events, 1.0);
     }
     // ---------- default mode: nothing converts on a boundary; Tab / hotkeys apply the bubble ----------
-    fn screen(o: &[(Option<char>, Outcome)]) -> String {
-        let mut sc = vec![]; for (t, x) in o { crate::platform::sim::apply(&mut sc, &x.actions, x.swallow, *t); } sc.into_iter().collect()
+    fn screen(o: &[(Option<char>, Outcome)]) -> String { screen_in(DeleteUnit::CodePoint, o) }
+    /// The text an app that deletes `unit`s per Backspace ends up with.
+    fn screen_in(unit: DeleteUnit, o: &[(Option<char>, Outcome)]) -> String {
+        let mut sc = vec![]; for (t, x) in o { crate::platform::sim::apply(&mut sc, &x.actions, x.swallow, *t, unit); } sc.into_iter().collect()
     }
     fn key_of(c: char) -> Key { match c { ' ' => Key::Boundary(Boundary::Space), '\n' => Key::Boundary(Boundary::Enter), c => Key::Char(c) } }
     #[test] fn boundaries_never_convert_by_default() {
@@ -1722,7 +1739,7 @@ mod tests {
         completers(&mut e, CompleteMode::Typing);
         typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "nothing is applied while Tab is down");
-        assert_eq!(e.on_key(Key::Char('2')), applied(3, "hello", None, InputLang::Latin), "the digit is swallowed");
+        assert_eq!(e.on_key(Key::Char('2')), applied(0, "lo", None, InputLang::Latin), "the digit is swallowed");
         assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the release applies nothing more");
         assert_eq!(e.on_key(Key::Char('2')), Outcome::pass(), "a digit after the release is typed");
         assert_eq!(e.buffer(), "hello2", "glued to the applied word, as after any applied completion");
@@ -1732,18 +1749,18 @@ mod tests {
         completers(&mut e, CompleteMode::Typing);
         typ(&mut e, "hel"); e.on_key(Key::SelectNext);
         e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::Char('1')), applied(3, "help", None, InputLang::Latin), "Tab+1 is row 1");
+        assert_eq!(e.on_key(Key::Char('1')), applied(0, "p", None, InputLang::Latin), "Tab+1 is row 1");
         e.on_key(Key::TabUp);
         e.reset(); typ(&mut e, "hel");
         e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::TabUp), applied(3, "help", None, InputLang::Latin));
+        assert_eq!(e.on_key(Key::TabUp), applied(0, "p", None, InputLang::Latin));
     }
     #[test] fn tab_alone_applies_the_selected_row_once_on_release() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Typing);
         typ(&mut e, "hel"); e.on_key(Key::SelectNext);
         for _ in 0..4 { assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat neither applies nor types a tab"); }
-        assert_eq!(e.on_key(Key::TabUp), applied(3, "hello", None, InputLang::Latin));
+        assert_eq!(e.on_key(Key::TabUp), applied(0, "lo", None, InputLang::Latin));
         assert_eq!(e.on_key(Key::Tab), Outcome::pass(), "with the bubble gone, Tab is a tab again");
         assert_eq!(e.on_key(Key::TabUp), Outcome::pass());
     }
@@ -1768,11 +1785,11 @@ mod tests {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Typing);
         typ(&mut e, "hel"); e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::Char('s')), applied(3, "helps", None, InputLang::Latin));
+        assert_eq!(e.on_key(Key::Char('s')), applied(0, "ps", None, InputLang::Latin));
         assert_eq!(e.on_key(Key::TabUp), Outcome::pass());
         assert_eq!(e.buffer(), "helps");
         e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(3, "help", Some(Boundary::Space), InputLang::Latin));
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(0, "p", Some(Boundary::Space), InputLang::Latin));
         // a Thai row switches the layout, so the rolled key is its Thai character
         e.reset(); typ(&mut e, &keys("ภาษ")); e.on_key(Key::Tab);
         assert_eq!(e.on_key(Key::Char('k')), applied(3, "ภาษา", None, InputLang::Thai));
@@ -1837,10 +1854,10 @@ mod tests {
         typ(&mut e, "l;ylfu");
         assert_eq!(tab(&mut e), applied(6, "สวัสดี", None, InputLang::Thai));
         e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::Char('2')), applied(3, "hello", None, InputLang::Latin), "Tab held + 2");
+        assert_eq!(e.on_key(Key::Char('2')), applied(0, "lo", None, InputLang::Latin), "Tab held + 2");
         e.on_key(Key::TabUp);
         e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab);
-        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(3, "help", Some(Boundary::Space), InputLang::Latin), "Space rolled over a held Tab applies any row");
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(0, "p", Some(Boundary::Space), InputLang::Latin), "Space rolled over a held Tab applies any row");
     }
     #[test] fn space_accept_with_auto_convert_converts_once() {
         let Some(mut e) = engine() else { return };
@@ -1860,7 +1877,7 @@ mod tests {
         assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"], "labelled with the completed word only");
         assert_eq!(e.bubble[0].kind, BubbleKind::Complete { typed: keys("ฉันชอบภาษ"), insert: "ฉันชอบภาษา".into() });
         log.push((None, tab(&mut e)));
-        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 9, insert: "ฉันชอบภาษา".into(), then: None });
+        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 0, insert: "า".into(), then: None });
         assert_eq!(screen(&log), "ฉันชอบภาษา");
         // English typed on the Thai layout keeps only its reverse live row
         e.reset(); e.opts.rev_live = 0.5; e.thai_comp = Some(Completer::new([("าืนไก".to_string(), 9.0)]));
@@ -1875,7 +1892,7 @@ mod tests {
         typ(&mut e, "he"); assert!(!e.bubble_visible(), "2 letters are too few while typing");
         typ(&mut e, "l"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
         let mut log = vec![]; feed(&mut e, &mut log, "\t");
-        assert_eq!(log[0].1.actions, vec![Action::Replace { delete: 3, insert: "help".into(), then: None }, Action::HideBubble, Action::SwitchInput(InputLang::Latin)]);
+        assert_eq!(log[0].1.actions, vec![Action::Replace { delete: 0, insert: "p".into(), then: None }, Action::HideBubble, Action::SwitchInput(InputLang::Latin)]);
         e.reset(); e.opts.complete_conf = 0.99;
         let o = typ(&mut e, "hel"); assert!(o.iter().all(|x| bubble_items(x).is_none())); assert!(!e.bubble_visible());
         // a finished word is not a confident prefix of its extensions
@@ -1930,6 +1947,66 @@ mod tests {
         e.on_key(Key::Backspace); assert_eq!(e.buffer(), keys("ภาษ"));
         assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"]);
         tab(&mut e); typ_th(&mut e, "ไทย"); assert_eq!(e.buffer(), keys("ภาษาไทย"));
+    }
+    struct FixingSpeller;
+    impl Speller for FixingSpeller { fn guesses(&self, w: &str) -> Option<Vec<String>> { matches!(w, "ths" | "thiss").then(|| vec!["this".into()]) } }
+    #[test] fn a_typo_row_retypes_only_what_differs() {
+        let Some(mut e) = engine_typo() else { return };
+        e.opts.auto_convert = true;
+        let mut log = vec![]; feed(&mut e, &mut log, "l;ylf ");
+        assert_eq!(labels(&e), ["l;ylf", "สวัสดี", "สวัสดิ", "วัด"]);
+        hot(&mut e, &mut log, Hotkey::Accept(1));
+        assert_eq!(log.last().unwrap().1, applied(1, "ี ", None, InputLang::Thai), "only the space goes; ด stays");
+        assert_eq!(screen(&log), "สวัสดี ");
+        e.reset(); e.opts.auto_convert = false; e.speller = Some(Box::new(FixingSpeller));
+        let mut log = vec![]; feed(&mut e, &mut log, "ths ");
+        assert_eq!(labels(&e), ["this"]);
+        hot(&mut e, &mut log, Hotkey::Accept(0));
+        assert_eq!(log.last().unwrap().1, applied(2, "is ", None, InputLang::Latin));
+        assert_eq!(screen(&log), "this ");
+    }
+    #[test] fn a_fix_that_changes_only_spacing_keeps_the_layout() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FixingSpeller));
+        let mut log = vec![]; feed(&mut e, &mut log, "thiss ");
+        hot(&mut e, &mut log, Hotkey::Accept(0));
+        assert_eq!(log.last().unwrap().1, Outcome { swallow: true, actions: vec![Action::Replace { delete: 2, insert: " ".into(), then: None }, Action::HideBubble] }, "no input source switch");
+        assert_eq!(screen(&log), "this ");
+    }
+    #[test] fn a_completion_in_a_terminal_keeps_the_text_before_the_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        e.delete_unit = DeleteUnit::Grapheme;
+        let mut log = vec![]; feed(&mut e, &mut log, "ok ");
+        e.set_thai_active(true);
+        for c in keys("ฉันชอบภาษ").chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+        log.push((None, tab(&mut e)));
+        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 0, insert: "า".into(), then: None });
+        assert_eq!(screen_in(DeleteUnit::Grapheme, &log), "ok ฉันชอบภาษา");
+    }
+    #[test] fn undo_counts_backspaces_in_the_apps_unit() {
+        for (unit, n) in [(DeleteUnit::CodePoint, 6), (DeleteUnit::Grapheme, 4)] {
+            let Some(mut e) = engine() else { return };
+            e.delete_unit = unit;
+            let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu\t");
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
+            hot(&mut e, &mut log, Hotkey::Undo);
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: n, insert: "l;ylfu".into(), then: None }, "{unit:?}: ส|วั|ส|ดี");
+            assert_eq!(screen_in(unit, &log), "l;ylfu");
+        }
+    }
+    #[test] fn a_reverse_conversion_counts_backspaces_in_the_apps_unit() {
+        for (unit, n) in [(DeleteUnit::CodePoint, 4), (DeleteUnit::Grapheme, 3)] {
+            let Some(mut e) = engine() else { return };
+            e.delete_unit = unit; e.opts.rev_live = 0.5;
+            e.set_thai_active(true);
+            let mut log = vec![];
+            for c in keys("าืนไ").chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+            assert_eq!(labels(&e), ["know"]);
+            log.push((None, tab(&mut e)));
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: n, insert: "know".into(), then: None }, "{unit:?}: าื|น|ไ");
+            assert_eq!(screen_in(unit, &log), "know");
+        }
     }
     struct CompletingSpeller;
     impl Speller for CompletingSpeller {
