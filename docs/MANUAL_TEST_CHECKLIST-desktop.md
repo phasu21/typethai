@@ -31,6 +31,16 @@
 - [ ] With no bubble, hold Tab and press 2: a tab and then 2 are typed, as before.
 - [ ] Windows (Notepad): the same checks.
 
+## Space accept (not run live by the agent; engine tests and --simulate only)
+- [ ] Default (Accept with: Tab): type `l;ylfu` and Space with the live row up: the space is typed and nothing converts; the bubble then offers สวัสดี as before.
+- [ ] Settings → Word suggestions → Accept with: Tab or Space. Type `l;ylfu` + Space: the text becomes `สวัสดี ` with one space, and the input source changes to Thai. ⌃⌥Z restores `l;ylfu `.
+- [ ] Same setting, Thai Kedmanee active: type `าืนไ` (know) + Space: it becomes `know ` and the input source changes to ABC.
+- [ ] Same setting, English completions up (`hel` and a pause): Space types a space and applies nothing.
+- [ ] Same setting, live row with completions under it (`ภาษ` typed on ABC): Shift+Down to a completion, then Space: a plain space, nothing applied.
+- [ ] Same setting: Tab, Tab held + 1..3, and Space rolled over a held Tab still apply rows as before.
+- [ ] Quit and relaunch: the setting is kept. A prefs.json from an older version opens as Tab.
+- [ ] Windows (Notepad): the same checks.
+
 ## v10 bubble keys / input source / live bubble (not run live by the agent)
 - [ ] With a bubble visible: Tab applies the highlighted row when released, and the app does NOT receive the Tab.
 - [ ] With no bubble: Tab works normally (indent, focus change), and Shift+Up/Down still select text.

@@ -150,16 +150,20 @@ pub struct Options {
     pub complete: CompleteMode, pub complete_conf: f64, pub complete_idle: Duration,
     /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
     pub learn_words: bool,
+    pub accept: AcceptKeys,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab } } }
 /// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
 /// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
 pub const COMPLETE_IDLE_DEFAULT_MS: u64 = 250;
 /// When word completions appear in the bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
+/// Keys that apply the highlighted bubble row. Tab (and Tab held + 1..3) always does. `TabOrSpace`: Space also applies
+/// a live conversion row, then types the space; over any other row Space is a plain word boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum AcceptKeys { #[default] Tab, TabOrSpace }
 /// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
 /// is offered while it is still being typed.
 pub const LIVE_SHOW: f64 = 0.5;
@@ -272,11 +276,20 @@ impl Engine {
     pub fn bubble_visible(&self) -> bool { !self.bubble.is_empty() }
     pub fn selected(&self) -> usize { self.sel.idx }
     /// Keys the platform must route to the engine even when it would otherwise bypass it (Thai layout active, secure
-    /// field check): the bubble controls while the bubble is up, and the keys of a held Tab.
+    /// field check): the bubble controls while the bubble is up, the keys of a held Tab, and Space when it applies a live
+    /// row (a layout change clears the buffer first, so a stale row never pulls Space in).
     pub fn is_bubble_key(&self, k: &Key) -> bool {
         (self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc))
             || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3')))
+            || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
     }
+    /// Space applies the highlighted row: with `AcceptKeys::TabOrSpace`, and only when that row is a live conversion.
+    fn space_accepts(&self) -> bool {
+        self.opts.accept == AcceptKeys::TabOrSpace
+            && matches!(self.bubble.get(self.sel.idx), Some(BubbleItem { kind: BubbleKind::Live { typed, prev, .. }, .. }) if self.live_current(typed, *prev))
+    }
+    /// A live row still matches the text on screen: the buffer it was offered for, and the `prev` words before it.
+    fn live_current(&self, typed: &str, prev: usize) -> bool { self.word == typed && self.line.len() >= prev }
     /// Focus change, mouse click, secure field, layout change, any non-bubble key during a rewrite: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
         self.settle();
@@ -375,6 +388,7 @@ impl Engine {
             // Cmd+Backspace deletes the whole line: nothing of it is left to offer
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
+            Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
         }
@@ -400,7 +414,7 @@ impl Engine {
     fn accept_held(&mut self, i: usize) -> Outcome { let mut o = self.on_hotkey(Hotkey::Accept(i)); o.swallow = true; o }
     /// A key typed before the held Tab came up (fast typing rolls Tab into the next key): the Tab counts as released
     /// first. The key is folded into the replacement instead of passing through, which would put it on screen before
-    /// the injected text.
+    /// the injected text. Space accepting a live row (`AcceptKeys::TabOrSpace`) goes the same way.
     fn accept_rolled(&mut self, k: Key) -> Outcome {
         let mut acts = self.accept_held(self.sel.idx).actions;
         let mut o;
@@ -431,12 +445,13 @@ impl Engine {
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
             SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
+            SettingsCmd::SetAccept(a) => { let changed = self.opts.accept != a; self.opts.accept = a; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -890,7 +905,7 @@ impl Engine {
                 let Some(item) = self.bubble.get(i).cloned() else { return Outcome::pass() };
                 match item.kind {
                     BubbleKind::Live { typed, thai, prev } => {
-                        if self.word != typed || self.line.len() < prev { return Outcome::pass() }
+                        if !self.live_current(&typed, prev) { return Outcome::pass() }
                         // replace the typed prefix (and, for a reverse phrase, the words before it); the rest of the
                         // word arrives in the new layout (input source switched)
                         let start = self.line.len() - prev;
@@ -1762,6 +1777,78 @@ mod tests {
         e.reset(); typ(&mut e, &keys("ภาษ")); e.on_key(Key::Tab);
         assert_eq!(e.on_key(Key::Char('k')), applied(3, "ภาษา", None, InputLang::Thai));
         assert!(e.thai_active()); assert_eq!(e.buffer(), keys("ภาษา"));
+    }
+    fn space_accepts(e: &mut Engine) { assert!(e.apply_settings(SettingsCmd::SetAccept(AcceptKeys::TabOrSpace))); }
+    fn plain_space(o: &Outcome) -> bool { !o.swallow && !o.actions.iter().any(|a| matches!(a, Action::Replace { .. })) }
+    #[test] fn space_applies_a_live_row_and_types_the_space_once() {
+        let Some(mut e) = engine() else { return };
+        space_accepts(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu");
+        assert_eq!(labels(&e), ["สวัสดี"]); assert!(e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        feed(&mut e, &mut log, " ");
+        assert_eq!(log.last().unwrap().1, applied(6, "สวัสดี", Some(Boundary::Space), InputLang::Thai));
+        assert_eq!(screen(&log), "สวัสดี ");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu ", "undo restores the word and keeps the space");
+    }
+    #[test] fn space_over_a_live_row_is_a_boundary_with_tab_only() {
+        let Some(mut e) = engine() else { return };
+        assert_eq!(e.settings_snapshot().accept, AcceptKeys::Tab);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu");
+        assert_eq!(labels(&e), ["สวัสดี"]); assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        feed(&mut e, &mut log, " ");
+        assert!(plain_space(&log.last().unwrap().1));
+        assert_eq!(screen(&log), "l;ylfu ");
+        assert_eq!(e.bubble[0].kind, BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() }, "offered after Space, as before");
+    }
+    #[test] fn space_over_completions_is_a_boundary() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing); space_accepts(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "hel");
+        assert_eq!(labels(&e), ["help", "hello", "helmet"]); assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        feed(&mut e, &mut log, " ");
+        assert!(plain_space(&log.last().unwrap().1));
+        assert_eq!(screen(&log), "hel ");
+    }
+    #[test] fn space_applies_the_live_row_only_while_it_is_highlighted() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing); space_accepts(&mut e);
+        typ(&mut e, &keys("ภาษ")); assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
+        e.on_key(Key::SelectNext);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        assert!(plain_space(&e.on_key(Key::Boundary(Boundary::Space))), "a completion is highlighted");
+        e.reset(); typ(&mut e, &keys("ภาษ"));
+        e.on_key(Key::SelectNext); e.on_key(Key::SelectPrev);
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(3, "ภาษ", Some(Boundary::Space), InputLang::Thai));
+    }
+    #[test] fn space_applies_a_reverse_live_row() {
+        let Some(mut e) = engine() else { return };
+        space_accepts(&mut e); e.opts.rev_live = 0.5;
+        typ_th(&mut e, "าืนไ"); assert_eq!(labels(&e), ["know"]);
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(4, "know", Some(Boundary::Space), InputLang::Latin));
+        assert!(!e.thai_active(), "the next word is typed on the English layout");
+    }
+    #[test] fn tab_still_applies_with_space_accept_on() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing); space_accepts(&mut e);
+        typ(&mut e, "l;ylfu");
+        assert_eq!(tab(&mut e), applied(6, "สวัสดี", None, InputLang::Thai));
+        e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab);
+        assert_eq!(e.on_key(Key::Char('2')), applied(3, "hello", None, InputLang::Latin), "Tab held + 2");
+        e.on_key(Key::TabUp);
+        e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab);
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(3, "help", Some(Boundary::Space), InputLang::Latin), "Space rolled over a held Tab applies any row");
+    }
+    #[test] fn space_accept_with_auto_convert_converts_once() {
+        let Some(mut e) = engine() else { return };
+        e.opts.auto_convert = true; space_accepts(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu ");
+        assert_eq!(log.last().unwrap().1, applied(6, "สวัสดี", Some(Boundary::Space), InputLang::Thai));
+        assert_eq!(screen(&log), "สวัสดี ");
     }
     #[test] fn completes_the_last_word_of_a_thai_run() {
         let Some(mut e) = engine() else { return };

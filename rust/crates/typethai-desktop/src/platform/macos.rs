@@ -354,7 +354,8 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if pid != st.last_pid { st.last_pid = pid; let a = st.app.engine.reset(); run_actions(st, a); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
-            // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up.
+            // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up, and Space when it
+            // applies a live row (`is_bubble_key`).
             // The active input source decides the direction: Thai active -> reverse detector (English typed on Kedmanee),
             // or bypass entirely when the reverse model is off (--no-reverse). Keys always arrive as US-QWERTY chars.
             let thai = bridge::INPUT_THAI.load(Ordering::SeqCst);

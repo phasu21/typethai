@@ -26,7 +26,7 @@ impl Cli {
             "--model" => c.model = it.next().expect("--model PATH").into(), "--state" => c.state = it.next().expect("--state PATH").into(),
             "--switch-layout" => c.switch_input = true, "--no-switch-input" => c.switch_input = false, "--no-reverse" => c.reverse = false, "--list-input-sources" => c.list_sources = true,
             "--eval-live" => c.eval_live = it.next(), "--reverse" => c.eval_reverse = true, "--split" => c.eval_split = it.next().expect("--split dev|test"), "--no-typo" => c.no_typo = true, "--simulate" => c.simulate = true, "--auto-convert" => c.auto_convert = true, "--settings" => c.open_settings = true,
-            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--settings] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row when released, Tab held + 1..3 applies that row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable).\n--settings opens the Settings window at launch, for when the tray icon is hidden."); std::process::exit(0) }
+            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--settings] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row when released, Tab held + 1..3 applies that row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nSettings > Word suggestions > Accept with: Tab or Space (prefs.json \"accept_with\": \"tab_or_space\") makes Space apply the highlighted row too, only when it is a mid-word conversion, then type the space; over other rows Space is a plain space. With --auto-convert too, a word with a live row up is converted by that row, and other words still convert at the boundary.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable).\n--settings opens the Settings window at launch, for when the tray icon is hidden."); std::process::exit(0) }
             x => { eprintln!("unknown arg {x}"); std::process::exit(2) }
         } }
         c
@@ -76,7 +76,7 @@ impl App {
         let mut engine = Engine::new(m.learn_detector(), personal, corrector, opts);
         let prefs_path = prefs::prefs_beside(&cli.state);
         let p = Prefs::load(&prefs_path);
-        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.learn_words, engine.rewrite) = (p.never, p.completion, p.complete_idle, p.learn_words, p.rewrite);
+        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.learn_words, engine.opts.accept, engine.rewrite) = (p.never, p.completion, p.complete_idle, p.learn_words, p.accept, p.rewrite);
         let words_path = cli.state.with_file_name("words.json");
         engine.words = Arc::new(load_words(&words_path));
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
@@ -93,7 +93,7 @@ impl App {
     /// Save, and return once the files are on disk (quitting).
     pub fn save_and_wait(&mut self) { self.save(); self.saver.flush(); }
     pub fn maybe_save(&mut self) { if self.engine.events_since_save >= 10 { self.save() } }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, learn_words: self.engine.opts.learn_words, rewrite: self.engine.rewrite.clone() }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, learn_words: self.engine.opts.learn_words, accept: self.engine.opts.accept, rewrite: self.engine.rewrite.clone() }.save(&self.prefs_path); }
 }
 /// Hotkeys are Ctrl+Alt (Windows) / Ctrl+Option (macOS) + key char.
 pub fn hotkey_for(c: char) -> Option<Hotkey> {
