@@ -1,6 +1,8 @@
-//! AI rewrite of the selected text: presets, config, the OpenAI-compatible wire format. The only module that knows
-//! JSON request/response shapes.
+//! AI rewrite of the selected text: presets, config, the OpenAI-compatible wire format, the API key, the clipboard
+//! protocol and the worker threads. The only module that knows the wire format or can read the key.
 use serde_json::{json, Value};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// One async request (a selection capture or an HTTP call), minted by the Engine. Ids only grow, so a reply is current
 /// exactly when the engine's state still names its id.
@@ -25,6 +27,7 @@ pub const REWRITING: &str = "Rewriting…";
 pub const PREVIEW_CHARS: usize = 600;
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
+const TIMEOUT: Duration = Duration::from_secs(20);
 const BAD_URL: &str = "The base URL must start with https:// (http:// only for localhost).";
 
 /// Non-secret settings (prefs.json "rewrite"), normalized on construction.
@@ -116,6 +119,16 @@ fn parse(status: u16, body: &str) -> Result<String, Failure> {
         c => Err(Failure::Status(c, v.as_ref().and_then(|v| v["error"]["message"].as_str()).map(String::from))),
     }
 }
+/// Blocking POST, run on its own short-lived thread.
+fn call(run: &Run, key: &secret::ApiKey) -> Result<String, Failure> {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    let tls = if cfg!(windows) { TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier) } else { TlsConfig::builder() };
+    let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).tls_config(tls.build()).build());
+    let fail = |e: ureq::Error| if matches!(e, ureq::Error::Timeout(_)) { Failure::Timeout } else { Failure::Network };
+    let mut res = agent.post(&endpoint(&run.cfg)).header("Authorization", &key.bearer()).header("Content-Type", "application/json").send(&body(run)).map_err(fail)?;
+    let text = res.body_mut().read_to_string().map_err(fail)?;
+    parse(res.status().as_u16(), &text).map(|out| finish(&run.text, &out))
+}
 /// Put the selection's own leading/trailing whitespace back around the model output (a selected line keeps its "\n").
 fn finish(original: &str, out: &str) -> String {
     let lead = &original[..original.len() - original.trim_start().len()]; let trail = &original[original.trim_end().len()..];
@@ -125,6 +138,91 @@ fn finish(original: &str, out: &str) -> String {
 pub fn preview(text: &str, max: usize) -> String {
     if text.chars().count() <= max { return text.to_string() }
     format!("{}…", text.chars().take(max.saturating_sub(1)).collect::<String>())
+}
+
+/// The API key, in the macOS Keychain or the Windows Credential Manager. `ApiKey` and `load` never leave this file.
+mod secret {
+    pub struct ApiKey(String);
+    impl std::fmt::Debug for ApiKey { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("ApiKey(***)") } }
+    impl ApiKey { pub fn bearer(&self) -> String { format!("Bearer {}", self.0) } }
+    #[cfg(any(windows, target_os = "macos"))]
+    fn entry() -> Result<keyring::Entry, String> { keyring::Entry::new("typethai", "ai-rewrite").map_err(|e| e.to_string()) }
+    /// May block on a Keychain prompt: call only off the capture and UI threads.
+    pub fn load() -> Option<ApiKey> {
+        #[cfg(any(windows, target_os = "macos"))] { entry().ok()?.get_password().ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).map(ApiKey) }
+        #[cfg(not(any(windows, target_os = "macos")))] { None }
+    }
+    /// Trimmed; empty deletes the entry.
+    pub fn save(key: &str) -> Result<(), String> {
+        #[cfg(any(windows, target_os = "macos"))] {
+            let (e, k) = (entry()?, key.trim());
+            if !k.is_empty() { return e.set_password(k).map_err(|e| e.to_string()) }
+            match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(e) => Err(e.to_string()) }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = key; Err("No keychain on this OS".into()) }
+    }
+}
+/// Settings: store the key, or clear it with an empty string. Call off the UI thread.
+pub fn save_key(key: &str) -> Result<(), String> { secret::save(key) }
+/// Settings: whether a key is stored. Call off the UI thread.
+pub fn has_key() -> bool { secret::load().is_some() }
+
+/// The OS primitives the clipboard protocol needs. Built and used only on the desk thread.
+pub trait Host {
+    type Snap;
+    fn is_secure(&mut self) -> bool;
+    /// The focused field's selection: None when Accessibility cannot tell, Some("") when nothing is selected.
+    fn selection_via_accessibility(&mut self) -> Option<String>;
+    fn clip_seq(&mut self) -> u64;
+    /// Every item and format on the clipboard.
+    fn clip_snapshot(&mut self) -> Self::Snap;
+    fn clip_restore(&mut self, s: Self::Snap);
+    fn clip_read_text(&mut self) -> Option<String>;
+    /// Set `text`, marked so clipboard managers and history skip it.
+    fn clip_write_transient(&mut self, text: &str);
+    fn post_copy(&mut self);
+    fn post_paste(&mut self);
+    fn pause(&mut self, ms: u64);
+}
+/// Accessibility first. Only when it cannot tell, copy through the clipboard and put the user's clipboard back.
+pub fn capture<H: Host>(h: &mut H) -> Captured {
+    if h.is_secure() { return Captured::Secure }
+    // an empty selection never falls back to Cmd/Ctrl+C: some editors copy the whole line then
+    if let Some(t) = h.selection_via_accessibility() { return if t.trim().is_empty() { Captured::NoSelection } else { Captured::Text(t) } }
+    let (snap, seq) = (h.clip_snapshot(), h.clip_seq()); h.post_copy();
+    for _ in 0..30 {
+        h.pause(10);
+        if h.clip_seq() != seq {
+            // the change count moves when the copier clears the clipboard, before it writes the text
+            h.pause(20); let t = h.clip_read_text(); h.clip_restore(snap);
+            return t.map_or(Captured::NoSelection, Captured::Text)
+        }
+    }
+    Captured::NoSelection
+}
+/// Paste `text` over the selection, then put the user's clipboard back unless something else was copied meanwhile.
+pub fn paste<H: Host>(h: &mut H, text: &str) {
+    let snap = h.clip_snapshot(); h.clip_write_transient(text); let ours = h.clip_seq(); h.post_paste(); h.pause(250);
+    if h.clip_seq() == ours { h.clip_restore(snap) }
+}
+
+/// Owned by the capture thread; `submit` and `poll` never block.
+pub struct Worker { desk: mpsc::Sender<Job>, rx: mpsc::Receiver<Reply> }
+impl Worker {
+    /// The desk thread builds its host with `make` and runs captures and pastes one at a time, so it is the only
+    /// clipboard writer in the process. Each run gets its own HTTP thread: a slow call never delays a capture or
+    /// paste, and an abandoned one answers into a stale id.
+    pub fn spawn<H: Host>(make: impl FnOnce() -> H + Send + 'static) -> Worker {
+        let (tx, rx) = mpsc::channel(); let (desk, jobs) = mpsc::channel::<Job>();
+        std::thread::Builder::new().name("typethai-desk".into()).spawn(move || { let mut h = make(); for job in jobs { match job {
+            Job::Capture(id) => { let c = if secret::load().is_none() { Captured::NoKey } else { capture(&mut h) }; let _ = tx.send(Reply::Captured(id, c)); }
+            Job::Paste(text) => paste(&mut h, &text),
+            Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = secret::load().ok_or(Failure::NoKey).and_then(|k| call(&r, &k)); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
+        } } }).expect("desk thread");
+        Worker { desk, rx }
+    }
+    pub fn submit(&self, job: Job) { let _ = self.desk.send(job); }
+    pub fn poll(&self) -> Option<Reply> { self.rx.try_recv().ok() }
 }
 
 #[cfg(test)]
@@ -178,6 +276,51 @@ mod tests {
     #[test] fn finish_keeps_selection_whitespace() {
         assert_eq!(finish("  helo wrld\n", "hello world"), "  hello world\n");
         assert_eq!(finish("helo", " hello \n"), "hello");
+    }
+    /// A clipboard that records what the protocol did. `copies` is what the app puts there on Cmd/Ctrl+C.
+    #[derive(Default)]
+    struct Fake { secure: bool, ax: Option<String>, copies: Option<String>, user_copies: bool, seq: u64, clip: String, ops: Vec<String>, waited: u64 }
+    impl Host for Fake {
+        type Snap = String;
+        fn is_secure(&mut self) -> bool { self.secure }
+        fn selection_via_accessibility(&mut self) -> Option<String> { self.ax.clone() }
+        fn clip_seq(&mut self) -> u64 { self.seq }
+        fn clip_snapshot(&mut self) -> String { self.clip.clone() }
+        fn clip_restore(&mut self, s: String) { self.ops.push(format!("restore {s}")); self.clip = s; self.seq += 1; }
+        fn clip_read_text(&mut self) -> Option<String> { Some(self.clip.clone()) }
+        fn clip_write_transient(&mut self, t: &str) { self.ops.push(format!("write {t}")); self.clip = t.into(); self.seq += 1; }
+        fn post_copy(&mut self) { self.ops.push("copy".into()); if let Some(c) = self.copies.clone() { self.clip = c; self.seq += 1; } }
+        fn post_paste(&mut self) { self.ops.push(format!("paste {}", self.clip)); if self.user_copies { self.clip = "user".into(); self.seq += 1; } }
+        fn pause(&mut self, ms: u64) { self.waited += ms; }
+    }
+    fn saved() -> Fake { Fake { clip: "saved".into(), ..Fake::default() } }
+    #[test] fn capture_refuses_secure_fields() {
+        let mut h = Fake { secure: true, ax: Some("pw".into()), ..saved() };
+        assert_eq!(capture(&mut h), Captured::Secure); assert_eq!(h.ops, Vec::<String>::new());
+    }
+    #[test] fn capture_prefers_accessibility_and_never_copies_an_empty_selection() {
+        let mut h = Fake { ax: Some("helo".into()), copies: Some("whole line".into()), ..saved() };
+        assert_eq!(capture(&mut h), Captured::Text("helo".into())); assert_eq!(h.ops, Vec::<String>::new());
+        let mut h = Fake { ax: Some("".into()), copies: Some("whole line".into()), ..saved() };
+        assert_eq!(capture(&mut h), Captured::NoSelection); assert_eq!(h.ops, Vec::<String>::new());
+    }
+    #[test] fn capture_falls_back_to_copy_and_restores_the_clipboard() {
+        let mut h = Fake { copies: Some("helo".into()), ..saved() };
+        assert_eq!(capture(&mut h), Captured::Text("helo".into()));
+        assert_eq!(h.ops, ["copy", "restore saved"]); assert_eq!(h.clip, "saved");
+    }
+    #[test] fn capture_gives_up_after_300ms_without_touching_the_clipboard() {
+        let mut h = saved();
+        assert_eq!(capture(&mut h), Captured::NoSelection);
+        assert_eq!(h.ops, ["copy"]); assert_eq!((h.clip.as_str(), h.waited), ("saved", 300));
+    }
+    #[test] fn paste_restores_the_clipboard() {
+        let mut h = saved(); paste(&mut h, "hello");
+        assert_eq!(h.ops, ["write hello", "paste hello", "restore saved"]); assert_eq!(h.clip, "saved");
+    }
+    #[test] fn paste_keeps_a_copy_the_user_made_meanwhile() {
+        let mut h = Fake { user_copies: true, ..saved() }; paste(&mut h, "hello");
+        assert_eq!(h.ops, ["write hello", "paste hello"]); assert_eq!(h.clip, "user");
     }
     #[test] fn preview_cuts_with_ellipsis() {
         assert_eq!(preview("สวัสดีครับ", 10), "สวัสดีครับ");
