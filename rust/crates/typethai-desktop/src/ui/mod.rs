@@ -312,6 +312,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         never: ["lol", "ok", "omg"].map(String::from).to_vec(),
         learned: learned.map(|(w, kept, conv)| typethai_core::personal::Learned { word: w.into(), kept, conv }).to_vec(),
         completion: crate::engine::CompleteMode::default(),
+        complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS),
         learn_words: true,
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
