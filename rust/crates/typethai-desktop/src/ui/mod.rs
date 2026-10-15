@@ -82,7 +82,7 @@ impl Render for BubbleView {
                         // full text, wrapped within the label column (no ellipsis). The keycap slot stays out of this column.
                         .child(column(i, label))
                         // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
-                        .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
+                        .child(div().w(px(bridge::HINT_SLOT_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
                             .child(cap("Tab".into(), bridge::TAB_CAP_W).bg(cap_bg))
                             .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg))))
                 })),
@@ -340,7 +340,7 @@ fn self_check(v: &BubbleView, measured: &[f64]) -> String {
         // rows: the row padding, then the label, the gap and the reserved Tab + number slot. Strip: the button's border
         // and padding with the key hint before the label.
         let edge = bridge::OPT_BORDER + bridge::OPT_PX;
-        let expect = if strip { (edge + bridge::hint_w(i == v.selected) + bridge::BADGE_GAP, edge) } else { (ROW_PX, ROW_PX + bridge::BADGE_GAP + bridge::BADGE_W) };
+        let expect = if strip { (edge + bridge::hint_w(i == v.selected) + bridge::HINT_GAP, edge) } else { (ROW_PX, ROW_PX + bridge::HINT_GAP + bridge::HINT_SLOT_W) };
         let wraps = measured[i] > lw;
         let pad_ok = (lpad - expect.0).abs() < 1.5 && (rpad - expect.1).abs() < 1.5;
         let ok = tw <= lw + 0.5 && (wraps || th < 1.5 * FONT_PX * 1.6) && !(strip && wraps) && pnl.is_some() && pad_ok;

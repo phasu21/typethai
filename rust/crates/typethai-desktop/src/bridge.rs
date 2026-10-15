@@ -47,7 +47,7 @@ pub const RADIUS: f64 = 8.0;
 pub const ROW_PX: f64 = 10.0;
 pub const FONT_PX: f64 = 15.0;
 /// Space between the suggestion and its key hint (`Tab`, or `Tab` `2`).
-pub const BADGE_GAP: f64 = 8.0;
+pub const HINT_GAP: f64 = 8.0;
 /// Key hint keycaps: fixed sizes so the hint fits its slot whatever the platform font.
 pub const TAB_CAP_W: f64 = 30.0;
 pub const DIGIT_CAP_W: f64 = 18.0;
@@ -55,7 +55,7 @@ pub const KEYCAP_GAP: f64 = 2.0;
 pub const KEYCAP_H: f64 = 18.0;
 pub const KEYCAP_FONT_PX: f64 = 11.0;
 /// Width reserved for the widest key hint: `Tab` and a digit.
-pub const BADGE_W: f64 = TAB_CAP_W + KEYCAP_GAP + DIGIT_CAP_W;
+pub const HINT_SLOT_W: f64 = TAB_CAP_W + KEYCAP_GAP + DIGIT_CAP_W;
 /// Added to every measured single-line width: Thai upper/lower marks and tone marks on the last cluster can paint a
 /// little past the advance width, and layout rounds to device pixels; the slack keeps them inside the column.
 pub const MEASURE_SLACK: f64 = 3.0;
@@ -63,7 +63,7 @@ pub const MIN_W: f64 = 200.0;
 /// Margin kept from the monitor's visible edges when computing the maximum bubble width.
 pub const SCREEN_MARGIN: f64 = 24.0;
 /// Width used by everything except the label column (padding, border, and the Tab keycap slot).
-pub const CHROME_W: f64 = 2.0 * (PAD + BORDER) + 2.0 * ROW_PX + BADGE_GAP + BADGE_W;
+pub const CHROME_W: f64 = 2.0 * (PAD + BORDER) + 2.0 * ROW_PX + HINT_GAP + HINT_SLOT_W;
 
 /// Strip metrics: each option is a gpui-kit Medium `Button` (1 px border, 10 px padding, 32 px tall) holding the key hint
 /// and the label, `OPT_GAP` apart.
@@ -93,7 +93,7 @@ impl Layout {
     /// suggestion reads on from what is being typed.
     pub fn text_x(&self) -> f64 {
         match (self.kind, self.cells.first()) {
-            (BubbleLayout::Horizontal, Some(c)) => c.x + OPT_BORDER + OPT_PX + hint_w(true) + BADGE_GAP,
+            (BubbleLayout::Horizontal, Some(c)) => c.x + OPT_BORDER + OPT_PX + hint_w(true) + HINT_GAP,
             _ => PAD + BORDER + ROW_PX,
         }
     }
@@ -125,7 +125,7 @@ fn strip(label_widths: &[f64]) -> Layout {
     let label_w: Vec<f64> = label_widths.iter().map(|w| w.ceil()).collect();
     let mut x = inset;
     let cells: Vec<Rect> = label_w.iter().enumerate().map(|(i, lw)| {
-        let c = Rect::new(x, inset, 2.0 * (OPT_BORDER + OPT_PX) + hint_w(i == 0) + BADGE_GAP + lw, OPT_H);
+        let c = Rect::new(x, inset, 2.0 * (OPT_BORDER + OPT_PX) + hint_w(i == 0) + HINT_GAP + lw, OPT_H);
         x = c.right() + OPT_GAP; c
     }).collect();
     let w = cells.last().map_or(2.0 * inset, |c| c.right() + inset);
