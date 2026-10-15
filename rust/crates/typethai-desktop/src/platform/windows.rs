@@ -1,7 +1,7 @@
 //! Windows backend: WH_KEYBOARD_LL / WH_MOUSE_LL hooks, SendInput (unicode) injection, a non-activating topmost bubble,
 //! caret lookup (GetGUIThreadInfo -> UI Automation TextPattern2 -> focused element rect -> mouse), secure-field skip
 //! (ES_PASSWORD / UIA IsPassword), switch to Thai/US layout after applying, tray icon.
-use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}};
+use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -9,6 +9,8 @@ use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::DataExchange::*;
+use windows::Win32::System::Memory::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::System::Ole::*;
@@ -21,7 +23,7 @@ const MAGIC: usize = 0x5454_4841;
 const ES_PASSWORD_STYLE: i32 = 0x0020;
 const THAI_KLID: usize = 0x041E;
 
-struct State { app: App, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>> }
+struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>> }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static BUSY: Cell<bool> = const { Cell::new(false) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -70,14 +72,12 @@ unsafe fn gui_info(fg: HWND) -> Option<GUITHREADINFO> {
     let mut gi = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
     GetGUIThreadInfo(tid, &mut gi).ok()?; Some(gi)
 }
-unsafe fn is_secure(st: &State, focus: HWND) -> bool {
-    if !focus.is_invalid() {
-        let mut cls = [0u16; 64]; let n = GetClassNameW(focus, &mut cls) as usize;
-        let cls = String::from_utf16_lossy(&cls[..n]).to_ascii_lowercase();
-        if cls.contains("edit") && GetWindowLongW(focus, GWL_STYLE) & ES_PASSWORD_STYLE != 0 { return true }
-    }
-    matches!(uia_ask(st, UiaQuery::IsPassword), Some(UiaResp::Bool(true)))
+unsafe fn password_edit(focus: HWND) -> bool {
+    if focus.is_invalid() { return false }
+    let mut cls = [0u16; 64]; let n = GetClassNameW(focus, &mut cls) as usize;
+    String::from_utf16_lossy(&cls[..n]).to_ascii_lowercase().contains("edit") && GetWindowLongW(focus, GWL_STYLE) & ES_PASSWORD_STYLE != 0
 }
+unsafe fn is_secure(st: &State, focus: HWND) -> bool { password_edit(focus) || matches!(uia_ask(st, UiaQuery::IsPassword), Some(UiaResp::Bool(true))) }
 fn rect(r: RECT) -> Rect { Rect::new(r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64) }
 /// Caret rect (GetGUIThreadInfo, else UIA TextPattern2), focused element frame (UIA, else the focus HWND) and the
 /// mouse, in physical screen pixels (gpui makes the process per-monitor DPI aware).
@@ -104,10 +104,18 @@ fn kbd(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: MAGIC } } }
 }
 fn tap(v: &mut Vec<INPUT>, vk: VIRTUAL_KEY) { v.push(kbd(vk, 0, KEYBD_EVENT_FLAGS(0))); v.push(kbd(vk, 0, KEYEVENTF_KEYUP)); }
-unsafe fn inject(delete: usize, insert: &str, then: Option<Boundary>) {
-    let mut v = Vec::new();
-    // release held modifiers (hotkeys are Ctrl+Alt+...), otherwise our backspaces become Ctrl+Alt+Backspace
+/// Release held modifiers (hotkeys are Ctrl+Alt+...), otherwise our backspaces become Ctrl+Alt+Backspace.
+unsafe fn release_held(v: &mut Vec<INPUT>) {
     for m in [VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT] { if GetAsyncKeyState(m.0 as i32) < 0 { v.push(kbd(m, 0, KEYEVENTF_KEYUP)); } }
+}
+/// Ctrl+`vk` with no other modifier.
+unsafe fn ctrl_chord(vk: VIRTUAL_KEY) {
+    let mut v = Vec::new(); release_held(&mut v);
+    v.push(kbd(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0))); tap(&mut v, vk); v.push(kbd(VK_CONTROL, 0, KEYEVENTF_KEYUP));
+    SendInput(&v, std::mem::size_of::<INPUT>() as i32);
+}
+unsafe fn inject(delete: usize, insert: &str, then: Option<Boundary>) {
+    let mut v = Vec::new(); release_held(&mut v);
     for _ in 0..delete { tap(&mut v, VK_BACK); }
     for u in insert.encode_utf16() {
         if u == b'\n' as u16 { tap(&mut v, VK_RETURN); continue } if u == b'\t' as u16 { tap(&mut v, VK_TAB); continue }
@@ -141,8 +149,74 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::Select(i) => { let _ = st.tx.send(UiMsg::Select(i)); }
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), anchor: an }); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
-        Action::Rewrite(_) => {}
+        Action::Rewrite(job) => st.worker.submit(job),
     } }
+}
+
+// ---------- rewrite: selection + clipboard, on the desk thread ----------
+/// Built on the desk thread with its own COM MTA and IUIAutomation, so the caret `uia_worker` stays free.
+struct WinHost { auto: Option<IUIAutomation> }
+impl WinHost {
+    fn new() -> WinHost { unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok(); WinHost { auto: CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok() } } }
+    fn focused(&self) -> Option<IUIAutomationElement> { unsafe { self.auto.as_ref()?.GetFocusedElement().ok() } }
+}
+/// GDI-handle formats are not HGLOBAL memory, so they cannot be saved as bytes (CF_BITMAP comes back from CF_DIB).
+const GDI_FORMATS: [CLIPBOARD_FORMAT; 8] = [CF_BITMAP, CF_METAFILEPICT, CF_PALETTE, CF_ENHMETAFILE, CF_OWNERDISPLAY, CF_DSPBITMAP, CF_DSPMETAFILEPICT, CF_DSPENHMETAFILE];
+/// Run `f` with the clipboard open, retrying while another app holds it.
+unsafe fn with_clipboard<R>(f: impl FnOnce() -> R) -> Option<R> {
+    for _ in 0..20 { if OpenClipboard(None).is_ok() { let r = f(); let _ = CloseClipboard(); return Some(r) } std::thread::sleep(Duration::from_millis(10)); }
+    None
+}
+unsafe fn read_global(fmt: u32) -> Option<Vec<u8>> {
+    let h = HGLOBAL(GetClipboardData(fmt).ok()?.0); let p = GlobalLock(h) as *const u8; if p.is_null() { return None }
+    let v = std::slice::from_raw_parts(p, GlobalSize(h)).to_vec(); let _ = GlobalUnlock(h); Some(v)
+}
+/// With the clipboard open and emptied by us. The clipboard owns the memory once SetClipboardData succeeds.
+unsafe fn set_global(fmt: u32, bytes: &[u8]) {
+    let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return };
+    let p = GlobalLock(h) as *mut u8; if p.is_null() { let _ = GlobalFree(Some(h)); return }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()); let _ = GlobalUnlock(h);
+    if SetClipboardData(fmt, Some(HANDLE(h.0))).is_err() { let _ = GlobalFree(Some(h)); }
+}
+impl rewrite::Host for WinHost {
+    type Snap = Vec<(u32, Vec<u8>)>;
+    fn is_secure(&mut self) -> bool {
+        unsafe { password_edit(gui_info(GetForegroundWindow()).map(|g| g.hwndFocus).unwrap_or_default()) || self.focused().and_then(|e| e.CurrentIsPassword().ok()).is_some_and(|b| b.as_bool()) }
+    }
+    fn selection_via_accessibility(&mut self) -> Option<String> {
+        unsafe {
+            let tp: IUIAutomationTextPattern = self.focused()?.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
+            if tp.SupportedTextSelection().ok()? == SupportedTextSelection_None { return None }
+            let sel = tp.GetSelection().ok()?;
+            (0..sel.Length().ok()?).map(|i| sel.GetElement(i).and_then(|r| r.GetText(-1)).map(|b| b.to_string())).collect::<windows::core::Result<String>>().ok()
+        }
+    }
+    fn clip_seq(&mut self) -> u64 { unsafe { GetClipboardSequenceNumber() as u64 } }
+    fn clip_snapshot(&mut self) -> Self::Snap {
+        unsafe { with_clipboard(|| {
+            let mut v = vec![]; let mut f = EnumClipboardFormats(0);
+            while f != 0 { if !GDI_FORMATS.iter().any(|g| g.0 as u32 == f) { if let Some(b) = read_global(f) { v.push((f, b)) } } f = EnumClipboardFormats(f); }
+            v
+        }).unwrap_or_default() }
+    }
+    fn clip_restore(&mut self, s: Self::Snap) { unsafe { with_clipboard(|| { let _ = EmptyClipboard(); for (f, b) in &s { set_global(*f, b) } }); } }
+    fn clip_read_text(&mut self) -> Option<String> {
+        let b = unsafe { with_clipboard(|| read_global(CF_UNICODETEXT.0 as u32)) }.flatten()?;
+        let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+        Some(String::from_utf16_lossy(&u))
+    }
+    fn clip_write_transient(&mut self, text: &str) {
+        unsafe { with_clipboard(|| {
+            let _ = EmptyClipboard();
+            set_global(CF_UNICODETEXT.0 as u32, &text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect::<Vec<u8>>());
+            // clipboard monitors, Win+V history and the cloud clipboard skip content carrying these formats
+            set_global(RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")), &[0]);
+            for name in [w!("CanIncludeInClipboardHistory"), w!("CanUploadToCloudClipboard")] { set_global(RegisterClipboardFormatW(name), &0u32.to_le_bytes()) }
+        }); }
+    }
+    fn post_copy(&mut self) { unsafe { ctrl_chord(VK_C) } }
+    fn post_paste(&mut self) { unsafe { ctrl_chord(VK_V) } }
+    fn pause(&mut self, ms: u64) { std::thread::sleep(Duration::from_millis(ms)) }
 }
 
 // ---------- hooks ----------
@@ -240,6 +314,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 // ---------- hook thread ----------
 unsafe fn control(st: &mut State) -> bool {
     service_settings(st);
+    while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     if bridge::take(&bridge::REQ_QUIT) { st.app.save(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
@@ -249,7 +324,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()) }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()) }));
         let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };
