@@ -29,10 +29,10 @@ pub const BORDER: f64 = 1.0;
 pub const RADIUS: f64 = 8.0;
 pub const ROW_PX: f64 = 10.0;
 pub const FONT_PX: f64 = 15.0;
-/// Space between the suggestion and the Tab `Kbd`. The hint is only drawn on the selected row; the slot is always reserved.
+/// Space between the suggestion and its key hint (`Tab`, or `Tab` `2`).
 pub const BADGE_GAP: f64 = 8.0;
-/// Width reserved for the Tab `Kbd` (`text_xs`, horizontal padding, "Tab").
-pub const BADGE_W: f64 = 40.0;
+/// Width reserved for the widest key hint: the `Tab` and digit `Kbd`s (`text_xs`, horizontal padding) and the gap.
+pub const BADGE_W: f64 = 58.0;
 /// Added to every measured single-line width: Thai upper/lower marks and tone marks on the last cluster can paint a
 /// little past the advance width, and layout rounds to device pixels; the slack keeps them inside the column.
 pub const MEASURE_SLACK: f64 = 3.0;

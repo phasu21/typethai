@@ -67,10 +67,13 @@ reacting, remove the old entry and re-add the app.
 
 ## Using it
 
+Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab` `2` and `Tab` `3` on the others.
+
 | Key | Action |
 |---|---|
 | **Tab** (bubble visible) | Apply the selected row when Tab is released |
 | **Hold Tab + 1 / 2 / 3** | Apply row 1 / 2 / 3 (the digit is not typed) |
+| **Click** a row | Apply that row |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the selection |
 | **Esc** | Dismiss the bubble |

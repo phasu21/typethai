@@ -47,7 +47,7 @@ impl Render for BubbleView {
         let t = cx.theme(); let l = self.layout; let selected = self.selected;
         let dark = t.is_dark();
         let hover = t.list_hover;
-        // selected row is a little stronger in dark mode; its Kbd says Tab applies it
+        // selected row is a little stronger in dark mode
         let sel_bg = if dark { t.foreground.opacity(0.22) } else { t.accent };
         let tab_key = Keystroke::parse("tab").expect("tab");
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
@@ -70,7 +70,10 @@ impl Render for BubbleView {
                         div().w(px(l.label_w as f32)).flex_none().flex()
                             .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
                             .child(div().max_w(px(l.label_w as f32)).whitespace_normal().child(label.clone())) })
-                    .when(i == selected, |d| d.child(Kbd::new(tab_key.clone())))
+                    // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
+                    .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(2.))
+                        .child(Kbd::new(tab_key.clone()))
+                        .when(i != selected, |d| d.child(Kbd::new(Keystroke::parse(&(i + 1).to_string()).expect("digit")))))
             }))).into_any_element()
     }
 }
