@@ -37,8 +37,12 @@ once they are up they follow the word as you keep typing. **Settings… → Word
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
-- **AI rewrite (optional).** Select text and press **⌃⌥R** to fix its typos or translate it between Thai and
-  English, through an OpenAI-compatible service (OpenRouter by default) with your own API key.
+- **⌃⌥R for a selection or the last word.** With text selected, the bubble offers it in the other layout
+  (`l;ylfu` → สวัสดี, or English typed on the Thai layout back to English) and with its typos fixed, both worked
+  out on your computer, then the AI rewrite actions. With nothing selected it offers the conversion and spelling
+  fixes for the word before the caret, the same rows the bubble shows after Space, also after you dismissed them.
+- **AI rewrite (optional).** The ⌃⌥R bubble adds *Fix typos* and *Translate TH↔EN* for selected text, through an
+  OpenAI-compatible service (OpenRouter by default) with your own API key.
 - **Password fields are skipped** (macOS secure input / AXSecureTextField, Windows ES_PASSWORD / UIA IsPassword).
 
 ## Download and install
@@ -84,7 +88,7 @@ Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
-| **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
+| **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
@@ -97,7 +101,8 @@ with the defaults) and press **Save key**. The key is kept in the macOS Keychain
 a file. Model and base URL can point at any OpenAI-compatible `/chat/completions` server; plain `http://` is accepted
 only for `localhost` (for example Ollama at `http://localhost:11434/v1`). **Instructions** adds your own text to the
 prompt for both actions, for example a preferred tone. Esc, typing, a click elsewhere or switching apps cancels a
-rewrite at any step.
+rewrite at any step. Without a key, or with **Offer AI rewrite** off, ⌃⌥R still offers the layout and spelling rows. Long
+selections (over 300 characters) get only the AI actions.
 
 When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
 in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
@@ -112,7 +117,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b"] [--screenshot PNG]` | Show the bubble with sample rows (no key capture) |
@@ -121,7 +126,8 @@ in between) to run the guess-convert on the current or last word instead of usin
 ## Privacy
 
 - **Conversion and learning run locally.** Your typing is never uploaded.
-- **AI rewrite is the one exception, and only when you press ⌃⌥R and pick an action.** The selected text is sent to
+- **AI rewrite is the one exception, and only when you press ⌃⌥R and pick *Fix typos* or *Translate TH↔EN*.** The
+  layout and spelling rows are worked out on your computer. The selected text is sent to
   the service set in Settings (OpenRouter by default, with its data collection opt-out set). Nothing is sent without a
   key, and the feature can be turned off in Settings.
 - To work, typeThai reads your keystrokes system-wide. It keeps only the current word and line in memory, and drops

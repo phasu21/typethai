@@ -355,9 +355,9 @@ impl SettingsView {
             .child(Button::new("save-rewrite").label("Save").primary().on_click(click(view, |v, window, cx| v.save_rewrite(window, cx))))
             .into_any_element());
         page("AI rewrite", IconName::Bot,
-            format!("Select text and press {hotkey} to fix typos or translate between Thai and English. The text is sent to the service below."),
-            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", hotkey], std::iter::empty()),
-            vec![SettingItem::new("Rewrite selected text", enabled), SettingItem::new("API key", key).description(key_note),
+            format!("Select text and press {hotkey}: the bubble offers it in the other layout and with typos fixed, worked out on this computer. With AI rewrite on and a key saved, Fix typos and Translate TH↔EN follow; only those send the text to the service below. With nothing selected, {hotkey} offers fixes for the word before the caret."),
+            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", "selection", "selected", "layout", "spelling", "word", hotkey], std::iter::empty()),
+            vec![SettingItem::new("Offer AI rewrite", enabled), SettingItem::new("API key", key).description(key_note),
                 SettingItem::new("Model", draft_field(view, |v| v.model.clone(), |v, s| v.model = s)),
                 SettingItem::new("Base URL", draft_field(view, |v| v.base_url.clone(), |v, s| v.base_url = s)),
                 SettingItem::new("Instructions", instructions).layout(Axis::Vertical).description("Added to both Fix typos and Translate."), save])

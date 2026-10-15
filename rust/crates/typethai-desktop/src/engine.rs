@@ -21,7 +21,8 @@ pub trait Speller {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause,
-    /// Ctrl+Opt/Alt+R: rewrite the selected text.
+    /// Ctrl+Opt/Alt+R: options for the selected text (other layout, spelling, AI rewrite), or with nothing selected for
+    /// the word before the caret.
     Rewrite }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
@@ -118,7 +119,7 @@ pub enum RewriteRow {
     Busy(ReqId),
     /// Result: Tab pastes this full text (the label may be a preview).
     Result(String),
-    /// No selection / no key / failure; the label is the message.
+    /// Nothing to offer / no key / failure; the label is the message.
     Notice,
 }
 /// What the key handler should do with the original key event.
@@ -400,7 +401,8 @@ impl Engine {
                 self.resume_glued();
                 // a new word starts: the bubble was about the previous word and can no longer be applied
                 let mut a = vec![]; if self.word.is_empty() { self.settle(); self.show(vec![], &mut a); self.live_streak = 0; }
-                else if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Guess { .. }, .. })) { self.show(vec![], &mut a); }
+                // a Guess or the Ctrl+Opt+R rows were made for the word as it was
+                else if !matches!(self.bubble.first(), None | Some(BubbleItem { kind: BubbleKind::Live { .. } | BubbleKind::Complete { .. }, .. })) { self.show(vec![], &mut a); }
                 let up = self.completions_up();
                 self.word.push(c); self.last_key = Some(Instant::now());
                 self.live_update(&mut a);
@@ -985,7 +987,11 @@ impl Engine {
                         acts.push(self.replace(&self.screen_of(&typed), &insert, None));
                         self.commit_glued(typed, insert, 0);
                     }
-                    BubbleKind::Typo { word } => if let Some((shown, c)) = self.last_on_screen() {
+                    BubbleKind::Typo { word } => if !self.word.is_empty() {
+                        let typed = self.word.clone();
+                        acts.push(self.replace(&self.screen_of(&typed), &word, None));
+                        self.commit_glued(typed, word, 0);
+                    } else if let Some((shown, c)) = self.last_on_screen() {
                         let c = c.clone();
                         acts.push(self.replace(&shown, &format!("{word}{}", c.after()), None));
                         self.line.pop(); self.line.push(Committed { converted: Some(word), ..c });
@@ -1011,10 +1017,12 @@ impl Engine {
         }
     }
     fn mint(&mut self) -> ReqId { self.last_req = self.last_req.next(); self.last_req }
+    /// Read the selection first: what is offered depends on it. The line is kept, as the word before the caret is what
+    /// gets offered when nothing is selected; any key while capturing still resets it.
     fn start_rewrite(&mut self) -> Outcome {
-        if !self.rewrite.enabled { return Outcome::pass() }
         if self.capturing.is_some() { return Outcome { swallow: true, actions: vec![] } }
-        let mut a = self.reset(); let id = self.mint(); self.capturing = Some(id);
+        let mut a = vec![]; self.show(vec![], &mut a); self.tab = TabChord::Up;
+        let id = self.mint(); self.capturing = Some(id);
         a.push(Action::Rewrite(Job::Capture(id)));
         Outcome { swallow: true, actions: a }
     }
@@ -1031,16 +1039,115 @@ impl Engine {
         }
         Outcome { swallow: true, actions: a }
     }
+    /// ⌃⌥R with nothing selected: the rows for the word before the caret, the buffer or else the last word on the
+    /// line. None when there is no such word.
+    fn word_options(&self) -> Option<Vec<BubbleItem>> {
+        if !self.word.is_empty() { return Some(self.word_rows(&self.word, self.thai_active)) }
+        let c = self.line.last().filter(|_| self.line.len() > self.line_start)?;
+        // a converted word's other layout is its undo
+        if c.converted.is_some() { return Some(vec![BubbleItem { label: c.orig.clone(), kind: BubbleKind::UndoConversion }]) }
+        Some(self.word_rows(&c.typed, c.rev))
+    }
+    /// The conversion of `typed` (keys typed in the `rev` direction) when it looks meant, and the spelling fixes of the
+    /// word as it is and as converted, in the order the boundary bubble uses. A reverse conversion clears a high bar,
+    /// so the Thai on screen is not offered fixed next to it; a forward one keeps the English spelling in reach.
+    fn word_rows(&self, typed: &str, rev: bool) -> Vec<BubbleItem> {
+        let (screen, target) = if rev { (en_to_th(typed), typed.to_string()) } else { (typed.to_string(), en_to_th(typed)) };
+        let fixes = |text: &str, thai: bool| if thai { self.typo_items(text) } else { self.en_items(text) };
+        let converts = if rev { !self.blocked(typed) && { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
+        let here = if rev && converts { vec![] } else { fixes(&screen, rev) };
+        if !converts { return here.into_iter().take(3).collect() }
+        let mut rows = vec![BubbleItem { label: target.clone(), kind: BubbleKind::Convert { typed: typed.to_string(), thai: target.clone() } }];
+        rows.extend(here.first().cloned());
+        rows.extend(fixes(&target, !rev).into_iter().filter(|t| t.label != target));
+        rows.extend(here.into_iter().skip(1));
+        rows.truncate(3);
+        rows
+    }
+    /// Rows for selected text: the local fixes, then the AI presets when they can run. A notice when there is nothing.
+    fn selection_offer(&self, text: &str, has_key: bool) -> Vec<BubbleItem> {
+        let mut rows = self.selection_rows(text);
+        if self.rewrite.enabled && has_key { rows.extend(Preset::ALL.map(|p| row(p.label(), RewriteRow::Preset(p, text.to_string())))) }
+        if rows.is_empty() { rows.push(row(if self.rewrite.enabled { rewrite::NO_KEY } else { rewrite::NO_SUGGESTIONS }, RewriteRow::Notice)) }
+        rows
+    }
+    /// The selection in the other layout, then with its spelling fixed, each when it changes something. Each row
+    /// pastes its whole text over the selection.
+    fn selection_rows(&self, text: &str) -> Vec<BubbleItem> {
+        if text.chars().count() > SELECTION_LOCAL_MAX { return vec![] }
+        let spans = word_spans(text);
+        let flips = self.selection_flips(text, &spans);
+        let converted = splice(text, &spans, flips.iter().map(|f| f.as_ref().map(|(w, _)| w.clone())).collect());
+        let mut out: Vec<String> = vec![];
+        for t in [converted, self.fix_selection(text, &spans, &flips)].into_iter().flatten() { if !out.contains(&t) { out.push(t) } }
+        out.into_iter().map(|t| row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Result(t))).collect()
+    }
+    /// Each word typed on the wrong layout, flipped, and whether that is the reverse direction: English keys that read
+    /// as Thai, and Thai that reads as English keys. Each direction scores its words as one line.
+    fn selection_flips(&self, text: &str, spans: &[(usize, usize)]) -> Vec<Option<(String, bool)>> {
+        let words: Vec<&str> = spans.iter().map(|&(a, b)| &text[a..b]).collect();
+        let mut to: Vec<Option<(String, bool)>> = vec![None; words.len()];
+        let fwd: Vec<usize> = (0..words.len()).filter(|&i| words[i].is_ascii() && words[i].chars().any(|c| c.is_ascii_alphabetic())).collect();
+        if !fwd.is_empty() {
+            let ds = self.det.decide_line(&fwd.iter().map(|&i| words[i]).collect::<Vec<_>>());
+            for ((&i, d), p) in fwd.iter().zip(&ds).zip(self.personal.line_probs(&ds)) {
+                if d.valid && !self.blocked(words[i]) && p > self.band(&d.candidate, self.opts.suggest_band) { to[i] = Some((d.candidate.clone(), false)) }
+            }
+        }
+        let rev: Vec<(usize, String)> = (0..words.len()).filter(|&i| lang_of(words[i]) == InputLang::Thai).filter_map(|i| Some((i, th_text_to_keys(words[i])?))).collect();
+        if let (Some(r), false) = (&self.rev, rev.is_empty()) {
+            let ds = r.decide_line(&self.det, &rev.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>());
+            for (((i, keys), d), p) in rev.iter().zip(&ds).zip(r.line_probs(&ds)) {
+                if d.convertible && !self.blocked(keys) && p > self.opts.rev_prev { to[*i] = Some((keys.clone(), true)) }
+            }
+        }
+        to
+    }
+    /// Spelling fixes, word by word: the Thai corrector for Thai runs, the spell checker for English words until
+    /// `SPELL_BUDGET` is spent. Words that flip in reverse are English, so their Thai reading is left alone (see
+    /// `word_rows`).
+    fn fix_selection(&self, text: &str, spans: &[(usize, usize)], flips: &[Option<(String, bool)>]) -> Option<String> {
+        if !self.opts.typo_suggestions { return None }
+        let deadline = Instant::now() + SPELL_BUDGET;
+        let to = spans.iter().zip(flips).map(|(&(a, b), f)| { let w = &text[a..b];
+            if matches!(f, Some((_, true))) { None }
+            else if lang_of(w) == InputLang::Thai { self.fix_thai(w) }
+            else if Instant::now() < deadline { self.en_items(w).into_iter().next().map(|i| i.label) }
+            else { None } }).collect();
+        splice(text, spans, to)
+    }
+    /// A Thai run with the typos the corrector is sure of fixed. It judges about a word at a time, so when the whole run
+    /// is not fixed, windows of up to three pieces that hold a piece the dictionary lacks are, widest first; windows of
+    /// known words only are left alone, as the corrector "fixes" correct text there.
+    fn fix_thai(&self, run: &str) -> Option<String> {
+        let c = self.corrector.as_ref()?;
+        let fix = |w: &str| { let r = c.suggest(w, 1, &self.det.thai); (!r.in_dict && r.keep_confidence < TYPO_KEEP).then(|| r.suggestions.into_iter().next().map(|s| s.word)).flatten() };
+        if let Some(w) = fix(run) { return Some(w) }
+        let segs = self.det.th_dict.segment(run);
+        let (mut out, mut i, mut changed) = (String::new(), 0, false);
+        while i < segs.len() {
+            let unknown = |n: usize| segs[i..i + n].iter().any(|w| !self.det.th_dict.has(w));
+            match (1..=3).rev().filter(|&n| i + n <= segs.len() && n < segs.len() && unknown(n)).find_map(|n| Some((n, fix(&segs[i..i + n].concat())?))) {
+                Some((n, w)) => { out += &w; i += n; changed = true }
+                None => { out += segs[i]; i += 1 }
+            }
+        }
+        changed.then_some(out)
+    }
     /// A rewrite worker answer. Stale answers (cancelled or superseded) change nothing.
     pub fn on_reply(&mut self, r: Reply) -> Vec<Action> {
         let mut a = vec![];
         match r {
-            Reply::Captured(id, c) if self.capturing == Some(id) => {
+            Reply::Captured { id, sel, has_key } if self.capturing == Some(id) => {
                 self.capturing = None;
-                let rows = match c {
-                    Captured::Text(t) if !t.trim().is_empty() => Preset::ALL.map(|p| row(p.label(), RewriteRow::Preset(p, t.clone()))).to_vec(),
-                    Captured::Text(_) | Captured::NoSelection => vec![row(rewrite::NO_SELECTION, RewriteRow::Notice)],
-                    Captured::NoKey => vec![row(rewrite::NO_KEY, RewriteRow::Notice)],
+                let rows = match sel {
+                    // pasting over the selection edits text the line does not track
+                    Captured::Text(t) if !t.trim().is_empty() => { self.reset(); self.selection_offer(&t, has_key) }
+                    Captured::Text(_) | Captured::NoSelection => match self.word_options() {
+                        Some(rows) if !rows.is_empty() => rows,
+                        Some(_) => vec![row(rewrite::NO_SUGGESTIONS, RewriteRow::Notice)],
+                        None => vec![row(rewrite::NO_SELECTION, RewriteRow::Notice)],
+                    },
                     Captured::Secure => vec![],
                 };
                 self.show(rows, &mut a);
@@ -1055,6 +1162,29 @@ impl Engine {
     }
 }
 fn row(label: &str, r: RewriteRow) -> BubbleItem { BubbleItem { label: label.to_string(), kind: BubbleKind::Rewrite(r) } }
+/// Longest selection the local rows look at, on the thread that also takes the keys. The Thai corrector needs about
+/// 2 ms for this much text.
+const SELECTION_LOCAL_MAX: usize = 300;
+/// Time the spell checker gets for a selection: about 0.15 ms per right word, 2 to 8 ms per misspelled one (macOS,
+/// measured in `completion_cost`), so a typo-heavy selection is fixed only up to here.
+const SPELL_BUDGET: Duration = Duration::from_millis(25);
+/// The corrector replaces a Thai word when it would keep it with less confidence than this. In samples, correct runs
+/// score 0.99 and up and runs with a typo 0.35 to 0.71.
+const TYPO_KEEP: f64 = 0.9;
+/// Byte spans of the non-whitespace runs in `text`.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let (mut v, mut start) = (vec![], None);
+    for (i, c) in text.char_indices() { match (c.is_whitespace(), start) { (false, None) => start = Some(i), (true, Some(s)) => { v.push((s, i)); start = None } _ => {} } }
+    if let Some(s) = start { v.push((s, text.len())) }
+    v
+}
+/// `text` with the words at `spans` replaced where `to` has a replacement; None when that changes nothing.
+fn splice(text: &str, spans: &[(usize, usize)], to: Vec<Option<String>>) -> Option<String> {
+    let (mut out, mut at) = (String::new(), 0);
+    for (&(a, b), t) in spans.iter().zip(to) { out += &text[at..a]; out += t.as_deref().unwrap_or(&text[a..b]); at = b; }
+    out += &text[at..];
+    (out != text).then_some(out)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1631,6 +1761,8 @@ mod tests {
         assert_eq!(labels(&e), ["ที", "my"]);
     }
     use crate::rewrite::{Captured, Failure, Job, Preset, Reply, ReqId, Run};
+    /// The worker's answer to a capture, with an API key stored.
+    fn captured(id: ReqId, sel: Captured) -> Reply { Reply::Captured { id, sel, has_key: true } }
     /// Ctrl+Opt+R: swallowed, hands out a capture job.
     fn start(e: &mut Engine) -> ReqId {
         let o = e.on_key(Key::Hotkey(Hotkey::Rewrite)); assert!(o.swallow);
@@ -1639,13 +1771,13 @@ mod tests {
     fn job_run(o: &Outcome) -> Run { match o.actions.last() { Some(Action::Rewrite(Job::Run(r))) => r.clone(), a => panic!("expected a run job, got {a:?}") } }
     /// Start, capture `text` and pick the selected preset with Tab.
     fn pending(e: &mut Engine, text: &str) -> Run {
-        let id = start(e); e.on_reply(Reply::Captured(id, Captured::Text(text.into())));
+        let id = start(e); e.on_reply(captured(id, Captured::Text(text.into())));
         let o = tab(e); assert!(o.swallow); job_run(&o)
     }
     #[test] fn rewrite_fix_then_paste() {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
-        e.on_reply(Reply::Captured(id, Captured::Text("helo wrld".into())));
+        e.on_reply(captured(id, Captured::Text("helo wrld".into())));
         assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
         let o = tab(&mut e); let run = job_run(&o);
         assert_eq!((run.preset, run.text.as_str(), run.cfg.model.as_str()), (Preset::Fix, "helo wrld", "google/gemma-4-26b-a4b-it"));
@@ -1659,11 +1791,11 @@ mod tests {
     }
     #[test] fn rewrite_select_next_or_click_picks_translate() {
         let Some(mut e) = engine() else { return };
-        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("สวัสดี".into())));
+        let id = start(&mut e); e.on_reply(captured(id, Captured::Text("สวัสดี".into())));
         assert_eq!(e.on_key(Key::SelectNext).actions, vec![Action::Select(1)]);
         assert_eq!(job_run(&tab(&mut e)).preset, Preset::Translate);
         e.on_key(Key::Esc);
-        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("สวัสดี".into())));
+        let id = start(&mut e); e.on_reply(captured(id, Captured::Text("สวัสดี".into())));
         let run = job_run(&e.on_key(Key::Hotkey(Hotkey::Accept(1))));
         assert_eq!((run.preset, run.text.as_str()), (Preset::Translate, "สวัสดี"));
     }
@@ -1677,7 +1809,7 @@ mod tests {
     }
     #[test] fn rewrite_space_cancels_choosing() {
         let Some(mut e) = engine() else { return };
-        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("helo".into())));
+        let id = start(&mut e); e.on_reply(captured(id, Captured::Text("helo".into())));
         let o = e.on_key(Key::Boundary(Boundary::Space));
         assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
     }
@@ -1685,7 +1817,7 @@ mod tests {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
         let o = e.on_key(Key::Esc); assert!(!o.swallow, "nothing on screen to dismiss: Esc reaches the app");
-        assert_eq!(e.on_reply(Reply::Captured(id, Captured::Text("helo".into()))), vec![]);
+        assert_eq!(e.on_reply(captured(id, Captured::Text("helo".into()))), vec![]);
         assert!(!e.bubble_visible());
     }
     #[test] fn rewrite_newer_request_wins() {
@@ -1693,7 +1825,7 @@ mod tests {
         let old = pending(&mut e, "one");
         e.on_key(Key::Esc);
         let id = start(&mut e);
-        e.on_reply(Reply::Captured(id, Captured::Text("two".into())));
+        e.on_reply(captured(id, Captured::Text("two".into())));
         assert_eq!(e.on_reply(Reply::Rewritten(old.req, Ok("ONE".into()))), vec![]);
         assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
         let new = job_run(&tab(&mut e));
@@ -1708,32 +1840,140 @@ mod tests {
         assert_eq!(labels(&e), ["The API key was rejected"]);
         let o = tab(&mut e); assert!(o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
     }
-    #[test] fn rewrite_no_selection_and_no_key_notices() {
+    /// Ctrl+Opt+R and the worker's answer: the labels that come up.
+    fn options(e: &mut Engine, sel: Captured) -> Vec<String> { let id = start(e); e.on_reply(captured(id, sel)); labels(e) }
+    const AI: [&str; 2] = ["Fix typos", "Translate TH↔EN"];
+    #[test] fn nothing_selected_offers_the_word_being_typed() {
+        let Some(mut e) = engine_typo() else { return };
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["สวัสดี"]);
+        log.push((None, tab(&mut e)));
+        assert_eq!(screen(&log), "สวัสดี");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu", "applied as a mid-word conversion, so it undoes back to the keys");
+    }
+    #[test] fn the_word_rows_go_when_the_word_changes() {
+        let Some(mut e) = engine_typo() else { return };
+        typ(&mut e, "l;ylfu");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["สวัสดี"]);
+        assert_eq!(e.on_key(Key::Char('j')), Outcome { swallow: false, actions: vec![Action::HideBubble] });
+    }
+    #[test] fn nothing_selected_brings_back_a_dismissed_word() {
         let Some(mut e) = engine() else { return };
-        for (c, want) in [(Captured::NoSelection, "No selected text found"), (Captured::Text(" \n ".into()), "No selected text found"), (Captured::NoKey, "Add an API key in Settings")] {
-            let id = start(&mut e); e.on_reply(Reply::Captured(id, c));
-            assert_eq!(labels(&e), [want]);
-            e.on_key(Key::Esc);
-        }
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        let mut log = vec![];
+        feed(&mut e, &mut log, "is ths ");
+        e.on_key(Key::Esc); assert!(!e.bubble_visible());
+        assert_eq!(options(&mut e, Captured::NoSelection), ["this", "the"]);
+        log.push((None, tab(&mut e)));
+        assert_eq!(screen(&log), "is this ");
+    }
+    #[test] fn nothing_selected_fixes_the_spelling_of_the_buffer() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        let mut log = vec![];
+        feed(&mut e, &mut log, "is ths");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["this", "the"]);
+        log.push((None, e.on_key(Key::Hotkey(Hotkey::Accept(1)))));
+        assert_eq!(screen(&log), "is the");
+        feed(&mut e, &mut log, "x");
+        assert_eq!((screen(&log).as_str(), e.buffer()), ("is thex", "thex"), "the fixed word is still the word being typed");
+    }
+    #[test] fn nothing_selected_offers_english_typed_on_the_thai_layout() {
+        let Some(mut e) = engine_typo() else { return };
+        typ(&mut e, "i dont "); e.set_thai_active(true); e.reset(); e.set_thai_active(true);
+        let mut log = vec![];
+        for c in "know".chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+        assert_eq!(screen(&log), "าืนไ");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["know"], "no Thai spelling for what is clearly English");
+        log.push((None, tab(&mut e)));
+        assert_eq!(screen(&log), "know");
+    }
+    #[test] fn nothing_selected_after_a_conversion_offers_the_undo() {
+        let Some(mut e) = engine_typo() else { return };
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu \t");
+        assert_eq!(screen(&log), "สวัสดี ");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["l;ylfu"]);
+        log.push((None, tab(&mut e)));
+        assert_eq!(screen(&log), "l;ylfu ");
+    }
+    #[test] fn nothing_selected_and_nothing_to_offer_says_so() {
+        let Some(mut e) = engine() else { return };
+        assert_eq!(options(&mut e, Captured::NoSelection), ["Select text or type a word first"]);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text(" \n ".into())), ["Select text or type a word first"], "a blank selection is no selection");
+        e.on_key(Key::Esc);
+        typ(&mut e, "hello ");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["No suggestions"]);
+        e.on_key(Key::Esc);
+        typ(&mut e, "hello\n");
+        assert_eq!(options(&mut e, Captured::NoSelection), ["Select text or type a word first"], "the word is on the line above");
+    }
+    #[test] fn a_selection_typed_on_the_wrong_layout_is_offered_converted() {
+        let Some(mut e) = engine_typo() else { return };
+        assert_eq!(options(&mut e, Captured::Text("l;ylfu".into())), ["สวัสดี", AI[0], AI[1]]);
+        let o = tab(&mut e);
+        assert_eq!(o, Outcome { swallow: true, actions: vec![Action::HideBubble, Action::Rewrite(Job::Paste("สวัสดี".into()))] });
+        assert_eq!(options(&mut e, Captured::Text(en_to_th("i dont know"))), ["i dont know", AI[0], AI[1]]);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("l;ylfu world\n".into())), ["สวัสดี world\n", AI[0], AI[1]], "only the wrong words flip, spacing stays");
+    }
+    #[test] fn a_selection_with_typos_is_offered_fixed() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FakeSpeller));
+        assert_eq!(options(&mut e, Captured::Text("is ths".into())), ["is this", AI[0], AI[1]]);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("รานอาหาร".into())), ["ร้านอาหาร", AI[0], AI[1]]);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("ขอบคุนมาก ประเทษไทย\n".into())), ["ขอบคุณมาก ประเทศไทย\n", AI[0], AI[1]], "a typo inside a run");
+    }
+    #[test] fn a_correct_selection_gets_only_the_ai_rows_or_a_notice() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FakeSpeller));
+        assert_eq!(options(&mut e, Captured::Text("hello world".into())), AI);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("สวัสดีครับ ยินดีที่ได้รู้จัก".into())), AI);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("วันนี้อากาศดีมากเลยนะ".into())), AI);
+        e.on_key(Key::Esc);
+        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: false });
+        assert_eq!(labels(&e), ["Add an API key in Settings"]);
+        e.on_key(Key::Esc);
+        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false });
+        assert_eq!(labels(&e), ["is this"], "no key: the local fix alone, no notice");
+    }
+    #[test] fn with_rewrite_off_a_selection_gets_the_local_rows() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FakeSpeller)); e.rewrite.enabled = false;
+        assert_eq!(options(&mut e, Captured::Text("is ths".into())), ["is this"]);
+        e.on_key(Key::Esc);
+        assert_eq!(options(&mut e, Captured::Text("hello world".into())), ["No suggestions"]);
+    }
+    #[test] fn a_long_selection_skips_the_local_rows() {
+        let Some(mut e) = engine() else { return };
+        let long = "l;ylfu ".repeat(50);
+        assert_eq!(options(&mut e, Captured::Text(long)), AI);
     }
     #[test] fn rewrite_secure_refuses_silently() {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
-        assert_eq!(e.on_reply(Reply::Captured(id, Captured::Secure)), vec![]);
+        assert_eq!(e.on_reply(captured(id, Captured::Secure)), vec![]);
         assert!(!tab(&mut e).swallow, "no session left");
     }
-    #[test] fn rewrite_disabled_or_paused_passes_hotkey() {
+    #[test] fn rewrite_off_still_captures_and_paused_passes_hotkey() {
         let Some(mut e) = engine() else { return };
         e.rewrite.enabled = false;
-        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: false, actions: vec![] });
-        e.rewrite.enabled = true; e.on_key(Key::Hotkey(Hotkey::TogglePause));
+        start(&mut e);
+        e.on_key(Key::Esc); e.on_key(Key::Hotkey(Hotkey::TogglePause));
         assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: false, actions: vec![] });
     }
     #[test] fn rewrite_autorepeat_does_not_restart() {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
         assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: true, actions: vec![] });
-        e.on_reply(Reply::Captured(id, Captured::Text("helo".into())));
+        e.on_reply(captured(id, Captured::Text("helo".into())));
         assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
     }
     #[test] fn rewrite_tab_while_pending_keeps_waiting() {
@@ -2261,6 +2501,18 @@ mod tests {
                 println!("on_key {mode:?} {}: p50 {:.1} us p99 {:.1} us (n={})", if thai { "thai layout" } else { "en layout" }, ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
             }
         };
+        // Ctrl+Opt+R over the longest selection the local rows read: spell checker and corrector, on the key thread
+        e.corrector = Some(m.corrector());
+        for (name, text) in [("en", "teh quick brwon fox jumsp ovre the lazy dog "), ("th", "เมื่อวานฉันไปตลาดกับแม่ ")] {
+            let text: String = text.repeat(20).chars().take(SELECTION_LOCAL_MAX).collect();
+            let t = Instant::now(); let rows = e.selection_rows(&text);
+            println!("selection {name} {} chars: {} rows in {:.1} ms", text.chars().count(), rows.len(), t.elapsed().as_secs_f64() * 1e3);
+        }
+        for w in ["teh", "the", "brwon", "quick"] {
+            let t = Instant::now(); let g = e.speller.as_ref().and_then(|s| s.guesses(w)).map_or(0, |g| g.len());
+            println!("spell checker guesses({w}): {g} in {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
+        e.corrector = None;
         println!("-- no context");
         measure(&mut e);
         // worst case for the context path: a memory at its caps, and 20k corpus followers after the previous word
