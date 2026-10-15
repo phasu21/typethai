@@ -35,7 +35,7 @@ impl<'a> Lm<'a> {
     fn unigram(&self, prefix: &str) -> Vec<String> { self.top(prefix, 3) }
     fn shipped(&self, prev: &str, prefix: &str) -> Vec<String> { self.comp.complete(prefix, 3, Context { prev: Some(prev), bigrams: Some(self.bg), memory: None }).words }
     fn context(&self, prev: &str, prefix: &str, lambda: f64) -> Vec<String> {
-        let Some(m) = &self.marginal else { return self.rank(self.bg.followers(prev), prefix, lambda) };
+        let Some(m) = &self.marginal else { return self.rank(&self.bg.followers(prev).collect::<Vec<_>>(), prefix, lambda) };
         let key = format!("ctx\t{prefix}");
         if let Some(r) = self.cache.borrow().get(&key) { return r.clone() }
         let sum: f64 = m.values().sum();
@@ -46,9 +46,9 @@ impl<'a> Lm<'a> {
         let r: Vec<String> = cands.into_iter().take(3).map(String::from).collect();
         self.cache.borrow_mut().insert(key, r.clone()); r
     }
-    fn rank(&self, fol: &[(String, f64)], prefix: &str, lambda: f64) -> Vec<String> {
+    fn rank(&self, fol: &[(&str, f64)], prefix: &str, lambda: f64) -> Vec<String> {
         let sum: f64 = fol.iter().map(|f| f.1).sum();
-        let ext: HashMap<&str, f64> = fol.iter().filter(|(w, _)| w.len() > prefix.len() && w.starts_with(prefix)).map(|(w, c)| (w.as_str(), *c)).collect();
+        let ext: HashMap<&str, f64> = fol.iter().filter(|(w, _)| w.len() > prefix.len() && w.starts_with(prefix)).map(|(w, c)| (*w, *c)).collect();
         let mut cands = self.top(prefix, 3 + ext.len());
         cands.extend(ext.keys().map(|w| w.to_string())); cands.sort(); cands.dedup();
         let score = |w: &str| lambda * ext.get(w).map_or(0.0, |c| c / sum) + (1.0 - lambda) * self.freq.get(w).map_or(0.0, |f| f / self.total);
@@ -82,7 +82,7 @@ fn main() {
                     if w.chars().count() < 3 { continue }
                     let prefix: String = w.chars().take(2).collect();
                     let e = t.entry(name).or_default();
-                    e.n += 1; e.in_vocab += lm.freq.contains_key(w) as u64; e.covered += !lm.bg.followers(prev).is_empty() as u64;
+                    e.n += 1; e.in_vocab += lm.freq.contains_key(w) as u64; e.covered += (lm.bg.followers(prev).len() > 0) as u64;
                     e.uni += lm.unigram(&prefix).contains(w) as u64; e.ctx += lm.context(prev, &prefix, lambda).contains(w) as u64;
                     e.ship += lm.shipped(prev, &prefix).contains(w) as u64;
                 }

@@ -56,7 +56,7 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 #[test] fn bigrams_list_followers_by_count() {
     let b = Bigrams::new([("I", "want", 3.0), ("i", "was", 5.0), ("i", "Want", 4.0), ("i", "am", 7.0), ("to", "be", 2.0), ("a b", "c", 9.0), ("x", "y", 0.0)]
         .map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
-    let f = |p: &str| b.followers(p).iter().map(|(w, c)| (w.as_str(), *c)).collect::<Vec<_>>();
+    let f = |p: &str| b.followers(p).collect::<Vec<_>>();
     assert_eq!(f("I"), [("am", 7.0), ("want", 7.0), ("was", 5.0)]);
     assert_eq!(f("to"), [("be", 2.0)]);
     assert_eq!(f("x"), []); assert_eq!(f("a b"), []);

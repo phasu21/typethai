@@ -73,7 +73,7 @@ fn bigram_map(b: &[u8]) -> Result<Bigrams, String> {
         for _ in 0..get_var(b, &mut p)? { next += get_var(b, &mut p)?; pairs.push((prev as usize, next as usize, get_var(b, &mut p)? as f64)); }
     }
     if pairs.iter().any(|&(a, b, _)| a.max(b) >= words.len()) { return Err("bad word index".into()) }
-    Ok(Bigrams::new(pairs.into_iter().map(|(a, b, c)| (words[a].to_string(), words[b].to_string(), c))))
+    Ok(Bigrams::new(pairs.into_iter().map(|(a, b, c)| (words[a], words[b], c))))
 }
 /// A `prev\tnext\tcount` file as written by `tt-bigrams`.
 pub fn bigrams_tsv(path: &Path) -> Result<Bigrams, String> {

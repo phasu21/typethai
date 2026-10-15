@@ -54,7 +54,7 @@ impl Completer {
         };
         if let (Some(prev), Some(b)) = (cx.prev, cx.bigrams) {
             // best first, so the first matches are the ones that can rank
-            for (w, c) in b.followers(prev).iter().take(FOLLOWER_SCAN).filter(|(w, _)| w.starts_with(&p)).take(CANDIDATES) { add(BI, w, *c, &mut cands) }
+            for (w, c) in b.followers(prev).take(FOLLOWER_SCAN).filter(|(w, _)| w.starts_with(&p)).take(CANDIDATES) { add(BI, w, c, &mut cands) }
         }
         if let Some(m) = cx.memory {
             // a word the corpus does not know may be a typo until it has been finished a few times
@@ -164,31 +164,76 @@ fn nth_weakest(it: impl Iterator<Item = f64>, n: usize) -> f64 {
     v[n.clamp(1, v.len()) - 1]
 }
 /// Word pair counts from a corpus: each previous word (lowercase) with its next words, most frequent first.
+/// Compact: every distinct word is stored once in `text`, and a pair is a word id and a count, so the half a million
+/// pairs of the shipped model take a few MB instead of the ~50 MB of a string per pair.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Bigrams { next: HashMap<String, Vec<(String, f64)>> }
+pub struct Bigrams {
+    /// The distinct words, sorted and concatenated; word `i` is `text[ends[i - 1]..ends[i]]`.
+    text: String, ends: Vec<u32>,
+    /// The followers of word `i` are `pairs[start[i]..start[i + 1]]`.
+    start: Vec<u32>, pairs: Vec<(u32, f32)>,
+}
 impl Bigrams {
     /// `(prev, next, count)` triples; repeats are summed, and pairs with an empty or spaced word or a count <= 0 dropped.
-    pub fn new<I: IntoIterator<Item = (String, String, f64)>>(it: I) -> Self {
-        let mut m: HashMap<String, BTreeMap<String, f64>> = HashMap::new();
+    pub fn new<S: AsRef<str>, I: IntoIterator<Item = (S, S, f64)>>(it: I) -> Self {
+        let mut ids: HashMap<String, u32> = HashMap::new();
+        let mut id = |w: &str| -> u32 {
+            let w = w.to_ascii_lowercase();
+            if let Some(&i) = ids.get(&w) { return i }
+            let i = ids.len() as u32; ids.insert(w, i); i
+        };
+        let bad = |w: &str| w.is_empty() || w.chars().any(char::is_whitespace);
+        let mut raw: Vec<(u32, u32, f64)> = Vec::new();
         for (p, n, f) in it {
-            let bad = |w: &str| w.is_empty() || w.chars().any(char::is_whitespace);
-            if bad(&p) || bad(&n) || f.is_nan() || f <= 0.0 { continue }
-            *m.entry(p.to_ascii_lowercase()).or_default().entry(n.to_ascii_lowercase()).or_default() += f;
+            let (p, n) = (p.as_ref(), n.as_ref());
+            if bad(p) || bad(n) || f.is_nan() || f <= 0.0 { continue }
+            raw.push((id(p), id(n), f));
         }
-        let next = m.into_iter().map(|(p, ns)| {
-            let mut v: Vec<(String, f64)> = ns.into_iter().collect();
-            v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            (p, v)
-        }).collect();
-        Bigrams { next }
+        // renumber the words in sorted order, so a word is found by binary search and ties list in word order
+        let mut words: Vec<(String, u32)> = ids.into_iter().collect();
+        words.sort_unstable();
+        let mut to = vec![0u32; words.len()];
+        for (i, (_, old)) in words.iter().enumerate() { to[*old as usize] = i as u32; }
+        for t in &mut raw { (t.0, t.1) = (to[t.0 as usize], to[t.1 as usize]); }
+        raw.sort_unstable_by_key(|t| (t.0, t.1));
+        let mut summed: Vec<(u32, u32, f64)> = Vec::with_capacity(raw.len());
+        for t in raw { match summed.last_mut() { Some(l) if (l.0, l.1) == (t.0, t.1) => l.2 += t.2, _ => summed.push(t) } }
+        summed.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.total_cmp(&a.2)).then(a.1.cmp(&b.1)));
+        let (mut text, mut ends) = (String::new(), Vec::with_capacity(words.len()));
+        for (w, _) in &words { text.push_str(w); ends.push(text.len() as u32); }
+        let mut start = vec![0u32; words.len() + 1];
+        for t in &summed { start[t.0 as usize + 1] += 1; }
+        for i in 0..words.len() { start[i + 1] += start[i]; }
+        let pairs = summed.into_iter().map(|(_, n, f)| (n, f as f32)).collect();
+        Bigrams { text, ends, start, pairs }
     }
-    pub fn is_empty(&self) -> bool { self.next.is_empty() }
+    pub fn is_empty(&self) -> bool { self.pairs.is_empty() }
     /// Number of pairs.
-    pub fn len(&self) -> usize { self.next.values().map(Vec::len).sum() }
+    pub fn len(&self) -> usize { self.pairs.len() }
+    fn word(&self, i: u32) -> &str {
+        let i = i as usize;
+        &self.text[if i == 0 { 0 } else { self.ends[i - 1] as usize }..self.ends[i] as usize]
+    }
+    fn find(&self, w: &str) -> Option<u32> {
+        let w = w.to_ascii_lowercase();
+        let (mut lo, mut hi) = (0, self.ends.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.word(mid as u32).cmp(&w) { std::cmp::Ordering::Less => lo = mid + 1, std::cmp::Ordering::Greater => hi = mid, std::cmp::Ordering::Equal => return Some(mid as u32) }
+        }
+        None
+    }
+    /// The followers of word `i`; none for `None`.
+    fn of(&self, i: Option<u32>) -> impl ExactSizeIterator<Item = (&str, f64)> {
+        let r = i.map_or(0..0, |i| self.start[i as usize] as usize..self.start[i as usize + 1] as usize);
+        self.pairs[r].iter().map(move |&(n, f)| (self.word(n), f as f64))
+    }
     /// The words seen after `prev`, most frequent first.
-    pub fn followers(&self, prev: &str) -> &[(String, f64)] { self.next.get(&prev.to_ascii_lowercase()).map_or(&[], Vec::as_slice) }
-    /// Every pair, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str, f64)> { self.next.iter().flat_map(|(p, v)| v.iter().map(move |(n, f)| (p.as_str(), n.as_str(), *f))) }
+    pub fn followers(&self, prev: &str) -> impl ExactSizeIterator<Item = (&str, f64)> { self.of(self.find(prev)) }
+    /// Every pair, grouped by previous word.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str, f64)> {
+        (0..self.ends.len() as u32).flat_map(move |p| self.of(Some(p)).map(move |(n, f)| (self.word(p), n, f)))
+    }
 }
 /// Re-applies the typed prefix's Latin case to a lowercase completion: "HEL" -> "HELP", "Hel" -> "Help".
 fn recase(w: &str, prefix: &str) -> String {
