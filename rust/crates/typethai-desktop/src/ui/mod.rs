@@ -313,6 +313,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         learned: learned.map(|(w, kept, conv)| typethai_core::personal::Learned { word: w.into(), kept, conv }).to_vec(),
         completion: crate::engine::CompleteMode::default(),
         learn_words: true,
+        words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
     }
 }

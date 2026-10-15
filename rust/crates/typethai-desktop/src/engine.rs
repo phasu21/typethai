@@ -374,7 +374,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, learn_words: self.opts.learn_words, rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, learn_words: self.opts.learn_words, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -1786,7 +1786,9 @@ mod tests {
         completers(&mut e, CompleteMode::Typing);
         typ(&mut e, "helmet helmet helmet hel"); assert_eq!(labels(&e), ["helmet", "help", "hello"]);
         let saves = e.events_since_save;
+        assert_eq!(e.settings_snapshot().words_learned, 1);
         assert!(e.apply_settings(SettingsCmd::ForgetWords));
+        assert_eq!(e.settings_snapshot().words_learned, 0);
         assert_eq!(e.events_since_save, saves + 1, "a forget is saved");
         e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
     }

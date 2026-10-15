@@ -32,6 +32,8 @@ pub struct SettingsSnap {
     pub learned: Vec<Learned>,
     pub completion: CompleteMode,
     pub learn_words: bool,
+    /// Distinct words in the word memory.
+    pub words_learned: usize,
     pub rewrite: rewrite::Config,
 }
 

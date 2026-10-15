@@ -125,6 +125,8 @@ impl WordMemory {
         self.prune();
     }
     pub fn is_empty(&self) -> bool { self.words.is_empty() }
+    /// Distinct words remembered.
+    pub fn len(&self) -> usize { self.words.len() }
     /// How many times `word` was finished, decayed.
     pub fn count(&self, word: &str) -> f64 { self.words.get(&word.to_ascii_lowercase()).map_or(0.0, |s| s.at(self.clock)) }
     fn with_prefix<'a: 'p, 'p>(&'a self, p: &'p str) -> impl Iterator<Item = (&'a str, f64)> + 'p { starting(&self.words, p, self.clock) }
