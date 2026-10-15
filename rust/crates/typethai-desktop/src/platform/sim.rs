@@ -6,17 +6,26 @@
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
 //! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`. `<Idle>`: a typing pause long enough for word
 //! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
-use crate::{app::{hotkey_for, App}, engine::{Action, Boundary, Key, Outcome}};
+//! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
+//! deletes a grapheme per Backspace, here and in the engine's count.
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}};
 use std::io::BufRead;
-pub fn apply(screen: &mut Vec<char>, acts: &[Action], swallowed: bool, typed: Option<char>) {
+use unicode_segmentation::UnicodeSegmentation;
+/// One Backspace in an app that deletes `unit`s.
+fn backspace(screen: &mut Vec<char>, unit: DeleteUnit) {
+    let text: String = screen.iter().collect();
+    let n = text.graphemes(true).next_back().map_or(0, |g| if unit == DeleteUnit::Grapheme { g.chars().count() } else { 1 });
+    screen.truncate(screen.len() - n);
+}
+pub fn apply(screen: &mut Vec<char>, acts: &[Action], swallowed: bool, typed: Option<char>, unit: DeleteUnit) {
     if !swallowed { match typed {
-        Some('\u{8}') => { screen.pop(); }                                                     // Backspace
+        Some('\u{8}') => backspace(screen, unit),
         Some('\u{17}') => { while screen.last().is_some_and(|c| c.is_whitespace()) { screen.pop(); } while screen.last().is_some_and(|c| !c.is_whitespace()) { screen.pop(); } } // word delete
         Some('\u{15}') => { while screen.last().is_some_and(|c| *c != '\n') { screen.pop(); } } // line delete
         Some(c) => screen.push(c), None => {}
     } }
     for a in acts { if let Action::Replace { delete, insert, then } = a {
-        for _ in 0..*delete { screen.pop(); } screen.extend(insert.chars()); if let Some(b) = then { screen.extend(b.text().chars()) }
+        for _ in 0..*delete { backspace(screen, unit); } screen.extend(insert.chars()); if let Some(b) = then { screen.extend(b.text().chars()) }
     } }
 }
 pub fn run(mut app: App) {
@@ -24,6 +33,11 @@ pub fn run(mut app: App) {
         let line = line.unwrap(); let mut screen: Vec<char> = vec![]; let mut bubble: Vec<String> = vec![]; let ch: Vec<char> = line.chars().collect(); let mut i = 0;
         while i < ch.len() {
             let rest: String = ch[i..].iter().collect();
+            if let Some(id) = rest.strip_prefix("<APP:").and_then(|r| r.split_once('>')).map(|(id, _)| id.to_string()) {
+                app.engine.delete_unit = DeleteUnit::of_app(&id);
+                println!("  [app: {id}, Backspace deletes a {:?}]", app.engine.delete_unit);
+                i += id.chars().count() + "<APP:>".len(); continue
+            }
             let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
@@ -53,11 +67,11 @@ pub fn run(mut app: App) {
                     let sel = app.engine.selected();
                     println!("  [bubble: {}]", bubble.iter().enumerate().map(|(j, l)| format!("{}{l}", if j == sel { ">" } else { " " })).collect::<Vec<_>>().join(" | "));
                 }
-                apply(&mut screen, &o.actions, o.swallow, typed);
+                apply(&mut screen, &o.actions, o.swallow, typed, app.engine.delete_unit);
             }
             i += 1;
         }
-        let o = app.engine.on_key(Key::Boundary(Boundary::Enter)); apply(&mut screen, &o.actions, o.swallow, None);
+        let o = app.engine.on_key(Key::Boundary(Boundary::Enter)); apply(&mut screen, &o.actions, o.swallow, None, app.engine.delete_unit);
         for a in &o.actions { println!("  Enter -> {a:?}"); }
         println!("{}", screen.iter().collect::<String>()); app.maybe_save();
     }

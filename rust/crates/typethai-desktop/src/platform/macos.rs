@@ -2,7 +2,7 @@
 //! non-activating NSPanel bubble at the caret (AXFocusedUIElement + AXSelectedTextRange + AXBoundsForRange, mouse
 //! fallback), secure-input skip (IsSecureEventInputEnabled / AXSecureTextField), input-source switch to Thai/ABC after applying (TISSelectInputSource), tray.
 #![allow(non_upper_case_globals)]
-use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
 use core_foundation::base::CFRange;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::Ordering;
@@ -159,6 +159,14 @@ fn frontmost() -> Option<(i32, String, String)> {
         let app = ws.frontmostApplication()?;
         Some((app.processIdentifier(), app.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default(), app.localizedName().map(|s| s.to_string()).unwrap_or_default()))
     }
+}
+/// Bundle id of the app a key goes to (the frontmost app when the event names no pid); empty when unknown.
+fn bundle_of(pid: i64) -> String {
+    autoreleasepool(|_| {
+        let app = if pid > 0 { objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32) }
+            else { objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication() };
+        app.and_then(|a| a.bundleIdentifier()).map(|s| s.to_string()).unwrap_or_default()
+    })
 }
 fn is_chromium_browser(bundle: &str) -> bool {
     ["com.google.Chrome", "org.chromium", "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser", "com.vivaldi", "com.operasoftware"].iter().any(|b| bundle.starts_with(b))
@@ -352,7 +360,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 Key::TabUp
             } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
-            if pid != st.last_pid { st.last_pid = pid; let a = st.app.engine.reset(); run_actions(st, a); }
+            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); let a = st.app.engine.reset(); run_actions(st, a); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
             // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up.
             // The active input source decides the direction: Thai active -> reverse detector (English typed on Kedmanee),

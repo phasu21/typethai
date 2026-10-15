@@ -1,7 +1,7 @@
 //! Windows backend: WH_KEYBOARD_LL / WH_MOUSE_LL hooks, SendInput (unicode) injection, a non-activating topmost bubble,
 //! caret lookup (GetGUIThreadInfo -> UI Automation TextPattern2 -> focused element rect -> mouse), secure-field skip
 //! (ES_PASSWORD / UIA IsPassword), switch to Thai/US layout after applying, tray icon.
-use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Ole::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -251,6 +251,17 @@ unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT 
     }
     CallNextHookEx(None, code, wp, lp)
 }
+/// File name of the executable that owns `hwnd` ("WindowsTerminal.exe"); empty when it cannot be read.
+unsafe fn exe_of(hwnd: HWND) -> String {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+    let (mut buf, mut len) = ([0u16; 1024], 1024u32);
+    let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+    let _ = CloseHandle(h);
+    if !ok { return String::new() }
+    String::from_utf16_lossy(&buf[..len as usize]).rsplit('\\').next().unwrap_or_default().to_string()
+}
 fn foreground_is_self(fg: HWND) -> bool {
     let mut pid = 0u32;
     let _ = unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
@@ -284,6 +295,7 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
         Key::TabUp
     } else { let Some(key) = translate(vk) else { return false }; key };
     let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
+    if fg != st.last_fg { st.app.engine.delete_unit = DeleteUnit::of_app(&exe_of(fg)); }
     if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; let a = st.app.engine.reset(); run_actions(st, a); }
     // Thai layout / password field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
     st.app.engine.set_thai_active(layout_is_thai(fg)); // Thai layout -> reverse detector (English typed on Kedmanee)

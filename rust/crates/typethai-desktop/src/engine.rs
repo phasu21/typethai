@@ -1,7 +1,7 @@
 //! Platform-independent typing engine: per-word key buffer -> decisions -> actions for the platform layer.
 //! The platform layer feeds `Key`s (already mapped to the US-QWERTY character the key would produce), and executes the
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
-use crate::backspace;
+use crate::backspace::{self, DeleteUnit};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
@@ -77,7 +77,8 @@ enum TabChord {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Delete `delete` chars before the caret (backspaces), then type `insert`; then re-send the swallowed boundary key.
+    /// Send `delete` Backspaces (counted in the engine's `delete_unit`), then type `insert`; then re-send the swallowed
+    /// boundary key.
     Replace { delete: usize, insert: String, then: Option<Boundary> },
     ShowBubble(Vec<BubbleItem>),
     HideBubble,
@@ -224,11 +225,13 @@ pub struct Engine {
     last_key: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
     comp_muted: bool,
+    /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
+    pub delete_unit: DeleteUnit,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default() }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -247,7 +250,7 @@ impl Engine {
     fn screen_of(&self, typed: &str) -> String { if self.thai_active { en_to_th(typed) } else { typed.to_string() } }
     /// Replace `old`, the text right before the caret, with `new`; what they share stays on screen.
     fn replace(&self, old: &str, new: &str, then: Option<Boundary>) -> Action {
-        let (delete, insert) = backspace::edit(old, new);
+        let (delete, insert) = backspace::edit(old, new, self.delete_unit);
         Action::Replace { delete, insert: insert.to_string(), then }
     }
     /// Reverse line probabilities for the reverse-mode tail of the line plus `last` (None without a model).
@@ -1216,8 +1219,10 @@ mod tests {
         assert_eq!(e.personal.state.events, 1.0);
     }
     // ---------- default mode: nothing converts on a boundary; Tab / hotkeys apply the bubble ----------
-    fn screen(o: &[(Option<char>, Outcome)]) -> String {
-        let mut sc = vec![]; for (t, x) in o { crate::platform::sim::apply(&mut sc, &x.actions, x.swallow, *t); } sc.into_iter().collect()
+    fn screen(o: &[(Option<char>, Outcome)]) -> String { screen_in(DeleteUnit::CodePoint, o) }
+    /// The text an app that deletes `unit`s per Backspace ends up with.
+    fn screen_in(unit: DeleteUnit, o: &[(Option<char>, Outcome)]) -> String {
+        let mut sc = vec![]; for (t, x) in o { crate::platform::sim::apply(&mut sc, &x.actions, x.swallow, *t, unit); } sc.into_iter().collect()
     }
     fn key_of(c: char) -> Key { match c { ' ' => Key::Boundary(Boundary::Space), '\n' => Key::Boundary(Boundary::Enter), c => Key::Char(c) } }
     #[test] fn boundaries_never_convert_by_default() {
@@ -1880,6 +1885,41 @@ mod tests {
         hot(&mut e, &mut log, Hotkey::Accept(0));
         assert_eq!(log.last().unwrap().1, Outcome { swallow: true, actions: vec![Action::Replace { delete: 2, insert: " ".into(), then: None }, Action::HideBubble] }, "no input source switch");
         assert_eq!(screen(&log), "this ");
+    }
+    #[test] fn a_completion_in_a_terminal_keeps_the_text_before_the_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        e.delete_unit = DeleteUnit::Grapheme;
+        let mut log = vec![]; feed(&mut e, &mut log, "ok ");
+        e.set_thai_active(true);
+        for c in keys("ฉันชอบภาษ").chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+        log.push((None, tab(&mut e)));
+        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 0, insert: "า".into(), then: None });
+        assert_eq!(screen_in(DeleteUnit::Grapheme, &log), "ok ฉันชอบภาษา");
+    }
+    #[test] fn undo_counts_backspaces_in_the_apps_unit() {
+        for (unit, n) in [(DeleteUnit::CodePoint, 6), (DeleteUnit::Grapheme, 4)] {
+            let Some(mut e) = engine() else { return };
+            e.delete_unit = unit;
+            let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu\t");
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
+            hot(&mut e, &mut log, Hotkey::Undo);
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: n, insert: "l;ylfu".into(), then: None }, "{unit:?}: ส|วั|ส|ดี");
+            assert_eq!(screen_in(unit, &log), "l;ylfu");
+        }
+    }
+    #[test] fn a_reverse_conversion_counts_backspaces_in_the_apps_unit() {
+        for (unit, n) in [(DeleteUnit::CodePoint, 4), (DeleteUnit::Grapheme, 3)] {
+            let Some(mut e) = engine() else { return };
+            e.delete_unit = unit; e.opts.rev_live = 0.5;
+            e.set_thai_active(true);
+            let mut log = vec![];
+            for c in keys("าืนไ").chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+            assert_eq!(labels(&e), ["know"]);
+            log.push((None, tab(&mut e)));
+            assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: n, insert: "know".into(), then: None }, "{unit:?}: าื|น|ไ");
+            assert_eq!(screen_in(unit, &log), "know");
+        }
     }
     struct CompletingSpeller;
     impl Speller for CompletingSpeller {
