@@ -326,7 +326,7 @@ unsafe fn control(st: &mut State) -> bool {
     false
 }
 /// Low-level hooks are delivered to the installing thread's message loop, so they live on their own thread with the
-/// Engine; gpui owns the main thread. A 100 ms thread timer services tray requests (pause / quit) and the typing pause
+/// Engine; gpui owns the main thread. A 25 ms thread timer services tray requests (pause / quit) and the typing pause
 /// that brings up word completions.
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
@@ -335,7 +335,7 @@ fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
         let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };
-        let timer = SetTimer(None, 0, 100, None);
+        let timer = SetTimer(None, 0, 25, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_TIMER && msg.hwnd.is_invalid() { if with(|st| control(st)).unwrap_or(false) { break } continue }

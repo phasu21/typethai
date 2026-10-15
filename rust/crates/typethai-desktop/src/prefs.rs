@@ -1,10 +1,11 @@
 //! User preferences: words typeThai should not translate, and when word completions show.
 //! Stored beside `personal.json` so a learning reset does not clear them, and so `personal.json`
 //! stays compatible with the TypeScript app.
-use crate::engine::{Action, CompleteMode};
+use crate::engine::{Action, CompleteMode, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS};
 use crate::rewrite;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 use typethai_core::keymap::th_to_en;
 use typethai_core::personal::Learned;
 
@@ -15,6 +16,7 @@ pub enum SettingsCmd {
     Forget(String),
     ResetLearning,
     SetCompletion(CompleteMode),
+    SetCompleteIdle(Duration),
     SetLearnWords(bool),
     ForgetWords,
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
@@ -22,7 +24,7 @@ pub enum SettingsCmd {
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetRewrite(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetRewrite(_))
     }
 }
 
@@ -31,6 +33,8 @@ pub struct SettingsSnap {
     pub never: Vec<String>,
     pub learned: Vec<Learned>,
     pub completion: CompleteMode,
+    /// How long a pause brings up completions in `CompleteMode::Pause`.
+    pub complete_idle: Duration,
     pub learn_words: bool,
     /// Distinct words in the word memory.
     pub words_learned: usize,
@@ -49,9 +53,9 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub learn_words: bool, pub rewrite: rewrite::Config }
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub rewrite: rewrite::Config }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), learn_words: true, rewrite: rewrite::Config::default() } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, rewrite: rewrite::Config::default() } }
 }
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
@@ -68,7 +72,7 @@ impl Prefs {
     }
     pub fn to_json(&self) -> String {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "learn_words": self.learn_words, "rewrite": self.rewrite.to_json() }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "rewrite": self.rewrite.to_json() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -76,7 +80,7 @@ impl Prefs {
         if std::fs::write(&tmp, self.to_json()).is_ok() { let _ = std::fs::rename(&tmp, path); }
     }
 }
-/// None when the file is not JSON or `never` is not a list; an unknown or missing `completion` or `learn_words` is the default.
+/// None when the file is not JSON or `never` is not a list; an unknown or missing `completion`, `complete_idle_ms` or `learn_words` is the default.
 fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let never = match v.get("never") {
@@ -85,8 +89,9 @@ fn parse(text: &str) -> Option<Prefs> {
     };
     let c = v.get("completion").and_then(|c| c.as_str());
     let completion = COMPLETION.iter().find(|(_, s)| Some(*s) == c).map_or(CompleteMode::default(), |(m, _)| *m);
+    let complete_idle = v.get("complete_idle_ms").and_then(serde_json::Value::as_u64).filter(|ms| COMPLETE_IDLE_CHOICES_MS.contains(ms)).unwrap_or(COMPLETE_IDLE_DEFAULT_MS);
     let learn_words = v.get("learn_words").and_then(serde_json::Value::as_bool).unwrap_or(true);
-    Some(Prefs { never, completion, learn_words, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
+    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -164,6 +169,22 @@ mod tests {
         assert!(Prefs::load(&path).learn_words, "learning is on unless turned off");
         Prefs { learn_words: false, ..Prefs::default() }.save(&path);
         assert!(!Prefs::load(&path).learn_words);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn completion_delay_round_trips_and_an_old_file_gets_the_default() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let fast = Prefs { complete_idle: Duration::from_millis(150), ..Prefs::default() };
+        fast.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["complete_idle_ms"], 150);
+        assert_eq!(Prefs::load(&path), fast);
+        std::fs::write(&path, r#"{"never":["ok"],"completion":"pause","learn_words":true}"#).unwrap();
+        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "file from before the setting");
+        std::fs::write(&path, r#"{"never":[],"complete_idle_ms":7}"#).unwrap();
+        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "a value Settings never offers");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

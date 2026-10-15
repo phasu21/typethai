@@ -27,7 +27,7 @@ unless you press a key.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
   Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
-  default completions appear after a short pause in typing. **Settings… → Word suggestions** switches them to
+  default completions appear after a short pause in typing (a quarter of a second; choose 150 to 600 ms in Settings). **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
   highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
   one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in
@@ -81,7 +81,7 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
-there you can choose when word suggestions show (Off, After a pause, While typing), list words that stay as you type
+there you can choose when word suggestions show (Off, After a pause, While typing) and how long the pause is, list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works

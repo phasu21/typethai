@@ -80,7 +80,8 @@
 
 ## Word completion (needs a model with English frequencies for English rows; not run live by the agent)
 - [ ] Settings → Word suggestions shows Off / After a pause / While typing, with the current one highlighted; a click switches it and survives a restart (`prefs.json` has `"completion"`).
-- [ ] After a pause (default): type `hel` and stop. About half a second later the bubble shows help / hello / hell at the caret; Tab inserts the highlighted word. Typing on without stopping shows nothing.
+- [ ] After a pause (default): type `hel` and stop. About a quarter of a second later the bubble shows help / hello / hell at the caret; Tab inserts the highlighted word. Typing on without stopping shows nothing.
+- [ ] Settings → Word suggestions → Pause before suggesting (shown only for After a pause) offers 150 / 250 / 400 / 600 ms, 250 by default. Pick 600 and the bubble waits visibly longer; pick 150 and it comes up almost at once. The choice survives a restart (`prefs.json` has `"complete_idle_ms"`). Switching to While typing or Off hides the row. Windows: the 150 ms step is not smoothed by the old 100 ms tick (the timer now ticks every 25 ms).
 - [ ] After a pause, wrong layout: type the keys for `ภาษ` on ABC (`4kK`). The live row ภาษ is first, ภาษา / ภาษี appear under it after the pause; Shift+↓ then Tab inserts ภาษา and switches the input source to Thai. ⌃⌥Z gives back `4kK`.
 - [ ] After a pause, Thai layout: type ฉันชอบภาษ and stop. Rows show ภาษา / ภาษี / ภาษาอังกฤษ; Tab leaves ฉันชอบภาษา.
 - [ ] While typing: `beca` shows because without a pause; common whole words (`you`, `not`, ฉัน) do not pop a bubble; typing feels no slower.

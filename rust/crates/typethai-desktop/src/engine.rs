@@ -153,7 +153,11 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(500), learn_words: true } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true } } }
+/// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
+/// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
+pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
+pub const COMPLETE_IDLE_DEFAULT_MS: u64 = 250;
 /// When word completions appear in the bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
 /// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
@@ -425,13 +429,14 @@ impl Engine {
             SettingsCmd::Forget(w) => self.forget_learned(&w),
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
+            SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, learn_words: self.opts.learn_words, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -1808,6 +1813,21 @@ mod tests {
         // a boundary takes them away and offers nothing for the finished word
         let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    #[test] fn pause_mode_waits_for_the_configured_delay() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        assert!(e.apply_settings(SettingsCmd::SetCompleteIdle(Duration::from_millis(150))));
+        assert!(!e.apply_settings(SettingsCmd::SetCompleteIdle(Duration::from_millis(150))), "same delay is not a change");
+        assert_eq!(e.settings_snapshot().complete_idle, Duration::from_millis(150));
+        typ(&mut e, "hel");
+        assert_eq!(idle(&mut e, 149), vec![], "just before the delay");
+        assert_eq!(idle(&mut e, 150).len(), 1, "at the delay");
+        assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.apply_settings(SettingsCmd::SetCompleteIdle(Duration::from_millis(600)));
+        e.reset(); typ(&mut e, "hel");
+        assert_eq!(idle(&mut e, 599), vec![], "a longer delay waits longer");
+        assert_eq!(idle(&mut e, 600).len(), 1);
     }
     #[test] fn an_accepted_completion_is_edited_as_the_word() {
         let Some(mut e) = engine() else { return };
