@@ -2,8 +2,9 @@
 //! TTM1 layout: b"TTM1" then a raw-deflate stream of sections `[tag u8][len u32 LE][bytes]`.
 //!   1 PARAMS(json)  2 NG_TH  3 NG_EN  4 WORDS_TH  5 WORDS_EN  6 BRANDS (newline-joined UTF-8)
 //!   7 WORDFREQ([n u32]{[len u16][utf8][f64]})  8 CLASSIFIER(json)  9 CORRECTOR(json)  10 COLLAPSE(u8)
+//!   11 EN_FREQ (as WORDFREQ; optional, written only when non-empty)
 //!   NG_* = [vocab f64][4×lambda f64][n u32]{[len u8][key utf8][count u32]}
-use crate::{classifier::FlipModel, corrector::{Corrector, CorrectorParams}, detector::{Detector, Params}, dict::Dict, ngram::Ngram};
+use crate::{classifier::FlipModel, completer::Completer, corrector::{Corrector, CorrectorParams}, detector::{Detector, Params}, dict::Dict, ngram::Ngram};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,20 +12,35 @@ use std::path::Path;
 pub struct ModelFiles {
     pub thai: Ngram, pub english: Ngram, pub thai_words: Vec<String>, pub english_words: Vec<String>, pub brands: Vec<String>,
     pub collapse: bool, pub params: Params, pub wordfreq: HashMap<String, f64>, pub classifier: FlipModel, pub corrector: CorrectorParams, pub w_norm: f64,
+    /// English word -> corpus count, for completion only.
+    pub english_freq: HashMap<String, f64>,
 }
 fn rd(p: &Path) -> Result<Value, String> { serde_json::from_str(&std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?).map_err(|e| e.to_string()) }
 fn strs(v: &Value) -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() }
+fn freqs(v: &Value) -> Result<HashMap<String, f64>, String> { Ok(v.as_object().ok_or("expected {word: count}")?.iter().map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(0.0))).collect()) }
+fn freq_bytes(m: &HashMap<String, f64>) -> Vec<u8> {
+    let mut wf: Vec<_> = m.iter().collect(); wf.sort_by(|a, b| a.0.cmp(b.0));
+    let mut b = (wf.len() as u32).to_le_bytes().to_vec();
+    for (k, v) in wf { b.extend((k.len() as u16).to_le_bytes()); b.extend(k.as_bytes()); b.extend(v.to_le_bytes()); }
+    b
+}
+fn freq_map(b: &[u8]) -> HashMap<String, f64> {
+    let n = u32::from_le_bytes(b[..4].try_into().unwrap()); let mut p = 4; let mut m = HashMap::new();
+    for _ in 0..n { let l = u16::from_le_bytes([b[p], b[p + 1]]) as usize; m.insert(String::from_utf8_lossy(&b[p + 2..p + 2 + l]).into_owned(), f64::from_le_bytes(b[p + 2 + l..p + 10 + l].try_into().unwrap())); p += 10 + l; }
+    m
+}
 
 impl ModelFiles {
     pub fn load_json_dir(dir: &Path) -> Result<Self, String> {
         let m = rd(&dir.join("model.json"))?; let c = rd(&dir.join("corrector.json"))?;
-        let wf = rd(&dir.join("wordfreq.json"))?;
+        let wf = rd(&dir.join("wordfreq.json"))?; let en = dir.join("enfreq.json");
         Ok(ModelFiles {
             thai: Ngram::from_json(&m["thai"])?, english: Ngram::from_json(&m["english"])?,
             thai_words: strs(&m["thaiWords"]), english_words: strs(&m["englishWords"]), brands: strs(&m["brands"]),
             collapse: m["collapse"].as_bool().unwrap_or(false),
             params: serde_json::from_value(m["params"].clone()).map_err(|e| e.to_string())?,
-            wordfreq: wf.as_object().ok_or("wordfreq")?.iter().map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(0.0))).collect(),
+            wordfreq: freqs(&wf)?,
+            english_freq: if en.exists() { freqs(&rd(&en)?)? } else { HashMap::new() },
             classifier: serde_json::from_value(rd(&dir.join("flip-classifier.json"))?).map_err(|e| e.to_string())?,
             corrector: serde_json::from_value(c.clone()).map_err(|e| e.to_string())?, w_norm: c["wNorm"].as_f64().unwrap_or(0.0),
         })
@@ -40,6 +56,8 @@ impl ModelFiles {
         let mut d = self.rules_detector(); d.brands.clear(); d.params.w_norm = self.params.w_norm; d
     }
     pub fn corrector(&self) -> Corrector { Corrector::new(&self.thai_words, self.wordfreq.clone(), self.corrector) }
+    pub fn thai_completer(&self) -> Completer { Completer::new(self.thai_words.iter().filter_map(|w| Some((w.clone(), *self.wordfreq.get(w)?)))) }
+    pub fn english_completer(&self) -> Completer { Completer::new(self.english_freq.iter().map(|(w, f)| (w.clone(), *f))) }
 
     /// TTM1 file = b"TTM1" + raw-deflate(sections).
     pub fn pack(&self) -> Vec<u8> {
@@ -59,12 +77,10 @@ impl ModelFiles {
             sec(&mut o, tag, b);
         }
         sec(&mut o, 4, self.thai_words.join("\n").into_bytes()); sec(&mut o, 5, self.english_words.join("\n").into_bytes()); sec(&mut o, 6, self.brands.join("\n").into_bytes());
-        let mut wf: Vec<_> = self.wordfreq.iter().collect(); wf.sort_by(|a, b| a.0.cmp(b.0));
-        let mut b = (wf.len() as u32).to_le_bytes().to_vec();
-        for (k, v) in wf { b.extend((k.len() as u16).to_le_bytes()); b.extend(k.as_bytes()); b.extend(v.to_le_bytes()); }
-        sec(&mut o, 7, b);
+        sec(&mut o, 7, freq_bytes(&self.wordfreq));
         sec(&mut o, 8, serde_json::to_vec(&self.classifier).unwrap()); sec(&mut o, 9, serde_json::to_vec(&self.corrector).unwrap());
         sec(&mut o, 10, vec![self.collapse as u8]);
+        if !self.english_freq.is_empty() { sec(&mut o, 11, freq_bytes(&self.english_freq)); }
         o
     }
     pub fn unpack(buf: &[u8]) -> Result<Self, String> {
@@ -89,12 +105,11 @@ impl ModelFiles {
         };
         let lines = |b: &[u8]| -> Vec<String> { let s = String::from_utf8_lossy(b); if s.is_empty() { vec![] } else { s.split('\n').map(String::from).collect() } };
         let pv: Value = serde_json::from_slice(g(1)?).map_err(|e| e.to_string())?;
-        let wfb = g(7)?; let n = u32at(wfb, 0); let mut p = 4; let mut wordfreq = HashMap::new();
-        for _ in 0..n { let l = u16::from_le_bytes([wfb[p], wfb[p + 1]]) as usize; let k = String::from_utf8_lossy(&wfb[p + 2..p + 2 + l]).into_owned(); wordfreq.insert(k, f64at(wfb, p + 2 + l)); p += 10 + l; }
         Ok(ModelFiles {
             thai: ng(g(2)?)?, english: ng(g(3)?)?, thai_words: lines(g(4)?), english_words: lines(g(5)?), brands: lines(g(6)?),
             collapse: g(10)?.first() == Some(&1), w_norm: pv["wNorm_v5"].as_f64().unwrap_or(0.0),
-            params: serde_json::from_value(pv).map_err(|e| e.to_string())?, wordfreq,
+            params: serde_json::from_value(pv).map_err(|e| e.to_string())?, wordfreq: freq_map(g(7)?),
+            english_freq: secs.get(&11).copied().map(freq_map).unwrap_or_default(),
             classifier: serde_json::from_slice(g(8)?).map_err(|e| e.to_string())?, corrector: serde_json::from_slice(g(9)?).map_err(|e| e.to_string())?,
         })
     }

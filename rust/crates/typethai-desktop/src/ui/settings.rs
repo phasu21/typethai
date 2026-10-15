@@ -1,5 +1,7 @@
-//! Settings window: words that stay as typed, the on-device learning list, and AI rewrite, one sidebar page each.
+//! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, and AI rewrite,
+//! one sidebar page each.
 use crate::bridge;
+use crate::engine::CompleteMode;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite;
 use crate::ui::thai_font;
@@ -27,6 +29,7 @@ struct SettingsView {
     first_page: usize,
 }
 enum KeyState { Checking, Missing, Saved, Failed(String) }
+const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "Off"), (CompleteMode::Pause, "After a pause"), (CompleteMode::Typing, "While typing")];
 const KEY_STORE: &str = if cfg!(windows) { "Credential Manager" } else { "the Keychain" };
 
 #[derive(Clone, Copy)]
@@ -262,6 +265,22 @@ impl SettingsView {
             vec![element(view, |v, view, _, paint| v.learn_list(view, paint)),
                 SettingItem::new("Reset learning", reset).description("This clears learned words. Words you asked not to translate stay.")])
     }
+    fn completion_page(&self, view: &Entity<Self>) -> SettingPage {
+        let options = COMPLETION.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+        let (read, write) = (view.clone(), view.clone());
+        let mode = SettingField::dropdown(options,
+            move |cx| COMPLETION.iter().find(|(m, _)| *m == read.read(cx).snap.completion).map_or("", |(_, l)| l).into(),
+            move |label, cx| if let Some((m, _)) = COMPLETION.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_completion(*m, cx)) });
+        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word.".into(),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "typing"], std::iter::empty()),
+            vec![SettingItem::new("Show suggestions", mode)])
+    }
+    fn set_completion(&mut self, mode: CompleteMode, cx: &mut Context<Self>) {
+        self.confirm_reset = false;
+        self.snap.completion = mode;
+        bridge::push_settings(SettingsCmd::SetCompletion(mode));
+        cx.notify();
+    }
     fn rewrite_page(&self, view: &Entity<Self>) -> SettingPage {
         let hotkey = if cfg!(windows) { "Ctrl+Alt+R" } else { "Ctrl+Option+R" };
         let key_note = match &self.key_state {
@@ -292,7 +311,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let pages = [self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view)];
+        let pages = [self.completion_page(&view), self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view)];
         let t = cx.theme();
         div().size_full().bg(t.background).text_color(t.foreground).font(thai_font())
             .child(Settings::new("settings").sidebar_width(px(200.)).sidebar_size_range(px(160.)..px(280.))

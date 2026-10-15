@@ -12,8 +12,8 @@ pub fn system() -> Option<Box<dyn Speller + Send>> {
 mod mac {
     use crate::engine::Speller;
     use objc2_app_kit::NSSpellChecker;
-    use objc2_foundation::{NSNotFound, NSString};
-    /// Uses the shared checker from the capture thread; only the checkSpelling / guesses calls are made.
+    use objc2_foundation::{NSNotFound, NSRange, NSString};
+    /// Uses the shared checker from the capture thread; only the checkSpelling / guesses / completions calls are made.
     pub struct Mac;
     impl Speller for Mac {
         fn guesses(&self, word: &str) -> Option<Vec<String>> {
@@ -24,6 +24,15 @@ mod mac {
                 if r.location == NSNotFound as usize || r.length == 0 { return None }
                 let g = sc.guessesForWordRange_inString_language_inSpellDocumentWithTag(r, &s, Some(&lang), 0)?;
                 Some(g.iter().map(|x| x.to_string()).collect())
+            })
+        }
+        fn completions(&self, prefix: &str) -> Vec<String> {
+            objc2::rc::autoreleasepool(|_| {
+                let sc = NSSpellChecker::sharedSpellChecker();
+                let (s, lang) = (NSString::from_str(prefix), NSString::from_str("en"));
+                let r = NSRange::new(0, s.length());
+                sc.completionsForPartialWordRange_inString_language_inSpellDocumentWithTag(r, &s, Some(&lang), 0)
+                    .map(|g| g.iter().map(|x| x.to_string()).collect()).unwrap_or_default()
             })
         }
     }

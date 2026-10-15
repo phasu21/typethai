@@ -25,6 +25,11 @@ unless you press a key.
 - **Caret anchoring.** The bubble sits right under the text caret (via Accessibility / UI Automation). It flips above
   the caret near the bottom of the screen and works across monitors. Chromium/Electron apps are supported.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
+- **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
+  Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
+  default completions appear after a short pause in typing. **Settings… → Word suggestions** switches them to
+  **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
+  highlighted word, and **Esc** hides completions until the next word.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
@@ -71,7 +76,9 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
 
-The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From there you can list words that stay as you type them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
+The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
+there you can choose when word suggestions show (Off, After a pause, While typing), list words that stay as you type
+them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
 with the defaults) and press **Save key**. The key is kept in the macOS Keychain or Windows Credential Manager, never in
@@ -93,7 +100,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b"] [--screenshot PNG]` | Show the bubble with sample rows (no key capture) |
@@ -112,7 +119,8 @@ in between) to run the guess-convert on the current or last word instead of usin
   - Windows: `%APPDATA%\typethai\personal.json`
 
   It holds small weight adjustments plus the words you undid or converted manually. Delete the file to reset learning.
-- Words you asked not to translate are stored next to it, in `prefs.json`. Deleting `personal.json` leaves that list in place.
+- Words you asked not to translate, and the word-suggestion setting, are stored next to it, in `prefs.json`. Deleting
+  `personal.json` leaves them in place.
 
 ## Accuracy (measured on held-out data; summary)
 
@@ -164,7 +172,8 @@ corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test 
 
 - Code: **MIT**, © 2026 phasu21 (`LICENSE`).
 - Model (`typethai.ttm`): derived from Thai and English **Wikipedia** (CC BY-SA 4.0), the **PyThaiNLP** Thai word
-  list (CC0) and the **Wisesight Sentiment** corpus (CC0). It is distributed under CC BY-SA 4.0.
+  list (CC0), the **Wisesight Sentiment** corpus (CC0) and the **FrequencyWords** English frequency list (CC BY-SA
+  4.0). It is distributed under CC BY-SA 4.0.
 - Evaluation-only data (not in the model): Wongnai reviews (LGPL-3.0) and the Thai Toxicity Tweet Corpus
   (CC BY-NC 3.0).
 

@@ -1,7 +1,7 @@
-//! Words the user asked typeThai not to translate.
-//! Stored beside `personal.json` so a learning reset does not clear the list, and so `personal.json`
+//! User preferences: words typeThai should not translate, and when word completions show.
+//! Stored beside `personal.json` so a learning reset does not clear them, and so `personal.json`
 //! stays compatible with the TypeScript app.
-use crate::engine::Action;
+use crate::engine::{Action, CompleteMode};
 use crate::rewrite;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -14,12 +14,13 @@ pub enum SettingsCmd {
     RemoveNever(String),
     Forget(String),
     ResetLearning,
+    SetCompletion(CompleteMode),
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
     SetRewrite(rewrite::Config),
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetRewrite(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetRewrite(_))
     }
 }
 
@@ -27,6 +28,7 @@ impl SettingsCmd {
 pub struct SettingsSnap {
     pub never: Vec<String>,
     pub learned: Vec<Learned>,
+    pub completion: CompleteMode,
     pub rewrite: rewrite::Config,
 }
 
@@ -42,7 +44,9 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub rewrite: rewrite::Config }
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub rewrite: rewrite::Config }
+/// `prefs.json` spelling of each completion mode.
+const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
 impl Prefs {
     pub fn load(path: &Path) -> Prefs {
         let Ok(text) = std::fs::read_to_string(path) else { return Prefs::default() };
@@ -55,7 +59,8 @@ impl Prefs {
         }
     }
     pub fn to_json(&self) -> String {
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "rewrite": self.rewrite.to_json() }).to_string()
+        let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "rewrite": self.rewrite.to_json() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -63,10 +68,16 @@ impl Prefs {
         if std::fs::write(&tmp, self.to_json()).is_ok() { let _ = std::fs::rename(&tmp, path); }
     }
 }
+/// None when the file is not JSON or `never` is not a list; an unknown or missing `completion` is the default.
 fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    let never = match v.get("never") { Some(n) => n.as_array()?.iter().filter_map(|x| x.as_str()).filter_map(normalize_word).collect(), None => BTreeSet::new() };
-    Some(Prefs { never, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
+    let never = match v.get("never") {
+        Some(n) => n.as_array()?.iter().filter_map(|x| x.as_str()).filter_map(normalize_word).collect(),
+        None => BTreeSet::new(),
+    };
+    let c = v.get("completion").and_then(|c| c.as_str());
+    let completion = COMPLETION.iter().find(|(_, s)| Some(*s) == c).map_or(CompleteMode::default(), |(m, _)| *m);
+    Some(Prefs { never, completion, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -124,5 +135,23 @@ mod tests {
         p.rewrite = rewrite::Config::new(false, "http://localhost:11434/v1", "llama", "Use formal Thai.").unwrap();
         p.save(path);
         assert_eq!(Prefs::load(path), p);
+    }
+    #[test]
+    fn completion_mode_round_trips_and_defaults_to_pause() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let typing = Prefs { never: BTreeSet::from(["ok".to_string()]), completion: CompleteMode::Typing, ..Prefs::default() };
+        typing.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["completion"], "typing");
+        assert_eq!(Prefs::load(&path), typing);
+        Prefs { completion: CompleteMode::Off, ..Prefs::default() }.save(&path);
+        assert_eq!(Prefs::load(&path).completion, CompleteMode::Off);
+        std::fs::write(&path, r#"{"never":["ok"]}"#).unwrap();
+        assert_eq!(Prefs::load(&path).completion, CompleteMode::Pause, "missing key");
+        std::fs::write(&path, r#"{"never":["ok"],"completion":"sometimes"}"#).unwrap();
+        assert_eq!(Prefs::load(&path), Prefs { never: BTreeSet::from(["ok".to_string()]), ..Prefs::default() }, "unknown value");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

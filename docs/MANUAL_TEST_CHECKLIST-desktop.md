@@ -68,3 +68,13 @@
 - [ ] Cancel: Esc, typing a key, a click elsewhere, or switching apps at the preset rows, while "Rewriting…", and at the result: the bubble closes, the text is unchanged, and a late result never appears.
 - [ ] A clipboard manager (Maccy, Raycast, Paste) does not record the pasted result.
 - [ ] Windows Notepad and Edge: select text, Ctrl+Alt+R, Tab, Tab replaces it; the menu bar is not activated by the Alt release; Win+V history has no entry for the result; the previous clipboard comes back.
+
+## Word completion (needs a model with English frequencies for English rows; not run live by the agent)
+- [ ] Settings → Word suggestions shows Off / After a pause / While typing, with the current one highlighted; a click switches it and survives a restart (`prefs.json` has `"completion"`).
+- [ ] After a pause (default): type `hel` and stop. About half a second later the bubble shows help / hello / hell at the caret; Tab inserts the highlighted word. Typing on without stopping shows nothing.
+- [ ] After a pause, wrong layout: type the keys for `ภาษ` on ABC (`4kK`). The live row ภาษ is first, ภาษา / ภาษี appear under it after the pause; Shift+↓ then Tab inserts ภาษา and switches the input source to Thai. ⌃⌥Z gives back `4kK`.
+- [ ] After a pause, Thai layout: type ฉันชอบภาษ and stop. Rows show ภาษา / ภาษี / ภาษาอังกฤษ; Tab leaves ฉันชอบภาษา.
+- [ ] While typing: `beca` shows because without a pause; common whole words (`you`, `not`, ฉัน) do not pop a bubble; typing feels no slower.
+- [ ] Off: no completion rows in any of the above; the live conversion row and Space suggestions still work.
+- [ ] Esc on a completion bubble hides it, and no completion comes back for that word even after a pause; the next word gets completions again.
+- [ ] Space or Enter after a word never shows completions, only the usual conversion / spelling rows.

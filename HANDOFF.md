@@ -4,7 +4,8 @@
 
 Uncommitted work in progress. Run tests with `TYPETHAI_MODEL=/tmp/ttmodel/typethai.ttm cargo test` (from `rust/`).
 Without that variable, every model-backed test prints `SKIP` and passes vacuously; `engine()` and core `model()` now
-fall back to it, so all 62 desktop tests and 7 core tests really run.
+fall back to it, so all desktop and core tests really run. Run once with `/tmp/ttmodel/typethai-en.ttm` too (English
+completion frequencies).
 
 ## Nonsense-suggestion fix (2026-10-14)
 
@@ -54,6 +55,28 @@ fall back to it, so all 62 desktop tests and 7 core tests really run.
   rows are the guesses. Offered as Thai: row 2 is the best English guess. Accept is a `Typo` row, so Undo works.
 - The Windows module only type-checks (isolated crate, `windows` 0.62.2); not run on Windows yet. Full
   `--target x86_64-pc-windows-msvc` check fails in gpui's build script on macOS.
+
+## Word completion (branch `feat/word-completion`)
+
+- Core: `typethai_core::completer` (`Completer`, `thai_tail`); `ModelFiles::{thai_completer, english_completer}`.
+  English frequencies are TTM section 11 (FrequencyWords `en_50k`); older `.ttm` files have none, and then English
+  completion is off while Thai still works. `Completions.confidence` counts the prefix itself when it is a word, so
+  `you` / `ฉัน` do not read as confident prefixes.
+- Engine: `Options::{complete, complete_conf (0.4), complete_idle (500 ms)}`, `CompleteMode::{Off, Pause, Typing}`
+  (default Pause). `completion_rows` picks the text: a Thai layout run or a wrong-layout word under a live row
+  completes its last word (`thai_tail`) and keeps the head; otherwise an ASCII word from `en_comp`, topped up by
+  `Speller::completions` (NSSpellChecker; none on Windows). English typed on the Thai layout keeps only its reverse
+  live row. `BubbleKind::Complete { typed, insert }` accepts like a live accept (`commit_glued`, Undo gives the keys
+  back). Esc / Dismiss mute until the next boundary. `show()` keeps one bubble action per key.
+- Pause mode: `Engine::on_idle(now)` from the macOS 25 ms `timer_cb` and the Windows 100 ms `control` timer; it fires
+  once per pause (`last_key` is taken). `--simulate` has an `<Idle>` token.
+- Settings: `prefs.json` `"completion": "off" | "pause" | "typing"` (missing -> pause), `SettingsCmd::SetCompletion`,
+  a Word suggestions section in the Settings window (not checked on screen yet).
+- Cost (release, `cargo test --release -p typethai-desktop completion_cost -- --ignored --nocapture`): rows p50
+  0.6 us for an English prefix, 8 us for a 30-char Thai run; a whole keystroke 4.4 us (Off) vs 9 us (Typing). The
+  NSSpellChecker top-up costs about 0.85 ms per call, so it runs only for Pause-mode rows (`on_idle`), never inside
+  the key hook (Typing mode uses the frequency list alone); it fills in when the list has fewer than 3 words.
+- Data: `tt-pack --enfreq` drops the `n't` stems the subtitle list splits off (`wasn`, `aren`, ... `NT_STEMS`; `won` stays).
 
 ## Open limitations
 
