@@ -1,6 +1,6 @@
 //! Prefix completion over a frequency-ranked word list.
 use crate::dict::Dict;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Sorted by word (byte order), so the proper extensions of any prefix are one contiguous run right after it.
 pub struct Completer { words: Vec<(String, f64)> }
@@ -42,6 +42,33 @@ impl Completer {
         let confidence = if total > 0.0 { max / total } else { 0.0 };
         Completions { words: top.into_iter().map(|(w, _)| recase(w, prefix)).collect(), confidence }
     }
+}
+/// Word pair counts from a corpus: each previous word (lowercase) with its next words, most frequent first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Bigrams { next: HashMap<String, Vec<(String, f64)>> }
+impl Bigrams {
+    /// `(prev, next, count)` triples; repeats are summed, and pairs with an empty or spaced word or a count <= 0 dropped.
+    pub fn new<I: IntoIterator<Item = (String, String, f64)>>(it: I) -> Self {
+        let mut m: HashMap<String, BTreeMap<String, f64>> = HashMap::new();
+        for (p, n, f) in it {
+            let bad = |w: &str| w.is_empty() || w.chars().any(char::is_whitespace);
+            if bad(&p) || bad(&n) || f.is_nan() || f <= 0.0 { continue }
+            *m.entry(p.to_ascii_lowercase()).or_default().entry(n.to_ascii_lowercase()).or_default() += f;
+        }
+        let next = m.into_iter().map(|(p, ns)| {
+            let mut v: Vec<(String, f64)> = ns.into_iter().collect();
+            v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            (p, v)
+        }).collect();
+        Bigrams { next }
+    }
+    pub fn is_empty(&self) -> bool { self.next.is_empty() }
+    /// Number of pairs.
+    pub fn len(&self) -> usize { self.next.values().map(Vec::len).sum() }
+    /// The words seen after `prev`, most frequent first.
+    pub fn followers(&self, prev: &str) -> &[(String, f64)] { self.next.get(&prev.to_ascii_lowercase()).map_or(&[], Vec::as_slice) }
+    /// Every pair, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str, f64)> { self.next.iter().flat_map(|(p, v)| v.iter().map(move |(n, f)| (p.as_str(), n.as_str(), *f))) }
 }
 /// Re-applies the typed prefix's Latin case to a lowercase completion: "HEL" -> "HELP", "Hel" -> "Help".
 fn recase(w: &str, prefix: &str) -> String {

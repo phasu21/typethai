@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use typethai_core::{completer::{thai_tail, Completer}, dict::Dict, ModelFiles};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer}, dict::Dict, ModelFiles};
 /// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
 fn model() -> Option<ModelFiles> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
@@ -51,4 +51,13 @@ fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).wor
     assert_eq!(words(&back.english_completer(), "Hel", 2), ["Help", "Hello"]);
     m.english_freq.clear();
     assert_eq!(ModelFiles::unpack(&m.pack()).unwrap().english_freq.len(), 0);
+}
+#[test] fn bigrams_list_followers_by_count() {
+    let b = Bigrams::new([("I", "want", 3.0), ("i", "was", 5.0), ("i", "Want", 4.0), ("i", "am", 7.0), ("to", "be", 2.0), ("a b", "c", 9.0), ("x", "y", 0.0)]
+        .map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
+    let f = |p: &str| b.followers(p).iter().map(|(w, c)| (w.as_str(), *c)).collect::<Vec<_>>();
+    assert_eq!(f("I"), [("am", 7.0), ("want", 7.0), ("was", 5.0)]);
+    assert_eq!(f("to"), [("be", 2.0)]);
+    assert_eq!(f("x"), []); assert_eq!(f("a b"), []);
+    assert_eq!(b.len(), 4);
 }
