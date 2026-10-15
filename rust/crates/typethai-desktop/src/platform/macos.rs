@@ -150,6 +150,15 @@ unsafe fn bounds_for(fe: AXUIElementRef, loc: isize, len: isize) -> Option<CGRec
     if AXUIElementCopyParameterizedAttributeValue(fe, n.as_concrete_TypeRef(), param.as_CFTypeRef(), &mut v) != 0 || v.is_null() { return None }
     ax_rect_value(&CFType::wrap_under_create_rule(v)).filter(|r| r.size.height > 0.0 && (r.origin.x != 0.0 || r.origin.y != 0.0))
 }
+/// Chromium and WebKit text: the caret from the selected text-marker range. Their `AXBoundsForRange` can answer a
+/// zero-size rect at x 0 (Electron apps such as Grok Bot), while this API gives the real position.
+unsafe fn marker_caret(fe: AXUIElementRef) -> Option<Rect> {
+    let tm = ax_attr(fe, "AXSelectedTextMarkerRange")?;
+    let mut v: CFTypeRef = std::ptr::null(); let n = CFString::new("AXBoundsForTextMarkerRange");
+    if AXUIElementCopyParameterizedAttributeValue(fe, n.as_concrete_TypeRef(), tm.as_CFTypeRef(), &mut v) != 0 || v.is_null() { return None }
+    let r = ax_rect_value(&CFType::wrap_under_create_rule(v)).filter(|r| r.size.height > 0.0 && (r.origin.x != 0.0 || r.origin.y != 0.0))?;
+    Some(Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height))
+}
 // ---------- caret lookup ----------
 /// Frontmost app: (pid, bundle id, name).
 fn frontmost() -> Option<(i32, String, String)> {
@@ -217,6 +226,7 @@ unsafe fn caret_rect(fe: AXUIElementRef) -> Option<(Rect, &'static str)> {
     }
     prev.map(|r| (Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "prev-char"))
         .or_else(|| next.map(|r| (Rect::new(r.origin.x, r.origin.y, 1.0, r.size.height), "next-char")))
+        .or_else(|| marker_caret(fe).map(|r| (r, "text-marker")))
 }
 /// Caret rect + focused element frame + mouse (global top-left points), plus a description of what was found.
 pub fn caret_anchor() -> (Anchor, String) {
