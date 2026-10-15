@@ -7,7 +7,7 @@ Wine 10 on Linux (Notepad, xdotool). This checklist is for real machines. Mark e
 - [ ] Build the model pack: `cd rust && cargo run --release --bin tt-pack -- ../data/model typethai.ttm`. Put `typethai.ttm` next to the exe, or pass `--model`.
 - [ ] Windows: run `typethai-desktop.exe`. Use a debug build to get console logs, and set `TYPETHAI_DEBUG=1` for per-key logs.
 - [ ] macOS: run the binary. On first run it prompts for **Accessibility**. Grant it in System Settings → Privacy & Security → Accessibility (and Input Monitoring if asked), then relaunch.
-- [ ] A tray / menu-bar icon (blue "T") appears with "Pause typeThai" and "Quit".
+- [ ] A tray / menu-bar icon (blue "T") appears with "Pause typeThai", "Settings…", and "Quit".
 
 ## Core auto-convert (English layout active)
 - [ ] Type `l;ylfu ` in Notepad / TextEdit. It becomes `สวัสดี ` and the bubble appears near the caret.
@@ -51,12 +51,14 @@ Wine 10 on Linux (Notepad, xdotool). This checklist is for real machines. Mark e
 - [ ] It stays on top of full-screen apps (macOS Spaces / full screen; collection behaviour is not set yet, so this may fail).
 - [ ] Thai renders correctly. Windows uses the "Leelawadee UI" font; under Wine it showed tofu boxes because that font is missing there.
 - [ ] Low-confidence token (classifier probability 50–95%): the bubble shows `สวัสดี? (85%)`. **Ctrl+Alt+1** or a click converts it.
+- [ ] English spelling: type `is ths` + Space → bubble offers `this` / `the`; Tab replaces it and ⌃⌥Z restores `ths`.
 - [ ] Typo suggestion after a conversion (e.g. `l;yfu` → `สวสดี`): bubble rows 2–3 show corrector suggestions, and Ctrl+Alt+2/3 or a click replaces the word.
 - [ ] Clicking the bubble does not reset the buffer or focus the bubble. Clicking elsewhere hides it on the next key.
 - [ ] Multi-monitor and HiDPI (150% / Retina): the bubble sits next to the caret, not offset.
 
 ## Tray
 - [ ] Pause: the icon turns grey and nothing converts. Ctrl+Alt+P toggles the same state.
+- [ ] Settings…: a window lists words that stay as typed, and words learned from undos. Adding `ok` (or `นา`) stops `ok` being offered as `นา`. Reset learning clears the learned list and leaves the don't-translate list.
 - [ ] Quit: the process exits and the personal state is saved.
 
 ## Optional layout switch (`--switch-layout`)

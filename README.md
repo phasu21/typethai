@@ -18,14 +18,16 @@ unless you press a key.
   conversion for the word you are typing or the one you just finished. **Tab** applies it, and **⌃⌥Z** undoes it.
 - **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose a row, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply row 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
-- **Mid-word suggestions.** The bubble appears while you are still typing, from about the second character, once
-  the word is clearly Thai. You do not have to press Space first.
+- **Mid-word suggestions.** The bubble appears while you are still typing, from the third character, once the word
+  is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
 - **Caret anchoring.** The bubble sits right under the text caret (via Accessibility / UI Automation). It flips above
   the caret near the bottom of the screen and works across monitors. Chromium/Electron apps are supported.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
+- **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
+  corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
 - **Password fields are skipped** (macOS secure input / AXSecureTextField, Windows ES_PASSWORD / UIA IsPassword).
 
 ## Download and install
@@ -63,9 +65,13 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
 | **⌃⌥Z** | Undo the last conversion |
 | **⌃⌥X** | Force-convert the current or last word |
+| **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 
-When no bubble is shown, Tab, Shift+arrows and Esc behave normally.
+The menu-bar icon also has **Settings…**. From there you can list words that stay as you type them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
+
+When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
+in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
 
 ### Command-line flags (`typethai-desktop` / `typeThai.app/Contents/MacOS/typethai-desktop`)
 
@@ -75,7 +81,7 @@ When no bubble is shown, Tab, Shift+arrows and Esc behave normally.
 | `--state FILE.json` | Personal-model state file |
 | `--no-switch-input` | Don't change the OS input source after applying |
 | `--no-reverse` | Disable the Thai-layout → English direction |
-| `--no-typo` | No typo-suggestion rows |
+| `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
 | `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
@@ -91,7 +97,8 @@ When no bubble is shown, Tab, Shift+arrows and Esc behave normally.
   - macOS: `~/Library/Application Support/typethai/personal.json`
   - Windows: `%APPDATA%\typethai\personal.json`
 
-  It holds small weight adjustments plus the words you undid or converted manually. Delete the file to reset it.
+  It holds small weight adjustments plus the words you undid or converted manually. Delete the file to reset learning.
+- Words you asked not to translate are stored next to it, in `prefs.json`. Deleting `personal.json` leaves that list in place.
 
 ## Accuracy (measured on held-out data; summary)
 
@@ -118,7 +125,7 @@ the gpui shaders) and MSVC.
 
 ```sh
 cd rust
-cargo test --release -p typethai-core -p typethai-desktop   # model-dependent tests skip without data/model
+TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
 gh release download model-v1 -R phasu21/typethai -p typethai.ttm -D target/release
@@ -126,6 +133,15 @@ gh release download model-v1 -R phasu21/typethai -p typethai.ttm -D target/relea
 ```
 
 macOS app bundle: `scripts/package-macos.sh <target-triple> <version> path/to/typethai.ttm`.
+
+Run from a checkout on macOS: `scripts/typethai.sh` builds the release binary, stops any running typeThai (including
+the installed app) and starts it in the background (`stop`, `status`, `log`, `fg` also work). Link it onto your PATH to
+start it with one word:
+
+```sh
+ln -sf "$PWD/scripts/typethai.sh" ~/.local/bin/typethai
+typethai          # build + (re)start; log in ~/Library/Logs/typethai.log
+```
 
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The
 corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test checklists.

@@ -16,6 +16,9 @@ pub const DEFAULT_PERSONAL: PersonalConfig = PersonalConfig { lr: 0.05, l2: 0.01
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersonalState { pub version: u32, pub dw: Vec<f64>, pub db: f64, pub mem: BTreeMap<String, Mem>, pub events: f64, pub config: PersonalConfig }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum Feedback { Undo, Retype }
+/// One word the personal model has adjusted. `kept` is undos, `conv` is manual conversions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Learned { pub word: String, pub kept: f64, pub conv: f64 }
 
 fn sig(z: f64) -> f64 { 1.0 / (1.0 + (-z).exp()) }
 fn logit(p: f64) -> f64 { (p.max(1e-9) / (1.0 - p).max(1e-9)).ln() }
@@ -33,6 +36,20 @@ impl PersonalModel {
         PersonalState { version: 1, dw: vec![0.0; base.stage2.w.len()], db: 0.0, mem: BTreeMap::new(), events: 0.0, config }
     }
     pub fn reset(&mut self) { self.state = Self::fresh(&self.base, self.state.config); }
+    /// Drop one learned word. The key is the lowercased token, matching `feedback`.
+    pub fn forget(&mut self, word: &str) -> bool {
+        let k = word.trim().to_lowercase();
+        if k.is_empty() { return false }
+        self.state.mem.remove(&k).is_some()
+    }
+    /// Learned words, newest feedback first.
+    pub fn learned(&self) -> Vec<Learned> {
+        let mut rows: Vec<(f64, Learned)> = self.state.mem.iter().map(|(word, m)| {
+            (m.t, Learned { word: word.clone(), kept: m.kept, conv: m.conv })
+        }).collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.word.cmp(&b.1.word)));
+        rows.into_iter().map(|(_, row)| row).collect()
+    }
     fn mem_net(&self, k: &str) -> f64 {
         match self.state.mem.get(k) { None => 0.0, Some(m) => (m.conv - m.kept) * self.state.config.mem_decay.powf(self.state.events - m.t) }
     }
@@ -43,13 +60,20 @@ impl PersonalModel {
         let mut x = token_features(&ds[i]); x.extend(context_features(p1, i));
         let s = &self.base.stage2; x.iter().enumerate().map(|(k, v)| (v - s.mu[k]) / s.sd[k]).collect()
     }
+    fn base_logit(&self, z: &[f64]) -> f64 { let s2 = &self.base.stage2; s2.b + z.iter().zip(&s2.w).map(|(z, w)| w * z).sum::<f64>() }
+    /// The personal logit shift, capped at `max_drift` like each weight. A rare feature has a large standardized value
+    /// (one-word line: z ~ 6.5), so a few same-shaped events would otherwise move every such token by several logits.
+    fn shift(&self, z: &[f64]) -> f64 {
+        let d = self.state.db + z.iter().zip(&self.state.dw).map(|(z, w)| w * z).sum::<f64>();
+        clamp(d, self.state.config.max_drift)
+    }
     fn p1(&self, ds: &[TokenDecision]) -> Vec<f64> { ds.iter().map(|d| lr_predict(&self.base.stage1, &token_features(d))).collect() }
     pub fn line_probs(&self, ds: &[TokenDecision]) -> Vec<f64> {
-        let p1 = self.p1(ds); let s2 = &self.base.stage2; let c = &self.state.config;
+        let p1 = self.p1(ds); let c = &self.state.config;
         ds.iter().enumerate().map(|(i, d)| {
             if !(d.valid && d.convertible()) { return 0.0 }
             let z = self.z2(ds, &p1, i);
-            let mut a = s2.b + self.state.db; for k in 0..z.len() { a += (s2.w[k] + self.state.dw[k]) * z[k]; }
+            let a = self.base_logit(&z) + self.shift(&z);
             let kk = key(d); let net = self.mem_net(&kk);
             if net.abs() >= c.mem_override.unwrap_or(f64::INFINITY) && self.mem_pure(&kk) { return if net > 0.0 { 1.0 } else { 0.0 } }
             sig(a + c.mem_weight * (net / 2.0).tanh())
@@ -59,10 +83,9 @@ impl PersonalModel {
     pub fn feedback(&mut self, ds: &[TokenDecision], i: usize, kind: Feedback) {
         let y = if kind == Feedback::Retype { 1.0 } else { 0.0 }; let c = self.state.config;
         if ds[i].valid && ds[i].convertible() {
-            let p1 = self.p1(ds); let z = self.z2(ds, &p1, i); let s2 = &self.base.stage2;
-            let mut a = s2.b + self.state.db; for k in 0..z.len() { a += (s2.w[k] + self.state.dw[k]) * z[k]; }
+            let p1 = self.p1(ds); let z = self.z2(ds, &p1, i);
+            let ab = self.base_logit(&z); let a = ab + self.shift(&z);
             let p = sig(a - logit(self.base.threshold));
-            let mut ab = s2.b; for k in 0..z.len() { ab += s2.w[k] * z[k]; }
             let pb = sig(ab - logit(self.base.threshold)); let conf = (2.0 * pb - 1.0).abs();
             let g = (p - y) * (1.0 - c.trust * conf);
             for k in 0..z.len() { self.state.dw[k] = clamp(self.state.dw[k] - c.lr * (g * z[k] + c.l2 * self.state.dw[k]), c.max_drift); }

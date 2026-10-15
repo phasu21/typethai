@@ -10,6 +10,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::System::Ole::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -174,10 +175,35 @@ unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT 
     }
     CallNextHookEx(None, code, wp, lp)
 }
+fn foreground_is_self(fg: HWND) -> bool {
+    let mut pid = 0u32;
+    let _ = unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
+    pid != 0 && pid == unsafe { GetCurrentProcessId() }
+}
+/// Keys while our Settings window is in front are left alone, so the field can be typed in.
+fn typing_in_our_window(st: &mut State, fg: HWND) -> bool {
+    if !foreground_is_self(fg) { return false }
+    if fg != st.last_fg {
+        st.last_fg = fg;
+        st.last_focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
+        let a = st.app.engine.reset();
+        run_actions(st, a);
+    }
+    true
+}
+fn service_settings(st: &mut State) {
+    let cmds = bridge::take_settings();
+    if cmds.is_empty() && !bridge::take(&bridge::REQ_SETTINGS) { return }
+    let (snap, hide) = crate::prefs::apply_commands(&mut st.app, cmds);
+    run_actions(st, hide);
+    let _ = st.tx.send(UiMsg::Settings(snap));
+}
 unsafe fn handle_key(st: &mut State, vk: u32) -> bool {
     if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x}"); }
+    let fg = GetForegroundWindow();
+    if typing_in_our_window(st, fg) { return false }
     let Some(key) = translate(vk) else { return false };
-    let fg = GetForegroundWindow(); let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
+    let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
     if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; let a = st.app.engine.reset(); run_actions(st, a); }
     // Thai layout / password field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
     st.app.engine.set_thai_active(layout_is_thai(fg)); // Thai layout -> reverse detector (English typed on Kedmanee)
@@ -212,6 +238,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 
 // ---------- hook thread ----------
 unsafe fn control(st: &mut State) -> bool {
+    service_settings(st);
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     if bridge::take(&bridge::REQ_QUIT) { st.app.save(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false

@@ -7,12 +7,14 @@
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
 use crate::bridge::{self, Geom, Layout, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::placement::{self, Anchor, Monitor, Opts, Placement, Rect};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{theme::Theme, ActiveTheme};
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+mod settings;
 #[cfg(target_os = "macos")] pub mod native_mac;
 #[cfg(target_os = "macos")] pub use native_mac as native;
 #[cfg(windows)] mod native_win;
@@ -33,7 +35,7 @@ pub struct BubbleView {
 }
 
 /// System UI font with explicit Thai fallbacks (macOS: Thonburi / Sukhumvit Set; Windows: Leelawadee UI / Tahoma).
-fn thai_font() -> Font {
+pub(crate) fn thai_font() -> Font {
     let mut f = font(".SystemUIFont");
     f.fallbacks = Some(FontFallbacks::from_fonts(["Thonburi", "Sukhumvit Set", "Ayuthaya", "Leelawadee UI", "Leelawadee", "Tahoma", "Noto Sans Thai"].map(String::from).to_vec()));
     f
@@ -45,8 +47,9 @@ impl Render for BubbleView {
         let t = cx.theme(); let l = self.layout; let selected = self.selected;
         let dark = t.is_dark();
         let hover = t.list_hover;
-        // selected row: the highlight alone marks it (no chips/badges); a little stronger in dark mode
+        // selected row is a little stronger in dark mode; its Kbd says Tab applies it
         let sel_bg = if dark { t.foreground.opacity(0.22) } else { t.accent };
+        let tab_key = Keystroke::parse("tab").expect("tab");
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
         { let mut tb = self.text_bounds.borrow_mut(); tb.clear(); tb.resize(self.items.len(), None); }
         // The panel is the only visible surface: the window is borderless + transparent. Rows wrap and their heights are
@@ -58,15 +61,16 @@ impl Render for BubbleView {
             .bg(t.popover).text_color(t.popover_foreground).border_1().border_color(t.border).rounded(px(bridge::RADIUS as f32))
             .font(thai_font()).text_size(px(FONT_PX as f32))
             .children(self.items.iter().enumerate().map(|(i, label)| {
-                div().id(i).min_h(px(ROW_H as f32)).flex().flex_row().items_center().px(px(ROW_PX as f32)).py(px(5.)).rounded(px(5.))
+                div().id(i).min_h(px(ROW_H as f32)).flex().flex_row().items_center().justify_between().px(px(ROW_PX as f32)).py(px(5.)).rounded(px(5.))
                     .when(i == selected, |d| d.bg(sel_bg))
                     .when(i != selected, |d| d.hover(move |s| s.bg(hover)))
-                    // full text, wrapped within the label column (no ellipsis)
+                    // full text, wrapped within the label column (no ellipsis). The keycap slot stays out of this column.
                     .child({ let tb = self.text_bounds.clone();
                         // fixed column; the inner text box shrinks to the rendered text so its width can be checked
                         div().w(px(l.label_w as f32)).flex_none().flex()
                             .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
                             .child(div().max_w(px(l.label_w as f32)).whitespace_normal().child(label.clone())) })
+                    .when(i == selected, |d| d.child(Kbd::new(tab_key.clone())))
             }))).into_any_element()
     }
 }
@@ -172,6 +176,7 @@ pub fn run(rx: Receiver<UiMsg>) {
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
         cx.spawn(async move |cx| {
             let mut quit_at: Option<Instant> = None;
+            let mut settings_win: Option<settings::SettingsWin> = None;
             loop {
                 let mut stop = false;
                 cx.update(|cx| {
@@ -182,11 +187,13 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
                         UiMsg::Paused(p) => if let Some(t) = &tray { t.set_paused(p) },
                         UiMsg::Stopped => stop = true,
+                        UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
                     } }
                     ui.reconcile(cx);
                     match tray.as_ref().and_then(|t| t.poll()) {
         Some(super::platform::tray::TrayCmd::TogglePause) => bridge::REQ_TOGGLE_PAUSE.store(true, std::sync::atomic::Ordering::SeqCst),
         Some(super::platform::tray::TrayCmd::CheckUpdate) => { std::thread::spawn(|| { crate::platform::check_for_updates(); }); }
+        Some(super::platform::tray::TrayCmd::Settings) => settings::open_or_focus(&mut settings_win, cx),
         Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
         None => {}
     }
@@ -278,9 +285,13 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, items: Opt
                             let (tw, th) = t.map(|b| (b.size.width.as_f32() as f64, b.size.height.as_f32() as f64)).unwrap_or((-1.0, -1.0));
                             let (lpad, rpad) = match (t, r) { (Some(t), Some(r)) => { let tl = t.origin.x.as_f32() as f64; let rl = r.origin.x.as_f32() as f64;
                                 (tl - rl, (rl + r.size.width.as_f32() as f64) - (tl + lw)) } _ => (-1.0, -1.0) };
-                            let wraps = w[i] > lw; let ok = tw <= lw + 0.5 && (wraps || th < 1.5 * FONT_PX * 1.6) && pnl.is_some();
-                            format!("row {i}: chars {} measured {:.1} (incl slack) label_w {lw:.1} rendered {tw:.1}x{th:.1} pad L {lpad:.1} R {rpad:.1} {} {}",
-                                s.chars().count(), w[i], if wraps { "WRAPS" } else { "fits" }, if ok { "OK" } else { "CHECK-FAIL" })
+                            let wraps = w[i] > lw;
+                            // right inset includes the reserved Tab keycap; left inset is the row padding
+                            let slot = bridge::BADGE_GAP + bridge::BADGE_W;
+                            let pad_ok = (lpad - ROW_PX).abs() < 1.5 && (rpad - (ROW_PX + slot)).abs() < 1.5;
+                            let ok = tw <= lw + 0.5 && (wraps || th < 1.5 * FONT_PX * 1.6) && pnl.is_some() && pad_ok;
+                            format!("row {i}: chars {} measured {:.1} (incl slack) label_w {lw:.1} rendered {tw:.1}x{th:.1} pad L {lpad:.1} R {rpad:.1} (expect {:.1}/{:.1}) {} {}",
+                                s.chars().count(), w[i], ROW_PX, ROW_PX + slot, if wraps { "WRAPS" } else { "fits" }, if ok { "OK" } else { "CHECK-FAIL" })
                         }).collect::<Vec<_>>().join("\n") });
                     eprintln!("{chk}");
                     match native::capture(&ui.native, path) { Ok(()) => eprintln!("screenshot -> {path}"), Err(e) => eprintln!("screenshot failed: {e}") }

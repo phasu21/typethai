@@ -6,7 +6,7 @@ import type { TokenDecision } from "./detector.ts";
 export interface PersonalConfig {
   lr: number;          // SGD step on standardized features
   l2: number;          // pull of delta toward 0 (= toward base weights)
-  maxDrift: number;    // per-weight |delta| cap
+  maxDrift: number;    // per-weight |delta| cap, and cap on the total personal logit shift
   memWeight: number;   // logit weight of the token-memory term
   memDecay: number;    // per-event multiplicative decay of memory counts
   memOverride: number; // |decayed net count| at which memory overrides the model outright
@@ -47,14 +47,23 @@ export class PersonalModel {
   private x2(ds: TokenDecision[], p1: number[], i: number) { return [...tokenFeatures(ds[i]), ...contextFeatures(p1, i)]; }
   private z2(x: number[]): number[] { const s = this.base.stage2; return x.map((v, k) => (v - s.mu[k]) / s.sd[k]); }
 
+  private baseLogit(z: number[]): number { const s2 = this.base.stage2; let a = s2.b; for (let k = 0; k < z.length; k++) a += s2.w[k] * z[k]; return a; }
+  /**
+   * The personal logit shift, capped at maxDrift like each weight. A rare feature has a large standardized value
+   * (one-word line: z ~ 6.5), so a few same-shaped events would otherwise move every such token by several logits.
+   */
+  private shift(z: number[]): number {
+    const { dw, db, config } = this.state; let d = db; for (let k = 0; k < z.length; k++) d += dw[k] * z[k];
+    return clamp(d, config.maxDrift);
+  }
   /** Personal flip probabilities for one line (0 for tokens that can't flip). */
   lineProbs(ds: TokenDecision[]): number[] {
-    const s2 = this.base.stage2, { dw, db, config } = this.state;
+    const { config } = this.state;
     const p1 = ds.map((d) => lrPredict(this.base.stage1, tokenFeatures(d)));
     return ds.map((d, i) => {
       if (!d.valid || d.reason === "not convertible") return 0;
       const z = this.z2(this.x2(ds, p1, i));
-      let a = s2.b + db; for (let k = 0; k < z.length; k++) a += (s2.w[k] + dw[k]) * z[k];
+      const a = this.baseLogit(z) + this.shift(z);
       const net = this.memNet(this.key(d));
       if (Math.abs(net) >= (config.memOverride ?? Infinity) && this.memPure(this.key(d))) return net > 0 ? 1 : 0;
       return sig(a + config.memWeight * Math.tanh(net / 2));
@@ -71,10 +80,9 @@ export class PersonalModel {
     const y = kind === "retype" ? 1 : 0, { config } = this.state;
     const p1 = ds.map((d) => lrPredict(this.base.stage1, tokenFeatures(d)));
     if (ds[i].valid && ds[i].reason !== "not convertible") {
-      const z = this.z2(this.x2(ds, p1, i)), s2 = this.base.stage2, dw = this.state.dw;
-      let a = s2.b + this.state.db; for (let k = 0; k < z.length; k++) a += (s2.w[k] + dw[k]) * z[k];
+      const z = this.z2(this.x2(ds, p1, i)), dw = this.state.dw;
+      const ab = this.baseLogit(z), a = ab + this.shift(z);
       const p = sig(a - logit(this.base.threshold)); // probability relative to the decision boundary
-      let ab = s2.b; for (let k = 0; k < z.length; k++) ab += s2.w[k] * z[k];
       const pb = sig(ab - logit(this.base.threshold)), conf = Math.abs(2 * pb - 1); // base confidence 0..1
       const g = (p - y) * (1 - config.trust * conf);
       for (let k = 0; k < z.length; k++) dw[k] = clamp(dw[k] - config.lr * (g * z[k] + config.l2 * dw[k]), config.maxDrift);

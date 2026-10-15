@@ -1,13 +1,20 @@
 //! Platform-independent typing engine: per-word key buffer -> decisions -> actions for the platform layer.
 //! The platform layer feeds `Key`s (already mapped to the US-QWERTY character the key would produce), and executes the
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
+use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
+use std::collections::BTreeSet;
 use typethai_core::{reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
 impl Boundary { pub fn text(self) -> &'static str { match self { Boundary::Space => " ", Boundary::Enter => "\n", Boundary::Tab => "\t" } } }
+/// English spell checker (the OS one; see `platform::spell`).
+pub trait Speller {
+    /// None when `word` is spelled right (or cannot be checked); else the guesses, best first.
+    fn guesses(&self, word: &str) -> Option<Vec<String>>;
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Hotkey { Undo, ForceConvert, Accept(usize), Dismiss, TogglePause }
+pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     /// A printable key, as the US-QWERTY char it produces (e.g. `;` for the ว key).
@@ -61,7 +68,10 @@ pub enum BubbleKind {
     Live { typed: String, thai: String, prev: usize },
     UndoConversion, Convert { typed: String, thai: String }, Typo { word: String },
     /// Reverse mode, after a boundary: flip the last word plus `k` preceding Thai-looking words back to English.
-    ConvertPrev { k: usize } }
+    ConvertPrev { k: usize },
+    /// Guess (double Tab / hotkey): replace the last `k` committed words, and the buffer `typed` when it is Some, with
+    /// `targets` (one per word, in order).
+    Guess { k: usize, typed: Option<String>, targets: Vec<String> } }
 /// What the key handler should do with the original key event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome { pub swallow: bool, pub actions: Vec<Action> }
@@ -71,32 +81,37 @@ impl Outcome { fn pass() -> Self { Outcome { swallow: false, actions: vec![] } }
 /// `typed` = the keys (US chars); `orig` = what those keys put on screen (keys themselves, or their Thai reading when the
 /// Thai layout was active = `rev`); `converted` = what we replaced it with.
 /// `with_prev`: how many preceding words this conversion also flipped (undo restores them too).
-struct Committed { typed: String, orig: String, converted: Option<String>, boundary: Boundary, rev: bool, with_prev: usize,
+/// `boundary` is None for a word converted mid-word (Guess on the buffer): what is typed next follows it directly.
+struct Committed { typed: String, orig: String, converted: Option<String>, boundary: Option<Boundary>, rev: bool, with_prev: usize,
     /// Extra boundaries typed after this word (more spaces / Enters) while it is still the last word.
     extra: String }
 impl Committed {
     /// Everything after the word on screen: its boundary plus any extra spaces/newlines.
-    fn after(&self) -> String { format!("{}{}", self.boundary.text(), self.extra) }
+    fn after(&self) -> String { format!("{}{}", self.boundary.map_or("", Boundary::text), self.extra) }
 }
 
 pub struct Options {
     pub auto_convert: bool, pub switch_input: bool, pub suggest_band: f64, pub typo_suggestions: bool, pub context_words: usize,
     /// Live (mid-word) bubble: show when the current prefix's flip probability > `live_show` and the prefix has at
     /// least `live_min_len` keys. `live_show` matches the post-space suggestion band, and `live_stable` is 1, so the
-    /// bubble appears on the keystroke that crosses the band. Space is not required.
+    /// bubble appears on the keystroke that crosses the band. Space is not required. Two keys are too few: English
+    /// prefixes like `wo` / `fu` read as ไน / ดี with p > 0.95, so 2-key words are offered after Space instead.
     pub live: bool, pub live_show: f64, pub live_min_len: usize, pub live_stable: usize,
     /// Reverse direction (English typed on the Thai layout): auto-convert at a boundary above `rev_auto`, live bubble
     /// above `rev_live` (calibrated on dev, see README v11).
     pub rev_auto: f64, pub rev_live: f64,
-    /// A word left as Thai is flipped retroactively, together with the next word, when that next word auto-flips and
-    /// the left word's probability with the right context is above `rev_prev`.
+    /// A word left as Thai is offered together with the next word (in the live bubble, and again after Space)
+    /// when that next word is confident and this word's probability with that right context is above `rev_prev`.
     pub rev_prev: f64,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
-    live: true, live_show: LIVE_SHOW, live_min_len: 2, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV } } }
+    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV } } }
 /// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
 /// is offered while it is still being typed.
 pub const LIVE_SHOW: f64 = 0.5;
+/// Band for a forward conversion that is not a dictionary word (a prefix, a phrase, or nonsense); the old live
+/// threshold tuned on dev with `--eval-live`.
+pub const STRICT_BAND: f64 = 0.9;
 /// Reverse auto-convert threshold: false flips on dev Thai (wiki, chat, typo'd) <= 0.1%.
 pub const REV_AUTO: f64 = 0.98;
 /// Reverse live-bubble threshold.
@@ -112,6 +127,8 @@ pub struct Engine {
     pub det: Detector, pub personal: PersonalModel, pub corrector: Option<Corrector>, pub opts: Options,
     pub paused: bool,
     word: String,
+    /// The last key was a Tab that inserted itself: a second Tab runs Guess.
+    tab_pending: bool,
     line: Vec<Committed>,
     /// Index of the first word of the current line in `line` (after Enter the last word is kept so Tab still applies).
     line_start: usize,
@@ -125,11 +142,15 @@ pub struct Engine {
     /// Lets Backspace keep offering what is left of a phrase.
     phrase: usize,
     pub events_since_save: usize,
+    /// English key tokens the user does not want translated (`ok` stays as typed, not `นา`).
+    pub never: BTreeSet<String>,
+    /// English spelling suggestions for words left as typed; None disables them.
+    pub speller: Option<Box<dyn Speller + Send>>,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0 }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None }
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -143,6 +164,24 @@ impl Engine {
         let r = self.rev.as_ref()?;
         let tail: Vec<&str> = self.line[self.line_start.min(self.line.len())..].iter().rev().take_while(|c| c.rev).take(self.opts.context_words).map(|c| c.typed.as_str()).collect::<Vec<_>>().into_iter().rev().chain([last]).collect();
         Some(r.line_probs(&r.decide_line(&self.det, &tail)))
+    }
+    /// How many preceding unconverted reverse words belong with `typed` (e.g. "i" once "need" follows it).
+    fn rev_prev_count(&self, typed: &str) -> usize {
+        let Some(probs) = self.rev_line_probs_with(typed) else { return 0 };
+        let mut k = 0;
+        while k < 3 && k + 1 < probs.len() && self.line.len() > self.line_start + k {
+            let c = &self.line[self.line.len() - 1 - k];
+            let key = c.typed.to_lowercase();
+            if !c.rev || c.converted.is_some() || self.never.contains(&key) || probs[probs.len() - 2 - k] <= self.opts.rev_prev { break }
+            k += 1;
+        }
+        k
+    }
+    /// Reverse words to put in front of the live bubble. Forward suggestions stay on the current word.
+    fn live_prev(&self) -> usize {
+        if !self.thai_active { return 0 }
+        let typed = self.word.clone();
+        self.rev_prev_count(&typed)
     }
     /// Reverse P(English intended) for `last` given the reverse-mode words before it on the line.
     pub fn rev_prob(&self, last: &str) -> (f64, bool) {
@@ -158,7 +197,7 @@ impl Engine {
     pub fn is_bubble_key(&self, k: &Key) -> bool { self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc) }
     /// Focus change, mouse click, secure field, layout change: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
-        self.word.clear(); self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
+        self.word.clear(); self.tab_pending = false; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
     fn decisions(&self, last: &str) -> Vec<TokenDecision> {
@@ -169,6 +208,17 @@ impl Engine {
     /// Personal flip probability for `last` given the line context, plus its decisions (for feedback).
     pub fn prob(&self, last: &str) -> (f64, Vec<TokenDecision>) {
         let ds = self.decisions(last); let p = *self.personal.line_probs(&ds).last().unwrap_or(&0.0); (p, ds)
+    }
+    /// English spelling suggestions for a finished word (`ths` -> this). Punctuation around the word is kept.
+    fn en_items(&self, typed: &str) -> Vec<BubbleItem> {
+        let Some(sp) = &self.speller else { return vec![] };
+        if !self.opts.typo_suggestions { return vec![] }
+        let core = typed.trim_matches(|c: char| !c.is_ascii_alphabetic());
+        if core.len() < 2 || !core.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
+        let at = typed.find(core).unwrap_or(0);
+        let (pre, post) = (&typed[..at], &typed[at + core.len()..]);
+        sp.guesses(core).unwrap_or_default().into_iter().filter(|g| g != core).take(3)
+            .map(|g| { let word = format!("{pre}{g}{post}"); BubbleItem { label: word.clone(), kind: BubbleKind::Typo { word } } }).collect()
     }
     fn typo_items(&self, thai: &str) -> Vec<BubbleItem> {
         let Some(c) = &self.corrector else { return vec![] };
@@ -204,37 +254,91 @@ impl Engine {
         if self.paused { return Outcome::pass() }
         match k {
             Key::Char(c) => {
+                self.tab_pending = false;
                 // a new word starts: the bubble was about the previous word and can no longer be applied
                 let mut a = vec![]; if self.word.is_empty() { self.show(vec![], &mut a); self.live_streak = 0; }
+                else if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Guess { .. }, .. })) { self.show(vec![], &mut a); }
                 self.word.push(c);
                 self.live_update(&mut a);
                 Outcome { swallow: false, actions: a }
             }
             Key::Tab => if self.bubble_visible() {
+                self.tab_pending = false;
                 let mut o = self.on_hotkey(Hotkey::Accept(self.sel.idx)); o.swallow = true; o
-            } else { self.on_boundary(Boundary::Tab) },
+            } else if let Some(item) = self.tab_pending.then(|| self.guess()).flatten() {
+                // second Tab in a row: show the proposal (a third Tab applies it); with nothing to propose it is a tab
+                self.tab_pending = false;
+                let mut a = vec![]; self.show(vec![item], &mut a);
+                Outcome { swallow: true, actions: a }
+            } else {
+                let o = self.on_boundary(Boundary::Tab);
+                self.tab_pending = true;
+                o
+            },
             Key::SelectPrev | Key::SelectNext => if self.bubble_visible() {
                 let i = if k == Key::SelectNext { self.sel.next() } else { self.sel.prev() };
                 Outcome { swallow: true, actions: vec![Action::Select(i)] }
             } else { Outcome { swallow: false, actions: self.reset() } },
             Key::Esc => if self.bubble_visible() { let mut a = vec![]; self.show(vec![], &mut a); Outcome { swallow: true, actions: a } }
                 else { Outcome { swallow: false, actions: self.reset() } },
-            Key::Backspace => self.on_backspace(),
+            Key::Backspace => { self.tab_pending = false; self.on_backspace() }
             Key::WordDelete => self.on_word_delete(),
             // Cmd+Backspace deletes the whole line: nothing of it is left to offer
-            Key::LineDelete => Outcome { swallow: false, actions: self.reset() },
-            Key::Nav => Outcome { swallow: false, actions: self.reset() },
+            Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
+            Key::Nav => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
         }
     }
     /// Re-score the current word buffer (with line context) after a keystroke; show/update/hide the live bubble.
     /// Is the current buffer confident enough for the live bubble (same thresholds as typing)?
+    /// True when `word` is on the don't-translate list (matched as lowercased English keys).
+    pub fn blocked(&self, word: &str) -> bool {
+        let k = word.to_lowercase();
+        !k.is_empty() && self.never.contains(&k)
+    }
+    pub fn apply_settings(&mut self, cmd: SettingsCmd) -> bool {
+        match cmd {
+            SettingsCmd::AddNever(w) => self.insert_never(&w),
+            SettingsCmd::RemoveNever(w) => self.remove_never(&w),
+            SettingsCmd::Forget(w) => self.forget_learned(&w),
+            SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
+        }
+    }
+    pub fn settings_snapshot(&self) -> SettingsSnap {
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned() }
+    }
+    /// Hide a bubble whose current word was just blocked.
+    pub fn hide_if_blocked(&mut self) -> Vec<Action> {
+        if !self.blocked(&self.word) || self.bubble.is_empty() { return vec![] }
+        let mut acts = vec![];
+        self.show(vec![], &mut acts);
+        acts
+    }
+    fn insert_never(&mut self, raw: &str) -> bool {
+        let Some(k) = normalize_word(raw) else { return false };
+        self.never.insert(k)
+    }
+    fn remove_never(&mut self, raw: &str) -> bool {
+        let Some(k) = normalize_word(raw) else { return false };
+        self.never.remove(&k)
+    }
+    fn forget_learned(&mut self, raw: &str) -> bool {
+        if !self.personal.forget(raw) { return false }
+        self.events_since_save += 1;
+        true
+    }
     fn live_confident(&self) -> bool {
         let typed = &self.word;
+        if self.blocked(typed) { return false }
         if typed.chars().count() < self.opts.live_min_len { return false }
         if self.thai_active { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_live }
-        else { let (p, ds) = self.prob(typed); ds.last().is_some_and(|d| d.valid) && p > self.opts.live_show }
+        else { let (p, ds) = self.prob(typed); ds.last().is_some_and(|d| d.valid) && p > self.band(&en_to_th(typed), self.opts.live_show) }
+    }
+    /// Confidence a forward conversion must clear: `band` when `thai` is a dictionary word, `STRICT_BAND` otherwise.
+    /// Short English prefixes and typos (`wo` -> ไน, `riht` -> พร้ะ) score in the middle band and read as nonsense Thai.
+    fn band(&self, thai: &str, band: f64) -> f64 {
+        if self.corrector.as_ref().is_some_and(|c| c.has(thai)) { band } else { band.max(STRICT_BAND) }
     }
     /// Show the live bubble for the buffer, replacing also the `prev` committed words before it (reverse phrase).
     fn show_live(&mut self, prev: usize, acts: &mut Vec<Action>) {
@@ -254,14 +358,14 @@ impl Engine {
             // Reverse (Thai layout -> English): confident means >= rev_live (very high), so show immediately
             // instead of waiting for `live_stable` consecutive keystrokes.
             let need = if self.thai_active { 1 } else { self.opts.live_stable };
-            if self.live_streak >= need { self.show_live(0, acts); }
+            if self.live_streak >= need { let prev = self.live_prev(); self.show_live(prev, acts); }
         } else { self.live_streak = 0; if self.live_visible() { self.show(vec![], acts); } }
     }
     /// After an edit that left the buffer (possibly) non-empty: re-offer what is still pending, without re-stabilising.
     fn reoffer(&mut self, was_shown: bool, phrase: usize, acts: &mut Vec<Action>) {
         if !self.word.is_empty() {
             if phrase > 1 { self.show_live(phrase - 1, acts) }                    // rest of a reverse phrase: keep it
-            else if was_shown && self.live_confident() { self.live_streak = self.opts.live_stable; self.show_live(0, acts) }
+            else if was_shown && self.live_confident() { self.live_streak = self.opts.live_stable; let prev = self.live_prev(); self.show_live(prev, acts) }
             else if was_shown { self.live_streak = 0; self.show(vec![], acts) }
             else { self.live_update(acts) }                                      // nothing shown: normal stability rules
         } else if phrase > 0 && was_shown {
@@ -299,12 +403,12 @@ impl Engine {
             Some(c) if !c.extra.is_empty() => {
                 // an extra space / newline after the word: still right after it, bubble unchanged
                 c.extra.pop();
-                if c.extra.is_empty() && c.boundary != Boundary::Enter { /* only the word's own boundary left */ }
+                if c.extra.is_empty() && c.boundary != Some(Boundary::Enter) { /* only the word's own boundary left */ }
             }
             Some(c) if c.converted.is_none() && c.rev == self.thai_active => {
                 // the boundary itself is deleted: the caret is back inside that word -> it becomes the buffer again
                 let c = self.line.pop().unwrap();
-                if c.boundary == Boundary::Enter { self.line_start = 0; }
+                if c.boundary == Some(Boundary::Enter) { self.line_start = 0; }
                 if self.line_start > self.line.len() { self.line_start = self.line.len(); }
                 self.word = c.typed;
                 self.reoffer(shown, phrase, &mut a);
@@ -327,6 +431,7 @@ impl Engine {
         Outcome { swallow: false, actions: a }
     }
     fn on_boundary(&mut self, b: Boundary) -> Outcome {
+        self.tab_pending = false;
         self.live_streak = 0;
         let typed = std::mem::take(&mut self.word);
         let mut acts = vec![]; let mut swallow = false;
@@ -341,6 +446,12 @@ impl Engine {
         let d = ds.last().unwrap();
         let thai = d.candidate.clone();
         let mut converted = None;
+        if self.blocked(&typed) {
+            self.show(vec![], &mut acts);
+            self.line.push(Committed { orig: typed.clone(), typed, converted: None, boundary: Some(b), rev: false, with_prev: 0, extra: String::new() });
+            if b == Boundary::Enter { self.new_line(); }
+            return Outcome { swallow: false, actions: acts };
+        }
         if self.opts.auto_convert && p > self.personal.base.threshold && d.valid {
             // legacy (--auto-convert): replace at the boundary
             swallow = true; converted = Some(thai.clone());
@@ -348,14 +459,22 @@ impl Engine {
             let mut items = vec![BubbleItem { label: typed.clone(), kind: BubbleKind::UndoConversion }];
             items.extend(self.typo_items(&thai));
             self.show(items, &mut acts);
-        } else if d.valid && p > self.opts.suggest_band {
+        } else if d.valid && p > self.band(&thai, self.opts.suggest_band) {
             // default: the boundary passes through untouched; the bubble offers the conversion (Tab / hotkey applies)
             let mut items = vec![BubbleItem { label: thai.clone(), kind: BubbleKind::Convert { typed: typed.clone(), thai: thai.clone() } }];
+            // the best English spelling stays in reach right under the Thai reading
+            let en = self.en_items(&typed);
+            items.extend(en.first().cloned());
             for t in self.typo_items(&thai) { if t.label != thai { items.push(t) } }
+            items.extend(en.into_iter().skip(1));
             items.truncate(3);
             self.show(items, &mut acts); self.phrase = 1;
-        } else { self.show(vec![], &mut acts); }
-        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: b, rev: false, with_prev: 0, extra: String::new() });
+        } else {
+            // left as English: offer spelling corrections
+            let en = self.en_items(&typed);
+            self.show(en, &mut acts); self.phrase = 0;
+        }
+        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new() });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
     }
@@ -363,18 +482,18 @@ impl Engine {
     fn on_boundary_rev(&mut self, typed: String, b: Boundary) -> Outcome {
         let mut acts = vec![]; let mut swallow = false; let mut converted = None;
         let thai = en_to_th(&typed);
+        if self.blocked(&typed) {
+            self.show(vec![], &mut acts);
+            self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new() });
+            if b == Boundary::Enter { self.new_line(); }
+            return Outcome { swallow: false, actions: acts };
+        }
         let (p, ok) = self.rev_prob(&typed);
         let mut with_prev = 0usize;
         if ok && p > self.opts.rev_auto {
-            // right context: up to 3 preceding words left as Thai (e.g. "i" = ร, "don't" = กนืงะ) are re-scored now that
-            // this word follows them, and flipped together with it if they clear `rev_prev`
-            let probs = self.rev_line_probs_with(&typed).unwrap_or_default();
-            let mut k = 0;
-            while k < 3 && k + 1 < probs.len() && self.line.len() > self.line_start + k {
-                let c = &self.line[self.line.len() - 1 - k];
-                if !c.rev || c.converted.is_some() || probs[probs.len() - 2 - k] <= self.opts.rev_prev { break }
-                k += 1;
-            }
+            // right context: up to 3 preceding words left as Thai (e.g. "i" = ร) are re-scored now that
+            // this word follows them, and offered together with it if they clear `rev_prev`
+            let k = self.rev_prev_count(&typed);
             if self.opts.auto_convert {
                 // legacy (--auto-convert): flip at the boundary
                 swallow = true; converted = Some(typed.clone()); with_prev = k;
@@ -391,7 +510,7 @@ impl Engine {
                 self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
             }
         } else { self.show(vec![], &mut acts); }
-        self.line.push(Committed { typed, orig: thai, converted, boundary: b, rev: true, with_prev, extra: String::new() });
+        self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev, extra: String::new() });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
     }
@@ -416,7 +535,77 @@ impl Engine {
         let c = self.line.last()?; if !self.word.is_empty() { return None }
         Some((c.converted.as_deref().unwrap_or(&c.orig).chars().count() + c.after().chars().count(), c))
     }
+    /// The buffer `typed` was just replaced mid-word by `converted`: record it with no boundary, so the next Tab /
+    /// Undo / Guess measure from it instead of from the word before it.
+    fn commit_glued(&mut self, typed: String, converted: String, with_prev: usize) {
+        let orig = self.screen_of(&typed);
+        self.line.push(Committed { orig, typed, converted: Some(converted), boundary: None, rev: self.thai_active, with_prev, extra: String::new() });
+        self.word.clear(); self.live_streak = 0;
+    }
+    /// What Guess turns `typed` into: the English keys (reverse), else the Thai reading or its top typo correction.
+    fn guess_target(&self, typed: &str, rev: bool) -> String {
+        if rev { return typed.to_string() }
+        let base = en_to_th(typed);
+        match self.corrector.as_ref().map(|c| c.suggest(&base, 3, &self.det.thai)) {
+            Some(cor) if !cor.in_dict && !cor.suggestions.is_empty() => cor.suggestions[0].word.clone(),
+            _ => base,
+        }
+    }
+    /// Forward words before the anchor join a Guess only when their Thai reading is a dictionary word.
+    fn guess_joins(&self, c: &Committed, rev: bool) -> bool {
+        c.converted.is_none() && c.rev == rev && !self.blocked(&c.typed)
+            && (rev || self.corrector.as_ref().is_some_and(|cc| cc.has(&en_to_th(&c.typed))))
+    }
+    /// The anchor (the buffer, else the last committed word) must look convertible; plain English proposes nothing.
+    fn guess_anchor_ok(&self, typed: &str, rev: bool) -> bool {
+        if self.blocked(typed) { return false }
+        if rev { return true }
+        let (p, ds) = self.prob(typed);
+        ds.last().is_some_and(|d| d.valid) && (p > self.opts.suggest_band || self.corrector.as_ref().is_some_and(|c| c.has(&en_to_th(typed))))
+    }
+    /// Propose converting the buffer (or the last word) plus the consecutive same-layout words before it on the line.
+    fn guess(&self) -> Option<BubbleItem> {
+        let rev = self.thai_active;
+        let typed = (!self.word.is_empty()).then(|| self.word.clone());
+        let anchor_ok = match &typed {
+            Some(t) => self.guess_anchor_ok(t, rev),
+            None => self.line.last().is_some_and(|c| c.converted.is_none() && c.rev == rev && self.guess_anchor_ok(&c.typed, rev)),
+        };
+        if !anchor_ok { return None }
+        // committed words included; without a buffer the last committed word is the anchor
+        let mut k = usize::from(typed.is_none());
+        while k < 8 && k < self.line.len() {
+            let c = &self.line[self.line.len() - 1 - k];
+            // the phrase stays on one line
+            if c.after().contains('\n') || !self.guess_joins(c, rev) { break }
+            k += 1;
+        }
+        let start = self.line.len() - k;
+        let mut targets: Vec<String> = self.line[start..].iter().map(|c| self.guess_target(&c.typed, rev)).collect();
+        let mut label = String::new();
+        for (c, t) in self.line[start..].iter().zip(&targets) { label += t; label += &c.after(); }
+        if let Some(t) = &typed { let g = self.guess_target(t, rev); label += &g; targets.push(g); }
+        let label = label.trim_end().to_string();
+        (!label.is_empty()).then(|| BubbleItem { label, kind: BubbleKind::Guess { k, typed, targets } })
+    }
+    /// Apply a Guess proposal, if the text it was made for is still what is on screen. The words are committed as
+    /// converted to what was inserted, so Undo restores the whole phrase.
+    fn apply_guess(&mut self, k: usize, typed: Option<String>, targets: Vec<String>, acts: &mut Vec<Action>) {
+        if self.word != typed.as_deref().unwrap_or("") || self.line.len() < k { return }
+        let start = self.line.len() - k;
+        if self.line[start..].iter().any(|c| c.converted.is_some()) { return }
+        let rev = self.thai_active;
+        if !rev { let a = typed.clone().unwrap_or_else(|| self.line[self.line.len() - 1].typed.clone()); self.feedback(&a, Feedback::Retype); } // forward only
+        let (mut del, mut ins) = (0usize, String::new());
+        for (c, t) in self.line[start..].iter().zip(&targets) { del += c.orig.chars().count() + c.after().chars().count(); ins += t; ins += &c.after(); }
+        if let Some(t) = &typed { del += self.screen_of(t).chars().count(); ins += &targets[k]; }
+        acts.push(Action::Replace { delete: del, insert: ins, then: None });
+        for (c, t) in self.line[start..].iter_mut().zip(&targets) { c.converted = Some(t.clone()); }
+        if let Some(t) = typed { self.commit_glued(t, targets[k].clone(), k); }
+        else if let Some(c) = self.line.last_mut() { c.with_prev = k - 1; }
+    }
     fn on_hotkey(&mut self, h: Hotkey) -> Outcome {
+        self.tab_pending = false;
         let mut acts = vec![];
         match h {
             Hotkey::Undo => {
@@ -432,16 +621,18 @@ impl Engine {
                     acts.push(Action::Replace { delete: n, insert: format!("{}{}", c.orig, c.after()), then: None });
                 }
                 self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Undo); }
-                self.line.push(Committed { converted: None, with_prev: 0, ..c });
+                // a word converted mid-word (Guess on the buffer) is still being typed: it is the buffer again
+                if c.boundary.is_none() && c.extra.is_empty() { self.word = c.typed; }
+                else { self.line.push(Committed { converted: None, with_prev: 0, ..c }); }
                 self.show(vec![], &mut acts);
             }
             Hotkey::ForceConvert => {
                 if !self.word.is_empty() {
                     let typed = std::mem::take(&mut self.word);
                     let (shown, target) = if self.thai_active { (en_to_th(&typed), typed.clone()) } else { (typed.clone(), en_to_th(&typed)) };
-                    acts.push(Action::Replace { delete: shown.chars().count(), insert: target, then: None });
+                    acts.push(Action::Replace { delete: shown.chars().count(), insert: target.clone(), then: None });
                     if !self.thai_active { self.feedback(&typed, Feedback::Retype); } // personal model: forward only
-                    self.word.clear(); // the converted text stays part of the current (unfinished) word on screen
+                    self.commit_glued(typed, target, 0);
                 } else if let Some((n, c)) = self.last_on_screen() {
                     let c = c.clone(); if c.converted.is_some() { return Outcome { swallow: true, actions: acts } }
                     let target = if c.rev { c.typed.clone() } else { en_to_th(&c.typed) };
@@ -450,6 +641,10 @@ impl Engine {
                     self.line.push(Committed { converted: Some(target), ..c });
                 }
                 self.show(vec![], &mut acts);
+            }
+            Hotkey::Guess => {
+                let item = self.guess();
+                self.show(item.into_iter().collect(), &mut acts);
             }
             Hotkey::Accept(i) => {
                 let Some(item) = self.bubble.get(i).cloned() else { return Outcome::pass() };
@@ -463,11 +658,12 @@ impl Engine {
                         for c in &self.line[start..] { del += c.converted.as_deref().unwrap_or(&c.orig).chars().count() + c.after().chars().count(); ins += &c.typed; ins += &c.after(); }
                         for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
                         acts.push(Action::Replace { delete: del, insert: format!("{ins}{thai}"), then: None });
-                        self.word.clear(); self.live_streak = 0;
+                        self.commit_glued(typed, thai, prev);
                     }
                     BubbleKind::UndoConversion => return self.on_hotkey(Hotkey::Undo),
                     BubbleKind::Convert { .. } => return self.on_hotkey(Hotkey::ForceConvert),
                     BubbleKind::ConvertPrev { k } => self.flip_prev(k, &mut acts),
+                    BubbleKind::Guess { k, typed, targets } => self.apply_guess(k, typed, targets, &mut acts),
                     BubbleKind::Typo { word } => if let Some((n, c)) = self.last_on_screen() {
                         let c = c.clone();
                         acts.push(Action::Replace { delete: n, insert: format!("{word}{}", c.after()), then: None });
@@ -487,12 +683,23 @@ impl Engine {
 mod tests {
     use super::*;
     use typethai_core::{personal::DEFAULT_PERSONAL, ModelFiles};
-    fn engine() -> Option<Engine> {
+    /// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
+    fn model() -> Option<ModelFiles> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
-        if !p.join("model.json").exists() { eprintln!("SKIP: no model files"); return None }
-        let m = ModelFiles::load_json_dir(&p).unwrap();
+        if p.join("model.json").exists() { return Some(ModelFiles::load_json_dir(&p).unwrap()) }
+        if let Some(t) = std::env::var_os("TYPETHAI_MODEL") { return Some(ModelFiles::load(std::path::Path::new(&t)).unwrap()) }
+        eprintln!("SKIP: no model files"); None
+    }
+    fn engine() -> Option<Engine> {
+        let m = model()?;
         let mut e = Engine::new(m.learn_detector(), PersonalModel::new(m.classifier.clone(), None, DEFAULT_PERSONAL), None, Options::default());
         e.rev = Some(Reverse::embedded()); Some(e)
+    }
+    /// `engine()` with the typo corrector (Guess needs its dictionary).
+    fn engine_typo() -> Option<Engine> {
+        let m = model()?;
+        let mut e = Engine::new(m.learn_detector(), PersonalModel::new(m.classifier.clone(), None, DEFAULT_PERSONAL), Some(m.corrector()), Options::default());
+        e.rev = Some(Reverse::embedded()); e.opts.live = false; Some(e)
     }
     fn typ(e: &mut Engine, s: &str) -> Vec<Outcome> {
         s.chars().map(|c| e.on_key(match c { ' ' => Key::Boundary(Boundary::Space), '\n' => Key::Boundary(Boundary::Enter), c => Key::Char(c) })).collect()
@@ -604,7 +811,9 @@ mod tests {
         assert!(e.live_visible());
         e.reset();
         let o = typ(&mut e, ";b");
-        assert!(bubble_items(o.last().unwrap()).is_some(), "a 2-character word is offered on its last letter");
+        assert!(o.iter().all(|x| bubble_items(x).is_none()), "2 keys are too few for the live bubble");
+        let o = e.on_key(Key::Boundary(Boundary::Space));
+        assert!(bubble_items(&o).is_some(), "a 2-character word is offered after Space");
     }
     #[test] fn live_bubble_stays_off_for_english_and_hides_when_confidence_drops() {
         let Some(mut e) = engine() else { return };
@@ -803,6 +1012,27 @@ mod tests {
         assert!(closed); assert_eq!(screen(&log), "l");
         let o = e.on_key(Key::Backspace); assert!(!e.bubble_visible(), "{:?}", o.actions); assert_eq!(e.buffer(), "");
     }
+    #[test] fn reverse_live_offers_the_phrase() {
+        let Some(mut e) = engine() else { return };
+        e.set_thai_active(true);
+        let mut label = None;
+        for c in "i need".chars() {
+            let o = e.on_key(if c == ' ' { Key::Boundary(Boundary::Space) } else { Key::Char(c) });
+            if let Some(items) = bubble_items(&o) { label = Some(items[0].label.clone()); }
+        }
+        assert_eq!(label.as_deref(), Some("i need"), "the word before a confident word stays in the live bubble");
+        let o = e.on_key(Key::Tab);
+        assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "i need".into(), then: None });
+        e.reset();
+        for c in "i need".chars() { e.on_key(if c == ' ' { Key::Boundary(Boundary::Space) } else { Key::Char(c) }); }
+        e.on_key(Key::Backspace);
+        assert_eq!(label0(&e).as_deref(), Some("i nee"));
+        // a real Thai word is not pulled into the English phrase (it may keep the bubble off entirely)
+        e.reset();
+        typ_th(&mut e, "สวัสดี ");
+        typ(&mut e, "need");
+        assert!(label0(&e).is_none_or(|l| l == "need"), "{:?}", label0(&e));
+    }
     #[test] fn reverse_phrase_backspace_keeps_remaining_words() {
         let Some(mut e) = engine() else { return };
         e.opts.live = false;
@@ -836,5 +1066,184 @@ mod tests {
         let o = e.on_key(Key::LineDelete); assert!(!o.swallow); assert!(!e.bubble_visible()); assert_eq!(e.buffer(), "");
         // untracked text (Backspace with an empty history) resets
         e.reset(); let o = e.on_key(Key::Backspace); assert!(!o.swallow); assert!(!e.bubble_visible());
+    }
+    fn word_offered(e: &mut Engine, thai: bool) -> bool {
+        e.reset();
+        e.set_thai_active(thai);
+        let mut shown = false;
+        for c in [Key::Char('o'), Key::Char('k'), Key::Boundary(Boundary::Space)] {
+            let o = e.on_key(c);
+            shown |= e.bubble_visible() || bubble_items(&o).is_some();
+        }
+        shown
+    }
+    #[test]
+    fn blocked_ok_is_not_offered_as_na() {
+        let Some(mut e) = engine() else { return };
+        assert!(word_offered(&mut e, false), "ok is offered as นา before it is blocked");
+        e.never.insert("ok".into());
+        assert!(!word_offered(&mut e, false), "forward ok stays as typed");
+        assert!(!word_offered(&mut e, true), "reverse ok stays as typed");
+        e.reset();
+        e.set_thai_active(false);
+        typ(&mut e, "l;ylfu");
+        assert!(e.bubble_visible(), "other words still suggest");
+        // a blocked earlier word is left out of a reverse phrase
+        e.never.clear();
+        e.never.insert("i".into());
+        e.set_thai_active(true);
+        let mut label = None;
+        for c in "i need".chars() {
+            let o = e.on_key(if c == ' ' { Key::Boundary(Boundary::Space) } else { Key::Char(c) });
+            if let Some(items) = bubble_items(&o) { label = Some(items[0].label.clone()); }
+        }
+        assert_ne!(label.as_deref(), Some("i need"));
+    }
+    #[test]
+    fn settings_forget_and_reset_keep_the_never_list() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.apply_settings(SettingsCmd::AddNever("นา".into())));
+        assert!(e.blocked("OK"));
+        assert!(!e.apply_settings(SettingsCmd::AddNever("two words".into())));
+        assert!(!e.apply_settings(SettingsCmd::AddNever("นา".into())), "duplicate is not a change");
+        e.personal.state.mem.insert("hi".into(), typethai_core::personal::Mem { kept: 2.0, conv: 1.0, t: 4.0 });
+        assert_eq!(e.settings_snapshot().learned[0].word, "hi");
+        assert_eq!(e.settings_snapshot().never, vec!["ok".to_string()]);
+        assert!(e.apply_settings(SettingsCmd::Forget("HI".into())));
+        assert!(e.settings_snapshot().learned.is_empty());
+        e.personal.state.mem.insert("hi".into(), typethai_core::personal::Mem { kept: 1.0, conv: 0.0, t: 1.0 });
+        assert!(e.apply_settings(SettingsCmd::ResetLearning));
+        assert!(e.settings_snapshot().learned.is_empty());
+        assert!(e.blocked("ok"), "reset clears learning and keeps the don't-translate list");
+        e.reset();
+        e.set_thai_active(false);
+        e.never.clear();
+        typ(&mut e, "l;ylfu");
+        assert!(e.bubble_visible());
+        e.never.insert("l;ylfu".into());
+        let hide = e.hide_if_blocked();
+        assert!(hide.iter().any(|a| matches!(a, Action::HideBubble)));
+        assert!(!e.bubble_visible());
+    }
+    fn feed(e: &mut Engine, log: &mut Vec<(Option<char>, Outcome)>, text: &str) {
+        for c in text.chars() { log.push((Some(c), e.on_key(if c == '\t' { Key::Tab } else { key_of(c) }))); }
+    }
+    fn hot(e: &mut Engine, log: &mut Vec<(Option<char>, Outcome)>, h: Hotkey) { log.push((None, e.on_key(Key::Hotkey(h)))); }
+    #[test] fn guess_typo_correction_undoes_cleanly() {
+        let Some(mut e) = engine_typo() else { return };
+        let mut log = vec![];
+        feed(&mut e, &mut log, "riht");
+        hot(&mut e, &mut log, Hotkey::Guess);
+        let label = label0(&e).expect("guess offered");
+        assert_ne!(label, en_to_th("riht"), "the top typo correction is proposed");
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), label);
+        assert_eq!(e.buffer(), "");
+        feed(&mut e, &mut log, " ");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "riht ", "undo deletes the corrected word, not its raw Thai reading");
+        // undo straight after a mid-word guess gives the buffer back
+        e.reset(); log.clear();
+        feed(&mut e, &mut log, "riht");
+        hot(&mut e, &mut log, Hotkey::Guess);
+        feed(&mut e, &mut log, "\t");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "riht");
+        assert_eq!(e.buffer(), "riht");
+    }
+    #[test] fn guess_phrase_with_buffer_undoes_as_one() {
+        let Some(mut e) = engine_typo() else { return };
+        let mut log = vec![];
+        feed(&mut e, &mut log, "w,j l;ylfu");
+        hot(&mut e, &mut log, Hotkey::Guess);
+        assert_eq!(label0(&e).as_deref(), Some("ไม่ สวัสดี"));
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "ไม่ สวัสดี");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "w,j l;ylfu");
+        assert_eq!(e.buffer(), "l;ylfu");
+    }
+    #[test] fn double_tab_guesses_the_last_word() {
+        let Some(mut e) = engine_typo() else { return };
+        e.opts.suggest_band = 1.1; // no bubble at the first Tab
+        let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu\t");
+        assert!(!e.bubble_visible());
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(label0(&e).as_deref(), Some("สวัสดี"));
+        assert_eq!(screen(&log), "l;ylfu\t", "the second Tab only shows the proposal");
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "สวัสดี\t");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu\t");
+    }
+    #[test] fn guess_skips_english_and_goes_stale() {
+        let Some(mut e) = engine_typo() else { return };
+        typ(&mut e, "hello");
+        e.on_key(Key::Hotkey(Hotkey::Guess));
+        assert!(!e.bubble_visible(), "plain English proposes nothing");
+        e.reset();
+        typ(&mut e, "riht");
+        e.on_key(Key::Hotkey(Hotkey::Guess));
+        assert!(e.bubble_visible());
+        e.on_key(Key::Char('x'));
+        assert!(!e.bubble_visible(), "a typed key makes the proposal stale");
+        let o = e.on_key(Key::Tab);
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. })));
+    }
+    #[test] fn guess_after_live_accept_measures_from_the_converted_word() {
+        let Some(mut e) = engine_typo() else { return };
+        e.opts.live = true;
+        let mut log = vec![];
+        feed(&mut e, &mut log, "w,j l;ylfu");
+        assert!(e.live_visible());
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "w,j สวัสดี");
+        // the next Tab is a plain tab; the one after it must not touch "w,j " through the converted word
+        feed(&mut e, &mut log, "\t\t");
+        assert_eq!(screen(&log), "w,j สวัสดี\t\t", "nothing left to guess: both Tabs are typed");
+        log.clear(); e.reset();
+        feed(&mut e, &mut log, "l;ylfu");
+        feed(&mut e, &mut log, "\t");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu", "a live conversion undoes back to the typed keys");
+    }
+    /// A speller that knows a few misspellings.
+    struct FakeSpeller;
+    impl Speller for FakeSpeller {
+        fn guesses(&self, word: &str) -> Option<Vec<String>> {
+            let g: &[&str] = match word { "ths" => &["this", "the"], "thsi" => &["this"], "mu" => &["my"], _ => return None };
+            Some(g.iter().map(|s| s.to_string()).collect())
+        }
+    }
+    fn labels(e: &Engine) -> Vec<String> { e.bubble.iter().map(|b| b.label.clone()).collect() }
+    #[test] fn english_typo_is_offered_and_undone() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        let mut log = vec![];
+        feed(&mut e, &mut log, "is ths ");
+        assert_eq!(labels(&e), ["this", "the"]);
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "is this ");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "is ths ");
+        // punctuation around the word stays
+        e.reset();
+        typ(&mut e, "thsi. ");
+        assert_eq!(labels(&e), ["this."]);
+        // spelled right: nothing
+        e.reset();
+        typ(&mut e, "hello ");
+        assert!(!e.bubble_visible());
+        e.opts.typo_suggestions = false;
+        e.reset();
+        typ(&mut e, "ths ");
+        assert!(!e.bubble_visible(), "typo suggestions off");
+    }
+    #[test] fn english_spelling_sits_under_the_thai_reading() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        typ(&mut e, "mu ");
+        assert_eq!(labels(&e), ["ที", "my"]);
     }
 }

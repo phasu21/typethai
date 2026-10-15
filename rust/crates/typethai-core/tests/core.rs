@@ -1,7 +1,10 @@
 use typethai_core::{corrector::{key_distance, DEFAULT_COSTS}, keymap::{en_to_th, th_to_en}, normalize::normalize_thai, orthography::check_thai, ModelFiles};
+/// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
 fn model() -> Option<ModelFiles> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
-    if p.join("model.json").exists() { Some(ModelFiles::load_json_dir(&p).unwrap()) } else { eprintln!("model files missing; skipping"); None }
+    if p.join("model.json").exists() { return Some(ModelFiles::load_json_dir(&p).unwrap()) }
+    if let Some(t) = std::env::var_os("TYPETHAI_MODEL") { return Some(ModelFiles::load(std::path::Path::new(&t)).unwrap()) }
+    eprintln!("model files missing; skipping"); None
 }
 #[test] fn keymap_roundtrip() { assert_eq!(en_to_th("l;ylfu"), "สวัสดี"); assert_eq!(th_to_en("สวัสดี").as_deref(), Some("l;ylfu")); }
 #[test] fn orthography() { assert!(check_thai("สวัสดี").is_ok()); assert!(check_thai("ัก").is_err()); }
@@ -24,4 +27,18 @@ fn model() -> Option<ModelFiles> {
     for _ in 0..5 { pm.feedback(&ds, 0, Feedback::Undo); }
     let j = pm.to_json(); let pm2 = PersonalModel::from_json(m.classifier.clone(), &j).unwrap();
     assert_eq!(pm.line_probs(&ds), pm2.line_probs(&ds)); assert!(pm.line_probs(&ds)[0] < m.classifier.line_probs(&ds)[0]);
+}
+#[test] fn personal_shift_is_capped() {
+    let Some(m) = model() else { return };
+    use typethai_core::personal::*;
+    // conversions of one-word lines push the rare "one-word line" feature (large z): every lone word must not follow
+    let det = m.learn_detector();
+    let mut pm = PersonalModel::new(m.classifier.clone(), None, DEFAULT_PERSONAL);
+    for w in ["l;ylfu", "l;ylf", "l;ylx", "l", "l;ylfu", "l;ylf", "l;ylfu", "l;ylf", "l;ylf"] { pm.feedback(&det.convert(w).1, 0, Feedback::Retype); }
+    let logit = |p: f64| (p / (1.0 - p)).ln();
+    for w in ["it", "so", "riht"] {
+        let ds = det.convert(w).1;
+        let (base, now) = (m.classifier.line_probs(&ds)[0], pm.line_probs(&ds)[0]);
+        assert!(logit(now) - logit(base) <= DEFAULT_PERSONAL.max_drift + 1e-9, "{w}: {base:.3} -> {now:.3}");
+    }
 }

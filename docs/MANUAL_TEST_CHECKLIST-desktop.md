@@ -41,7 +41,7 @@
 - [ ] `--no-reverse`: Thai typing is ignored as before.
 
 ## v12
-- [ ] Bubble rows show text only (no hotkey chips / Tab badge / %); selected row clearly highlighted in light and dark mode.
+- [ ] The selected row shows a Tab `Kbd` on the right (other rows are text only); the highlight is clear in light and dark mode.
 - [ ] ⌃⌥1/2/3 and Tab / Shift+Up/Down / Esc still work.
 - [ ] A very long suggestion wraps (no "…"), bubble stays on screen, flips above the caret near the bottom edge.
 - [ ] Clicking any line of a wrapped row picks that row.

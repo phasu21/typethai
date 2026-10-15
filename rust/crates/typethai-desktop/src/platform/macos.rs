@@ -279,6 +279,8 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             }
         }
         CGEventType::KeyDown => {
+            let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
+            if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
             let Some(key) = translate(code, e.get_flags().bits()) else { return false };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
@@ -305,8 +307,33 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
     if r { CallbackResult::Drop } else { CallbackResult::Keep }
 }
 
+/// Keys aimed at this process (the Settings window) are left alone, so the field can be typed in.
+fn key_targets_us(target_pid: i64) -> bool {
+    let us = std::process::id() as i64;
+    if target_pid == us { return true }
+    if target_pid > 0 { return false }
+    frontmost().is_some_and(|(pid, _, _)| pid as i64 == us)
+}
+fn typing_in_our_window(st: &mut State, target_pid: i64) -> bool {
+    if !key_targets_us(target_pid) { return false }
+    let us = std::process::id() as i64;
+    if st.last_pid != us {
+        st.last_pid = us;
+        let a = st.app.engine.reset();
+        run_actions(st, a);
+    }
+    true
+}
+fn service_settings(st: &mut State) {
+    let cmds = bridge::take_settings();
+    if cmds.is_empty() && !bridge::take(&bridge::REQ_SETTINGS) { return }
+    let (snap, hide) = crate::prefs::apply_commands(&mut st.app, cmds);
+    run_actions(st, hide);
+    send(UiMsg::Settings(snap));
+}
 extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
     with(|st| {
+        service_settings(st);
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
         // a few AX reads after each key: the first is often still the pre-keystroke caret

@@ -1,6 +1,7 @@
 //! Messages and shared state between the key-capture thread (CGEventTap / low-level hooks, owns the Engine) and the
 //! gpui UI thread (bubble window + tray).
 use crate::placement::{Anchor, Rect};
+use crate::prefs::{SettingsCmd, SettingsSnap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -15,25 +16,31 @@ pub enum UiMsg {
     Paused(bool),
     /// Capture thread saved state and stopped; UI should quit.
     Stopped,
+    /// Current don't-translate list and learned words, for the Settings window.
+    Settings(SettingsSnap),
 }
 
 /// Bubble layout constants (logical px) shared by the view and the click hit-test.
 pub const PAD: f64 = 6.0;
 pub const ROW_H: f64 = 30.0;
-/// Bubble chrome metrics (logical units). One row = [px ROW_PX][label column (wraps)][px ROW_PX], at least ROW_H tall.
+/// Bubble chrome metrics (logical units). One row = [px ROW_PX][label column (wraps)][gap][Tab keycap][px ROW_PX], at least ROW_H tall.
 pub const BORDER: f64 = 1.0;
 /// Panel corner radius; also the native layer clip radius on macOS.
 pub const RADIUS: f64 = 8.0;
 pub const ROW_PX: f64 = 10.0;
 pub const FONT_PX: f64 = 15.0;
+/// Space between the suggestion and the Tab `Kbd`. The hint is only drawn on the selected row; the slot is always reserved.
+pub const BADGE_GAP: f64 = 8.0;
+/// Width reserved for the Tab `Kbd` (`text_xs`, horizontal padding, "Tab").
+pub const BADGE_W: f64 = 40.0;
 /// Added to every measured single-line width: Thai upper/lower marks and tone marks on the last cluster can paint a
 /// little past the advance width, and layout rounds to device pixels; the slack keeps them inside the column.
 pub const MEASURE_SLACK: f64 = 3.0;
 pub const MIN_W: f64 = 200.0;
 /// Margin kept from the monitor's visible edges when computing the maximum bubble width.
 pub const SCREEN_MARGIN: f64 = 24.0;
-/// Width used by everything except the label column.
-pub const CHROME_W: f64 = 2.0 * (PAD + BORDER) + 2.0 * ROW_PX;
+/// Width used by everything except the label column (padding, border, and the Tab keycap slot).
+pub const CHROME_W: f64 = 2.0 * (PAD + BORDER) + 2.0 * ROW_PX + BADGE_GAP + BADGE_W;
 
 /// Bubble layout: width and the shared label column width; `h` is only the first guess (rows wrap — the real height
 /// comes from gpui's laid-out panel, see `Ui::reconcile`).
@@ -79,7 +86,16 @@ pub fn set_geom(g: Option<Geom>) { *GEOM.lock().unwrap() = g; }
 /// Tray -> capture thread requests (polled by a timer on the capture thread).
 pub static REQ_TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
 pub static REQ_QUIT: AtomicBool = AtomicBool::new(false);
+/// Settings window wants a fresh snapshot. Commands, if any, are applied first.
+pub static REQ_SETTINGS: AtomicBool = AtomicBool::new(false);
+static SETTINGS_CMDS: Mutex<Vec<SettingsCmd>> = Mutex::new(Vec::new());
 pub fn take(flag: &AtomicBool) -> bool { flag.swap(false, Ordering::SeqCst) }
+pub fn push_settings(cmd: SettingsCmd) {
+    SETTINGS_CMDS.lock().unwrap().push(cmd);
+    REQ_SETTINGS.store(true, Ordering::SeqCst);
+}
+pub fn request_settings() { REQ_SETTINGS.store(true, Ordering::SeqCst); }
+pub fn take_settings() -> Vec<SettingsCmd> { std::mem::take(&mut SETTINGS_CMDS.lock().unwrap()) }
 
 #[cfg(test)]
 mod tests {
