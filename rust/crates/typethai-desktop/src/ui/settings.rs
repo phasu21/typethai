@@ -277,7 +277,7 @@ impl SettingsView {
         let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
             .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
         let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
-        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word.".into(),
+        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another.".into(),
             keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "typing", "learn", "forget"], std::iter::empty()),
             vec![SettingItem::new("Show suggestions", mode),
                 SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times."),

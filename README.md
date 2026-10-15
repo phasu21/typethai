@@ -69,7 +69,8 @@ reacting, remove the old entry and re-add the app.
 
 | Key | Action |
 |---|---|
-| **Tab** (bubble visible) | Apply the selected row |
+| **Tab** (bubble visible) | Apply the selected row when Tab is released |
+| **Hold Tab + 1 / 2 / 3** | Apply row 1 / 2 / 3 (the digit is not typed) |
 | **Shift+↑ / Shift+↓** | Move the selection |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
