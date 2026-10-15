@@ -2555,6 +2555,26 @@ mod tests {
         e.opts.complete = CompleteMode::Typing;
         measure(&mut e);
     }
+    /// Flags `candel` with the guesses the macOS checker gives, in its order.
+    struct CandelSpeller;
+    impl Speller for CandelSpeller { fn guesses(&self, w: &str) -> Option<Vec<String>> { (w == "candel").then(|| ["cancel", "candle", "Handel"].map(String::from).to_vec()) } }
+    #[test] fn a_slipped_key_still_reaches_the_word_meant() {
+        let (Some(mut m), Some(mut e)) = (model(), engine_typo()) else { return };
+        e.opts.complete = CompleteMode::Pause; e.load_completers(&mut m); e.speller = Some(Box::new(CandelSpeller));
+        typ(&mut e, "candel"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["candles", "candle", "cancel"], "candle is el swapped; mid-word the word may go on");
+        e.opts.slips = None;
+        e.reset(); typ(&mut e, "candel"); assert_eq!(idle(&mut e, 600), vec![], "read as typed, no word starts with candel");
+        e.opts.slips = Some(Slips::default());
+        e.reset(); typ(&mut e, "light a candel "); assert_eq!(labels(&e), ["candle", "cancel", "Handel"]);
+        e.reset(); typ(&mut e, "we must candel "); assert_eq!(labels(&e), ["cancel", "candle", "Handel"], "the previous word decides");
+        // Thai on the Thai layout, completed mid-word; Thai typed on the English layout, fixed under its conversion
+        e.reset(); e.set_thai_active(true); typ(&mut e, &keys("สวัสก")); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["สวัสดี", "สวัสดิ์", "สวัสดิภาพ"], "ก is next to ด");
+        e.reset(); e.set_thai_active(false); typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        assert_eq!(labels(&e), ["โรงเรยีน", "โรงเรียน", "โรงเรือน"], "ยี swapped");
+        e.reset(); typ(&mut e, &format!("{} ", keys("ร้านอาหร"))); assert_eq!(labels(&e), ["ร้านอาหร", "ร้านอาหาร"], "า left out");
+    }
     #[test] fn model_completers_skip_english_without_its_frequencies() {
         let Some(mut m) = model() else { return };
         let Some(mut e) = engine() else { return };
