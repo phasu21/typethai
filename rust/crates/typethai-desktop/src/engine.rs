@@ -4,8 +4,9 @@
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Completer, Completions}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -108,8 +109,12 @@ impl Outcome { fn pass() -> Self { Outcome { swallow: false, actions: vec![] } }
 /// `boundary` is None for a word converted mid-word (Guess on the buffer): what is typed next follows it directly.
 struct Committed { typed: String, orig: String, converted: Option<String>, boundary: Option<Boundary>, rev: bool, with_prev: usize,
     /// Extra boundaries typed after this word (more spaces / Enters) while it is still the last word.
-    extra: String }
+    extra: String,
+    /// Already given to the word memory (see `settle`).
+    learned: bool }
 impl Committed {
+    /// The word as it is on screen now.
+    fn shown(&self) -> &str { self.converted.as_deref().unwrap_or(&self.orig) }
     /// Everything after the word on screen: its boundary plus any extra spaces/newlines.
     fn after(&self) -> String { format!("{}{}", self.boundary.map_or("", Boundary::text), self.extra) }
 }
@@ -130,10 +135,12 @@ pub struct Options {
     /// Word completion: `Typing` shows it on a keystroke when the top word's share of the prefix's frequency is at
     /// least `complete_conf`; `Pause` shows it, ungated, once no key came for `complete_idle`.
     pub complete: CompleteMode, pub complete_conf: f64, pub complete_idle: Duration,
+    /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
+    pub learn_words: bool,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(500) } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(500), learn_words: true } } }
 /// When word completions appear in the bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
 /// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
@@ -183,6 +190,11 @@ pub struct Engine {
     last_req: ReqId,
     /// Word completion sources; None disables that language.
     pub thai_comp: Option<Completer>, pub en_comp: Option<Completer>,
+    /// Corpus word pairs that rank completions after the previous word; None ranks without them.
+    pub thai_bigrams: Option<Bigrams>, pub en_bigrams: Option<Bigrams>,
+    /// The words this user finished (words.json). Shared with the save thread, which serialises a snapshot; learning
+    /// while a save is still running copies it first.
+    pub words: Arc<WordMemory>,
     /// The last Char / Backspace, until `on_idle` has handled the pause after it.
     last_key: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
@@ -191,12 +203,15 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, last_key: None, comp_muted: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
-    pub fn load_completers(&mut self, m: &typethai_core::ModelFiles) {
+    pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
         self.thai_comp = Some(m.thai_completer());
         self.en_comp = (!m.english_freq.is_empty()).then(|| m.english_completer());
+        // taken, not cloned: loaded pairs take tens of MB
+        self.thai_bigrams = Some(std::mem::take(&mut m.th_bigrams)).filter(|b| !b.is_empty());
+        self.en_bigrams = Some(std::mem::take(&mut m.en_bigrams)).filter(|b| !b.is_empty());
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -243,6 +258,7 @@ impl Engine {
     pub fn is_bubble_key(&self, k: &Key) -> bool { self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc) }
     /// Focus change, mouse click, secure field, layout change, any non-bubble key during a rewrite: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
+        self.settle();
         self.word.clear(); self.tab_pending = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
@@ -308,7 +324,7 @@ impl Engine {
                 self.tab_pending = false;
                 self.resume_glued();
                 // a new word starts: the bubble was about the previous word and can no longer be applied
-                let mut a = vec![]; if self.word.is_empty() { self.show(vec![], &mut a); self.live_streak = 0; }
+                let mut a = vec![]; if self.word.is_empty() { self.settle(); self.show(vec![], &mut a); self.live_streak = 0; }
                 else if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Guess { .. }, .. })) { self.show(vec![], &mut a); }
                 self.word.push(c); self.last_key = Some(Instant::now());
                 self.live_update(&mut a);
@@ -357,11 +373,13 @@ impl Engine {
             SettingsCmd::Forget(w) => self.forget_learned(&w),
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
+            SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
+            SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, learn_words: self.opts.learn_words, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -460,17 +478,23 @@ impl Engine {
         if self.thai_active && live.is_some() { return vec![] }
         let (min, k) = (if typing { 3 } else { 2 }, 3 - usize::from(live.is_some()));
         let gate = |c: &Completions| !typing || c.confidence >= self.opts.complete_conf;
+        let memory = self.opts.learn_words.then_some(&*self.words);
         let (head, found) = if self.thai_active || live.is_some() {
             let Some(comp) = &self.thai_comp else { return vec![] };
             let run = en_to_th(&self.word);
             let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
-            (head.to_string(), comp.complete(tail, k))
+            // the word before the tail in the run, else the one the line shows before the run
+            let d = &self.det.th_dict;
+            let prev = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => self.word_before(self.line.len()) };
+            let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory };
+            (head.to_string(), comp.complete(tail, k, cx))
         } else {
             let w = self.word.as_str();
             if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
             let Some(comp) = &self.en_comp else { return vec![] };
-            let mut found = comp.complete(w, k);
+            let prev = self.word_before(self.line.len());
+            let mut found = comp.complete(w, k, Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Latin), bigrams: self.en_bigrams.as_ref(), memory });
             if !typing && found.words.len() < k { if let Some(sp) = &self.speller {
                 for g in sp.completions(w) {
                     if found.words.len() >= k { break }
@@ -513,6 +537,40 @@ impl Engine {
         self.line.pop();
         if self.line_start > self.line.len() { self.line_start = self.line.len(); }
         self.word = keys;
+    }
+    /// The words `text` shows: an English word without the punctuation around it, or a Thai run split into dictionary
+    /// words. None is anything else (digits, symbols, Thai the dictionary does not cover); it ends a chain of words.
+    fn screen_words(&self, text: &str) -> Vec<Option<String>> {
+        if lang_of(text) == InputLang::Thai {
+            let d = &self.det.th_dict;
+            return d.segment(text).into_iter().map(|w| (d.has(w) && !w.chars().any(char::is_numeric)).then(|| w.to_string())).collect()
+        }
+        let core = text.trim_matches(|c: char| !c.is_alphanumeric());
+        vec![(!core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic())).then(|| core.to_ascii_lowercase())]
+    }
+    /// The last word `line[j - 1]` shows, unless a line break follows it.
+    fn word_before(&self, j: usize) -> Option<String> {
+        let c = self.line.get(j.checked_sub(1)?)?;
+        if c.after().contains('\n') { return None }
+        self.screen_words(c.shown()).pop().flatten()
+    }
+    /// Give the committed words not learned yet to the word memory, as they are on screen now: what a conversion
+    /// replaced is learned as its result. Runs when the next word starts (no bubble can change them any more) and
+    /// before the line is forgotten.
+    fn settle(&mut self) {
+        let from = self.line.iter().rposition(|c| c.learned).map_or(0, |i| i + 1);
+        for j in from..self.line.len() {
+            self.line[j].learned = true;
+            if !self.opts.learn_words || self.blocked(&self.line[j].typed) { continue }
+            let mut prev = self.word_before(j);
+            for w in self.screen_words(self.line[j].shown()) {
+                if let Some(w) = &w {
+                    Arc::make_mut(&mut self.words).learn(prev.as_deref().filter(|p| lang_of(p) == lang_of(w)), w);
+                    self.events_since_save += 1;
+                }
+                prev = w;
+            }
+        }
     }
     /// Backspace: edit the buffer; at a word's end (only its boundary/extra spaces left) step back into that word.
     fn on_backspace(&mut self) -> Outcome {
@@ -573,7 +631,7 @@ impl Engine {
         let mut converted = None;
         if self.blocked(&typed) {
             self.show(vec![], &mut acts);
-            self.line.push(Committed { orig: typed.clone(), typed, converted: None, boundary: Some(b), rev: false, with_prev: 0, extra: String::new() });
+            self.line.push(Committed { orig: typed.clone(), typed, converted: None, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
         }
@@ -599,7 +657,7 @@ impl Engine {
             let en = self.en_items(&typed);
             self.show(en, &mut acts); self.phrase = 0;
         }
-        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new() });
+        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
     }
@@ -609,7 +667,7 @@ impl Engine {
         let thai = en_to_th(&typed);
         if self.blocked(&typed) {
             self.show(vec![], &mut acts);
-            self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new() });
+            self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
         }
@@ -635,7 +693,7 @@ impl Engine {
                 self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
             }
         } else { self.show(vec![], &mut acts); }
-        self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev, extra: String::new() });
+        self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev, extra: String::new(), learned: false });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
     }
@@ -664,7 +722,7 @@ impl Engine {
     /// Undo / Guess measure from it instead of from the word before it.
     fn commit_glued(&mut self, typed: String, converted: String, with_prev: usize) {
         let orig = self.screen_of(&typed);
-        self.line.push(Committed { orig, typed, converted: Some(converted), boundary: None, rev: self.thai_active, with_prev, extra: String::new() });
+        self.line.push(Committed { orig, typed, converted: Some(converted), boundary: None, rev: self.thai_active, with_prev, extra: String::new(), learned: false });
         self.word.clear(); self.live_streak = 0;
     }
     /// What Guess turns `typed` into: the English keys (reverse), else the Thai reading or its top typo correction.
@@ -1678,40 +1736,137 @@ mod tests {
         completers(&mut e, CompleteMode::Typing); e.reset(); typ(&mut e, &keys("ภาษ"));
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "same engine, completions on");
     }
+    #[test] fn finished_words_rank_first() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.reset(); typ(&mut e, "helmet helmet helmet hel");
+        assert_eq!(labels(&e), ["helmet", "help", "hello"]);
+    }
+    #[test] fn a_new_word_is_offered_after_three_finishes() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "helix helix hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.reset(); typ(&mut e, "helix hel"); assert_eq!(labels(&e), ["helix", "help", "hello"]);
+    }
+    #[test] fn an_accepted_completion_is_learned() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        for _ in 0..3 {
+            typ(&mut e, "hel");
+            let i = labels(&e).iter().position(|l| l == "helmet").expect("helmet offered");
+            e.on_key(Key::Hotkey(Hotkey::Accept(i))); typ(&mut e, " ");
+        }
+        typ(&mut e, "x hel"); assert_eq!(labels(&e), ["helmet", "help", "hello"]);
+    }
+    #[test] fn learns_letters_only_words_without_their_punctuation() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "helium9 helium9 helium9 hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.reset(); typ(&mut e, "(Helium), helium. helium! hel"); assert_eq!(labels(&e), ["helium", "help", "hello"]);
+        e.reset(); e.never.insert("helmet".into());
+        typ(&mut e, "helmet helmet helmet hel"); assert_eq!(labels(&e), ["helium", "help", "hello"], "blocked words are not learned");
+    }
+    #[test] fn a_converted_word_is_learned_as_its_result() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ_th(&mut e, "ภาษ"); assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"]);
+        e.reset(); e.set_thai_active(false);
+        typ(&mut e, &format!("{} ", keys("ภาษี"))); e.on_key(Key::Hotkey(Hotkey::ForceConvert)); typ(&mut e, "a");
+        e.reset(); typ_th(&mut e, "ภาษ"); assert_eq!(labels(&e), ["ภาษี", "ภาษา", "ภาษาไทย"]);
+    }
+    #[test] fn learning_off_neither_learns_nor_ranks_by_memory() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        assert!(e.apply_settings(SettingsCmd::SetLearnWords(false)));
+        assert!(!e.apply_settings(SettingsCmd::SetLearnWords(false)), "same value is not a change");
+        typ(&mut e, "helmet helmet helmet hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.apply_settings(SettingsCmd::SetLearnWords(true));
+        e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"], "nothing was learned while off");
+        e.reset(); typ(&mut e, "helmet helmet helmet hel"); assert_eq!(labels(&e), ["helmet", "help", "hello"]);
+        e.apply_settings(SettingsCmd::SetLearnWords(false));
+        e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"], "what was learned is not used while off");
+        assert!(!e.settings_snapshot().learn_words);
+    }
+    #[test] fn forget_clears_learned_words() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "helmet helmet helmet hel"); assert_eq!(labels(&e), ["helmet", "help", "hello"]);
+        let saves = e.events_since_save;
+        assert_eq!(e.settings_snapshot().words_learned, 1);
+        assert!(e.apply_settings(SettingsCmd::ForgetWords));
+        assert_eq!(e.settings_snapshot().words_learned, 0);
+        assert_eq!(e.events_since_save, saves + 1, "a forget is saved");
+        e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+    }
+    #[test] fn the_previous_word_ranks_completions() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        e.opts.learn_words = false;
+        let pairs = |v: &[(&str, &str)]| Some(Bigrams::new(v.iter().map(|(p, n)| (p.to_string(), n.to_string(), 5.0))));
+        e.en_bigrams = pairs(&[("my", "helmet")]);
+        e.thai_bigrams = pairs(&[("ชอบ", "ภาษี")]);
+        typ(&mut e, "my hel"); assert_eq!(labels(&e), ["helmet", "help", "hello"]);
+        e.reset(); typ(&mut e, "my\nhel"); assert_eq!(labels(&e), ["help", "hello", "helmet"], "not across a line break");
+        e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        // Thai: the dictionary word before the tail inside the run, else the word before the run
+        e.reset(); typ_th(&mut e, "ภาษ"); assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"]);
+        e.reset(); typ_th(&mut e, "ฉันชอบภาษ"); assert_eq!(labels(&e), ["ภาษี", "ภาษา", "ภาษาไทย"]);
+        e.reset(); typ_th(&mut e, "ชอบ ภาษ"); assert_eq!(labels(&e), ["ภาษี", "ภาษา", "ภาษาไทย"]);
+        e.reset(); typ_th(&mut e, "ชอบมากภาษ"); assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"]);
+    }
     /// `cargo test --release -p typethai-desktop completion_cost -- --ignored --nocapture`: per-keystroke cost of the
     /// Typing-mode rows on the real model, and each prefix's top word and confidence.
     #[test] #[ignore] fn completion_cost() {
-        let (Some(m), Some(mut e)) = (model(), engine()) else { return };
-        e.opts.complete = CompleteMode::Typing; e.load_completers(&m); e.speller = crate::platform::spell::system();
+        let (Some(mut m), Some(mut e)) = (model(), engine()) else { return };
+        e.opts.complete = CompleteMode::Typing; e.load_completers(&mut m); e.speller = crate::platform::spell::system();
         let (th, en) = (m.thai_completer(), m.english_completer());
-        for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
-        for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
-        let cases: [(&str, bool, String); 4] = [("en hel", false, "hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห"))];
-        for (name, thai, k) in cases {
-            e.reset(); e.set_thai_active(thai); typ(&mut e, &k);
-            let mut ns: Vec<u128> = (0..2000).map(|_| { let t = Instant::now(); std::hint::black_box(e.completion_rows(true)); t.elapsed().as_nanos() }).collect();
-            ns.sort_unstable();
-            println!("{name}: rows {:?} p50 {:.1} us p99 {:.1} us", labels(&e), ns[1000] as f64 / 1e3, ns[1980] as f64 / 1e3);
+        for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        let run = keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห");
+        let cases: [(&str, bool, String); 5] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, run.clone())];
+        let measure = |e: &mut Engine| {
+            for (name, thai, k) in &cases {
+                e.reset(); e.set_thai_active(*thai); typ(e, k);
+                let mut ns: Vec<u128> = (0..2000).map(|_| { let t = Instant::now(); std::hint::black_box(e.completion_rows(true)); t.elapsed().as_nanos() }).collect();
+                ns.sort_unstable();
+                println!("{name}: rows {:?} p50 {:.1} us p99 {:.1} us", labels(e), ns[1000] as f64 / 1e3, ns[1980] as f64 / 1e3);
+            }
+            // whole keystrokes (live row included) over the 30-char run on the English layout, with and without completion
+            for (mode, thai) in [(CompleteMode::Off, false), (CompleteMode::Typing, false), (CompleteMode::Off, true), (CompleteMode::Typing, true)] {
+                e.opts.complete = mode;
+                let mut ns: Vec<u128> = vec![];
+                for _ in 0..50 { e.reset(); e.set_thai_active(thai); for c in run.chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
+                ns.sort_unstable();
+                println!("on_key {mode:?} {}: p50 {:.1} us p99 {:.1} us (n={})", if thai { "thai layout" } else { "en layout" }, ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
+            }
+        };
+        println!("-- no context");
+        measure(&mut e);
+        // worst case for the context path: a memory at its caps, and 20k corpus followers after the previous word
+        let (mut en_words, mut th_words): (Vec<&String>, Vec<&String>) = (m.english_freq.keys().collect(), m.thai_words.iter().collect());
+        en_words.sort(); th_words.sort();
+        for (i, w) in en_words.iter().take(2500).chain(th_words.iter().take(2500)).enumerate() {
+            for j in 0..2 { Arc::make_mut(&mut e.words).learn(Some(["the", "ที่"][(i + j) % 2]), w) }
         }
-        // whole keystrokes (live row included) over the 30-char run on the English layout, with and without completion
-        for mode in [CompleteMode::Off, CompleteMode::Typing] {
-            e.opts.complete = mode;
-            let mut ns: Vec<u128> = vec![];
-            for _ in 0..50 { e.reset(); for c in keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห").chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
-            ns.sort_unstable();
-            println!("on_key {mode:?}: p50 {:.1} us p99 {:.1} us (n={})", ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
-        }
+        let followers = |prev: &str, ws: &[&String]| Bigrams::new(ws.iter().take(20_000).enumerate().map(|(i, w)| (prev.to_string(), w.to_string(), 1.0 + i as f64 % 97.0)));
+        (e.en_bigrams, e.thai_bigrams) = (Some(followers("the", &en_words)), Some(followers("ที่", &th_words)));
+        println!("-- memory of {} words, followers: the {} ที่ {}", e.words.len(), e.en_bigrams.as_ref().unwrap().followers("the").len(), e.thai_bigrams.as_ref().unwrap().followers("ที่").len());
+        let t = Instant::now(); let json = e.words.to_json();
+        println!("words.json: {} KB, to_json {:.2} ms", json.len() / 1024, t.elapsed().as_secs_f64() * 1e3);
+        e.opts.complete = CompleteMode::Typing;
+        measure(&mut e);
     }
     #[test] fn model_completers_skip_english_without_its_frequencies() {
         let Some(mut m) = model() else { return };
         let Some(mut e) = engine() else { return };
         e.opts.complete = CompleteMode::Pause;
-        e.load_completers(&m);
+        e.load_completers(&mut m);
         typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
         e.reset(); typ(&mut e, "hel"); idle(&mut e, 600);
         if !m.english_freq.is_empty() { assert_eq!(labels(&e), ["help", "hello", "hell"]); }
-        m.english_freq.clear(); e.load_completers(&m);
+        m.english_freq.clear(); e.load_completers(&mut m);
         e.reset(); typ(&mut e, "hel"); assert_eq!(idle(&mut e, 600), vec![], "no English frequencies: no English completion");
         e.reset(); typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "Thai still completes");

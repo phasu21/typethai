@@ -25,4 +25,28 @@ impl Dict {
         }
         best[n] as f64 / n as f64
     }
+    /// Max-coverage segmentation (mirrors `segment` in src/corrector.ts): a dictionary piece of length L scores L²,
+    /// an unknown char -1, and consecutive unknown chars come back as one piece.
+    pub fn segment<'a>(&self, s: &'a str) -> Vec<&'a str> {
+        const MAX_LEN: usize = 16;
+        let at: Vec<usize> = s.char_indices().map(|(b, _)| b).chain([s.len()]).collect(); let n = at.len() - 1;
+        let piece = |j: usize, i: usize| &s[at[j]..at[i]];
+        let (mut best, mut back) = (vec![i64::MIN; n + 1], vec![0usize; n + 1]); best[0] = 0;
+        for i in 1..=n {
+            (best[i], back[i]) = (best[i - 1] - 1, i - 1);
+            for l in 1..=MAX_LEN.min(i) {
+                let v = best[i - l] + (l * l) as i64;
+                if v > best[i] && self.has(piece(i - l, i)) { (best[i], back[i]) = (v, i - l); }
+            }
+        }
+        let (mut out, mut i, mut unk_end) = (Vec::new(), n, None);
+        while i > 0 {
+            let j = back[i];
+            if i - j == 1 && !self.has(piece(j, i)) { unk_end.get_or_insert(i); }
+            else { if let Some(e) = unk_end.take() { out.push(piece(i, e)); } out.push(piece(j, i)); }
+            i = j;
+        }
+        if let Some(e) = unk_end { out.push(piece(0, e)); }
+        out.reverse(); out
+    }
 }

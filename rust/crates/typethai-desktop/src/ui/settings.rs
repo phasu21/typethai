@@ -20,6 +20,7 @@ struct SettingsView {
     error: Option<String>,
     loaded: bool,
     confirm_reset: bool,
+    confirm_forget: bool,
     key: Entity<InputState>,
     model: SharedString,
     base_url: SharedString,
@@ -79,7 +80,7 @@ fn build_view(first_page: usize, key_state: Option<KeyState>, window: &mut Windo
     let instructions = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8).placeholder("For example: Use formal Thai. Keep brand names in English."));
     let checked = key_state.is_some();
     let view = cx.new(|_| SettingsView {
-        input, snap: SettingsSnap::default(), error: None, loaded: false, confirm_reset: false, key,
+        input, snap: SettingsSnap::default(), error: None, loaded: false, confirm_reset: false, confirm_forget: false, key,
         model: SharedString::default(), base_url: SharedString::default(), instructions, key_state: key_state.unwrap_or(KeyState::Checking), rewrite_error: None, first_page,
     });
     view.update(cx, |_, cx| {
@@ -271,12 +272,32 @@ impl SettingsView {
         let mode = SettingField::dropdown(options,
             move |cx| COMPLETION.iter().find(|(m, _)| *m == read.read(cx).snap.completion).map_or("", |(_, l)| l).into(),
             move |label, cx| if let Some((m, _)) = COMPLETION.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_completion(*m, cx)) });
+        let learn = { let (read, write) = (view.clone(), view.clone());
+            SettingField::switch(move |cx| read.read(cx).snap.learn_words, move |on, cx| write.update(cx, |v, cx| v.set_learn_words(on, cx))) };
+        let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
+            .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
+        let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
         page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word.".into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "typing"], std::iter::empty()),
-            vec![SettingItem::new("Show suggestions", mode)])
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "typing", "learn", "forget"], std::iter::empty()),
+            vec![SettingItem::new("Show suggestions", mode),
+                SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times."),
+                SettingItem::new("Forget learned words", forget).description(learned)])
+    }
+    fn set_learn_words(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.learn_words = on;
+        bridge::push_settings(SettingsCmd::SetLearnWords(on));
+        cx.notify();
+    }
+    fn ask_forget(&mut self, cx: &mut Context<Self>) {
+        self.confirm_reset = false;
+        if !self.confirm_forget { self.confirm_forget = true; cx.notify(); return; }
+        self.confirm_forget = false;
+        bridge::push_settings(SettingsCmd::ForgetWords);
+        cx.notify();
     }
     fn set_completion(&mut self, mode: CompleteMode, cx: &mut Context<Self>) {
-        self.confirm_reset = false;
+        (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.completion = mode;
         bridge::push_settings(SettingsCmd::SetCompletion(mode));
         cx.notify();

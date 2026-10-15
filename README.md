@@ -29,7 +29,10 @@ unless you press a key.
   Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
   default completions appear after a short pause in typing. **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
-  highlighted word, and **Esc** hides completions until the next word.
+  highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
+  one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in
+  list lacks is offered once you have typed it three times. **Learn from my typing** turns this off, and **Forget
+  learned words** clears it.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
@@ -119,8 +122,11 @@ in between) to run the guess-convert on the current or last word instead of usin
   - Windows: `%APPDATA%\typethai\personal.json`
 
   It holds small weight adjustments plus the words you undid or converted manually. Delete the file to reset learning.
-- Words you asked not to translate, and the word-suggestion setting, are stored next to it, in `prefs.json`. Deleting
+- Words you asked not to translate, and the word-suggestion settings, are stored next to it, in `prefs.json`. Deleting
   `personal.json` leaves them in place.
+- With **Learn from my typing** on (the default), the words you finish and which word came before each are counted in
+  `words.json`, next to `personal.json`, to rank word suggestions. Text in password fields is never seen. Turn the
+  setting off to stop counting, and use **Forget learned words** or delete the file to clear it.
 
 ## Accuracy (measured on held-out data; summary)
 
@@ -150,7 +156,7 @@ cd rust
 TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
-gh release download model-v2 -R phasu21/typethai -p typethai.ttm -D target/release
+gh release download model-v3 -R phasu21/typethai -p typethai.ttm -D target/release
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
@@ -165,6 +171,16 @@ ln -sf "$PWD/scripts/typethai.sh" ~/.local/bin/typethai
 typethai          # build + (re)start; log in ~/Library/Logs/typethai.log
 ```
 
+Word pair counts for context-aware completion (model sections 12 and 13) are rebuilt from the corpora in
+`DATA_LICENSES.md`. The first `min:top` level goes into the output model, and the others are only evaluated. The
+script prints the `.ttm` size and held-out top-3 completion hit rates per level.
+
+```sh
+scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DATA/SHA256SUMS
+python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
+PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v3 ships 3:all
+```
+
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The
 corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test checklists.
 
@@ -172,8 +188,9 @@ corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test 
 
 - Code: **MIT**, © 2026 phasu21 (`LICENSE`).
 - Model (`typethai.ttm`): derived from Thai and English **Wikipedia** (CC BY-SA 4.0), the **PyThaiNLP** Thai word
-  list (CC0), the **Wisesight Sentiment** corpus (CC0) and the **FrequencyWords** English frequency list (CC BY-SA
-  4.0). It is distributed under CC BY-SA 4.0.
+  list (CC0), the **Wisesight Sentiment** corpus (CC0), the **FrequencyWords** English frequency list (CC BY-SA
+  4.0), and, for word pair counts, **scb-mt-en-th-2020** (CC BY-SA 4.0, including Taskmaster-1, CC BY 4.0) and
+  **Tatoeba** (CC BY 2.0 FR). It is distributed under CC BY-SA 4.0.
 - Evaluation-only data (not in the model): Wongnai reviews (LGPL-3.0) and the Thai Toxicity Tweet Corpus
   (CC BY-NC 3.0).
 

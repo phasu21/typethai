@@ -15,12 +15,14 @@ pub enum SettingsCmd {
     Forget(String),
     ResetLearning,
     SetCompletion(CompleteMode),
+    SetLearnWords(bool),
+    ForgetWords,
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
     SetRewrite(rewrite::Config),
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetRewrite(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetRewrite(_))
     }
 }
 
@@ -29,6 +31,9 @@ pub struct SettingsSnap {
     pub never: Vec<String>,
     pub learned: Vec<Learned>,
     pub completion: CompleteMode,
+    pub learn_words: bool,
+    /// Distinct words in the word memory.
+    pub words_learned: usize,
     pub rewrite: rewrite::Config,
 }
 
@@ -43,8 +48,11 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 }
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub rewrite: rewrite::Config }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub learn_words: bool, pub rewrite: rewrite::Config }
+impl Default for Prefs {
+    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), learn_words: true, rewrite: rewrite::Config::default() } }
+}
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
 impl Prefs {
@@ -60,7 +68,7 @@ impl Prefs {
     }
     pub fn to_json(&self) -> String {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "rewrite": self.rewrite.to_json() }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "learn_words": self.learn_words, "rewrite": self.rewrite.to_json() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -68,7 +76,7 @@ impl Prefs {
         if std::fs::write(&tmp, self.to_json()).is_ok() { let _ = std::fs::rename(&tmp, path); }
     }
 }
-/// None when the file is not JSON or `never` is not a list; an unknown or missing `completion` is the default.
+/// None when the file is not JSON or `never` is not a list; an unknown or missing `completion` or `learn_words` is the default.
 fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let never = match v.get("never") {
@@ -77,7 +85,8 @@ fn parse(text: &str) -> Option<Prefs> {
     };
     let c = v.get("completion").and_then(|c| c.as_str());
     let completion = COMPLETION.iter().find(|(_, s)| Some(*s) == c).map_or(CompleteMode::default(), |(m, _)| *m);
-    Some(Prefs { never, completion, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
+    let learn_words = v.get("learn_words").and_then(serde_json::Value::as_bool).unwrap_or(true);
+    Some(Prefs { never, completion, learn_words, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -152,6 +161,9 @@ mod tests {
         assert_eq!(Prefs::load(&path).completion, CompleteMode::Pause, "missing key");
         std::fs::write(&path, r#"{"never":["ok"],"completion":"sometimes"}"#).unwrap();
         assert_eq!(Prefs::load(&path), Prefs { never: BTreeSet::from(["ok".to_string()]), ..Prefs::default() }, "unknown value");
+        assert!(Prefs::load(&path).learn_words, "learning is on unless turned off");
+        Prefs { learn_words: false, ..Prefs::default() }.save(&path);
+        assert!(!Prefs::load(&path).learn_words);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

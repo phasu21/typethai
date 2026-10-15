@@ -317,7 +317,7 @@ unsafe fn control(st: &mut State) -> bool {
     while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
-    if bridge::take(&bridge::REQ_QUIT) { st.app.save(); let _ = st.tx.send(UiMsg::Stopped); return true }
+    if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
 /// Low-level hooks are delivered to the installing thread's message loop, so they live on their own thread with the

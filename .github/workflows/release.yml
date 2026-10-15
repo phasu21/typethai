@@ -1,13 +1,13 @@
 # Release on tag v*: tests, macOS .app (arm64 + x86_64, ad-hoc signed) and a Windows zip, each with the model.
-# The model is not in git: it is a pinned asset of the `model-v2` release (sha256 checked).
+# The model is not in git: it is a pinned asset of the `model-v3` release (sha256 checked).
 name: release
 on:
   push: { tags: ["v*"] }
   workflow_dispatch:
 permissions: { contents: write }
 env:
-  MODEL_TAG: model-v2
-  MODEL_SHA256: 1b322f57c9e1ae2f828828972ccc75aa5d303cfcc6af58fcf5d4a36e776d2268
+  MODEL_TAG: model-v3
+  MODEL_SHA256: 1cb60240059d93166923105a93c44764e4841c7928625c1abb18387485b64e0c
   GH_TOKEN: ${{ github.token }}
 jobs:
   test:
