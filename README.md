@@ -28,6 +28,8 @@ unless you press a key.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
+- **AI rewrite (optional).** Select text and press **⌃⌥R** to fix its typos or translate it between Thai and
+  English, through an OpenAI-compatible service (OpenRouter by default) with your own API key.
 - **Password fields are skipped** (macOS secure input / AXSecureTextField, Windows ES_PASSWORD / UIA IsPassword).
 
 ## Download and install
@@ -67,8 +69,15 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
+| **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
 
 The menu-bar icon also has **Settings…**. From there you can list words that stay as you type them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
+
+**AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
+with the defaults) and press **Save key**. The key is kept in the macOS Keychain or Windows Credential Manager, never in
+a file. Model and base URL can point at any OpenAI-compatible `/chat/completions` server; plain `http://` is accepted
+only for `localhost` (for example Ollama at `http://localhost:11434/v1`). Esc, typing, a click elsewhere or switching
+apps cancels a rewrite at any step.
 
 When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
 in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
@@ -90,7 +99,10 @@ in between) to run the guess-convert on the current or last word instead of usin
 
 ## Privacy
 
-- **Everything runs locally. typeThai makes no network requests and uploads nothing.**
+- **Conversion and learning run locally.** Your typing is never uploaded.
+- **AI rewrite is the one exception, and only when you press ⌃⌥R and pick an action.** The selected text is sent to
+  the service set in Settings (OpenRouter by default, with its data collection opt-out set). Nothing is sent without a
+  key, and the feature can be turned off in Settings.
 - To work, typeThai reads your keystrokes system-wide. It keeps only the current word and line in memory, and drops
   them when you move the caret or switch apps. Password fields are skipped.
 - The personal model is stored on your machine:
