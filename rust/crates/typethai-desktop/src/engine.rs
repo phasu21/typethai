@@ -330,10 +330,11 @@ impl Engine {
             SettingsCmd::RemoveNever(w) => self.remove_never(&w),
             SettingsCmd::Forget(w) => self.forget_learned(&w),
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
+            SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -1204,6 +1205,9 @@ mod tests {
         assert!(e.apply_settings(SettingsCmd::ResetLearning));
         assert!(e.settings_snapshot().learned.is_empty());
         assert!(e.blocked("ok"), "reset clears learning and keeps the don't-translate list");
+        assert!(e.apply_settings(SettingsCmd::SetCompletion(CompleteMode::Typing)));
+        assert!(!e.apply_settings(SettingsCmd::SetCompletion(CompleteMode::Typing)), "same mode is not a change");
+        assert_eq!(e.settings_snapshot().completion, CompleteMode::Typing);
         e.reset();
         e.set_thai_active(false);
         e.never.clear();

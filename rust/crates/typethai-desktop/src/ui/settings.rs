@@ -1,8 +1,9 @@
-//! Settings window: words that stay as typed, and the on-device learning list.
+//! Settings window: when word suggestions show, words that stay as typed, and the on-device learning list.
 use crate::bridge;
+use crate::engine::CompleteMode;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::ui::thai_font;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::*;
@@ -158,6 +159,24 @@ impl SettingsView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.forget_word(word.clone(), cx)));
         labeled_row(row.word.clone(), Some(count_text(row)), paint, button)
     }
+    fn set_completion(&mut self, mode: CompleteMode, cx: &mut Context<Self>) {
+        self.confirm_reset = false;
+        self.snap.completion = mode;
+        bridge::push_settings(SettingsCmd::SetCompletion(mode));
+        cx.notify();
+    }
+    fn completion_section(&self, paint: Paint, cx: &mut Context<Self>) -> impl IntoElement {
+        let choices = [(CompleteMode::Off, "Off"), (CompleteMode::Pause, "After a pause"), (CompleteMode::Typing, "While typing")];
+        let row = div().flex().flex_row().gap(px(8.)).children(choices.map(|(mode, label)| {
+            let variant = if self.snap.completion == mode { ButtonVariant::Primary } else { ButtonVariant::Default };
+            Button::new(SharedString::from(format!("complete-{mode:?}"))).label(label).with_variant(variant)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_completion(mode, cx)))
+        }));
+        div().flex().flex_col().gap(px(8.))
+            .child(heading("Word suggestions"))
+            .child(note(paint, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word."))
+            .child(if self.loaded { row.into_any_element() } else { note(paint, "Loading…") })
+    }
     fn never_section(&self, paint: Paint, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex().flex_col().gap(px(8.))
             .child(heading("Don't translate"))
@@ -190,6 +209,7 @@ impl Render for SettingsView {
         let paint = paint_of(cx);
         div().size_full().flex().flex_col().bg(paint.bg).text_color(paint.fg).font(thai_font())
             .child(div().id("settings-scroll").size_full().overflow_y_scroll().p(px(20.)).flex().flex_col().gap(px(28.))
+                .child(self.completion_section(paint, cx))
                 .child(self.never_section(paint, cx))
                 .child(self.learn_section(paint, cx)))
     }
