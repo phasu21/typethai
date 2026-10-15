@@ -53,7 +53,7 @@ pub struct Opts {
     /// fields (documents, editors) use the caret line instead so the bubble stays next to the text.
     pub max_field_h: f64,
     /// Bubble x relative to caret x (logical px). -17 = -(PAD 6 + BORDER 1 + ROW_PX 10): the first row's text starts
-    /// exactly at the caret's x.
+    /// exactly at the caret's x. The bubble passes its own layout's `text_x` (a strip's first label sits further in).
     pub caret_dx: f64,
     /// Assumed pointer height when anchoring at the mouse (logical px).
     pub mouse_h: f64,
