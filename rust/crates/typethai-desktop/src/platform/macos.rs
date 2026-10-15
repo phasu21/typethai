@@ -411,7 +411,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
                 else { st.move_left = 0; }
             } else { st.move_left = 0; }
         }
-        if bridge::take(&bridge::REQ_QUIT) { st.app.save(); send(UiMsg::Stopped); CFRunLoop::get_current().stop(); }
+        if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); send(UiMsg::Stopped); CFRunLoop::get_current().stop(); }
     });
 }
 

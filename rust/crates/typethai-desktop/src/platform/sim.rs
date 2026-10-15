@@ -55,5 +55,5 @@ pub fn run(mut app: App) {
         for a in &o.actions { println!("  Enter -> {a:?}"); }
         println!("{}", screen.iter().collect::<String>()); app.maybe_save();
     }
-    app.save();
+    app.save_and_wait();
 }

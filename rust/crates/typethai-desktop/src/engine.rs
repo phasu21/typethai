@@ -4,6 +4,7 @@
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
@@ -191,8 +192,9 @@ pub struct Engine {
     pub thai_comp: Option<Completer>, pub en_comp: Option<Completer>,
     /// Corpus word pairs that rank completions after the previous word; None ranks without them.
     pub thai_bigrams: Option<Bigrams>, pub en_bigrams: Option<Bigrams>,
-    /// The words this user finished (words.json).
-    pub words: WordMemory,
+    /// The words this user finished (words.json). Shared with the save thread, which serialises a snapshot; learning
+    /// while a save is still running copies it first.
+    pub words: Arc<WordMemory>,
     /// The last Char / Backspace, until `on_idle` has handled the pause after it.
     last_key: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
@@ -201,7 +203,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: WordMemory::default(), last_key: None, comp_muted: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &typethai_core::ModelFiles) {
@@ -369,7 +371,7 @@ impl Engine {
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
-            SettingsCmd::ForgetWords => { self.words = WordMemory::default(); self.events_since_save += 1; true }
+            SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
@@ -473,7 +475,7 @@ impl Engine {
         if self.thai_active && live.is_some() { return vec![] }
         let (min, k) = (if typing { 3 } else { 2 }, 3 - usize::from(live.is_some()));
         let gate = |c: &Completions| !typing || c.confidence >= self.opts.complete_conf;
-        let memory = self.opts.learn_words.then_some(&self.words);
+        let memory = self.opts.learn_words.then_some(&*self.words);
         let (head, found) = if self.thai_active || live.is_some() {
             let Some(comp) = &self.thai_comp else { return vec![] };
             let run = en_to_th(&self.word);
@@ -558,7 +560,7 @@ impl Engine {
             let mut prev = self.word_before(j);
             for w in self.screen_words(self.line[j].shown()) {
                 if let Some(w) = &w {
-                    self.words.learn(prev.as_deref().filter(|p| lang_of(p) == lang_of(w)), w);
+                    Arc::make_mut(&mut self.words).learn(prev.as_deref().filter(|p| lang_of(p) == lang_of(w)), w);
                     self.events_since_save += 1;
                 }
                 prev = w;
@@ -1840,7 +1842,7 @@ mod tests {
         let (mut en_words, mut th_words): (Vec<&String>, Vec<&String>) = (m.english_freq.keys().collect(), m.thai_words.iter().collect());
         en_words.sort(); th_words.sort();
         for (i, w) in en_words.iter().take(2500).chain(th_words.iter().take(2500)).enumerate() {
-            for j in 0..2 { e.words.learn(Some(["the", "ที่"][(i + j) % 2]), w) }
+            for j in 0..2 { Arc::make_mut(&mut e.words).learn(Some(["the", "ที่"][(i + j) % 2]), w) }
         }
         let followers = |prev: &str, ws: &[&String]| Bigrams::new(ws.iter().take(20_000).enumerate().map(|(i, w)| (prev.to_string(), w.to_string(), 1.0 + i as f64 % 97.0)));
         (e.en_bigrams, e.thai_bigrams) = (Some(followers("the", &en_words)), Some(followers("ที่", &th_words)));
