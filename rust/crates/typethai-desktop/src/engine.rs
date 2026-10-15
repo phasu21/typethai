@@ -5,7 +5,7 @@ use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Completer, Completions}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, TokenDecision};
+use typethai_core::{completer::{thai_tail, Completer, Completions}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -306,6 +306,7 @@ impl Engine {
         match k {
             Key::Char(c) => {
                 self.tab_pending = false;
+                self.resume_glued();
                 // a new word starts: the bubble was about the previous word and can no longer be applied
                 let mut a = vec![]; if self.word.is_empty() { self.show(vec![], &mut a); self.live_streak = 0; }
                 else if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Guess { .. }, .. })) { self.show(vec![], &mut a); }
@@ -502,9 +503,21 @@ impl Engine {
             self.show(vec![BubbleItem { label: t.clone(), kind: BubbleKind::Convert { typed: c.typed.clone(), thai: t } }], acts); self.phrase = 1;
         }
     }
+    /// The caret is right after a word inserted mid-word (an accepted completion or live row) that is in the active
+    /// layout: a letter or Backspace edits it as the buffer again, as if it had been typed. Its Undo is given up.
+    fn resume_glued(&mut self) {
+        if !self.word.is_empty() { return }
+        let Some(text) = self.line.last().filter(|c| c.boundary.is_none() && c.extra.is_empty()).and_then(|c| c.converted.as_deref()) else { return };
+        let keys = if self.thai_active { th_text_to_keys(text) } else { text.is_ascii().then(|| text.to_string()) };
+        let Some(keys) = keys else { return };
+        self.line.pop();
+        if self.line_start > self.line.len() { self.line_start = self.line.len(); }
+        self.word = keys;
+    }
     /// Backspace: edit the buffer; at a word's end (only its boundary/extra spaces left) step back into that word.
     fn on_backspace(&mut self) -> Outcome {
         let mut a = vec![]; let shown = self.bubble_visible(); let phrase = self.phrase;
+        self.resume_glued();
         if self.word.pop().is_some() {
             // word fully deleted: one fewer word left in the phrase
             let phrase = if self.word.is_empty() { phrase.saturating_sub(1) } else { phrase };
@@ -1618,6 +1631,21 @@ mod tests {
         // a boundary takes them away and offers nothing for the finished word
         let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    #[test] fn an_accepted_completion_is_edited_as_the_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "hel"); e.on_key(Key::Tab);
+        e.on_key(Key::Backspace); assert_eq!(e.buffer(), "hel");
+        assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab); typ(&mut e, "er");
+        assert_eq!(e.buffer(), "helper");
+        e.reset(); typ(&mut e, "hel"); e.on_key(Key::Tab); e.on_key(Key::Boundary(Boundary::Space));
+        e.on_key(Key::Backspace); e.on_key(Key::Backspace); assert_eq!(e.buffer(), "hel");
+        e.reset(); e.set_thai_active(true); typ_th(&mut e, "ภาษ"); e.on_key(Key::Tab);
+        e.on_key(Key::Backspace); assert_eq!(e.buffer(), keys("ภาษ"));
+        assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"]);
+        e.on_key(Key::Tab); typ_th(&mut e, "ไทย"); assert_eq!(e.buffer(), keys("ภาษาไทย"));
     }
     struct CompletingSpeller;
     impl Speller for CompletingSpeller {
