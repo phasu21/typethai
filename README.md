@@ -16,12 +16,15 @@ unless you press a key.
   Multi-word phrases work too (`i dont know`).
 - **You decide when to convert.** Space, Enter and punctuation always pass through unchanged. The bubble offers the
   conversion for the word you are typing or the one you just finished. **Tab** applies it, and **⌃⌥Z** undoes it.
-- **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose a row, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply row 1–3.
+- **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose an option, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
 - **Mid-word suggestions.** The bubble appears while you are still typing, from the third character, once the word
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
+- **Horizontal or vertical bubble.** By default the options sit side by side in one strip, numbered left to right.
+  A bubble with a long option (over about 28 letters) or one too wide for the screen is stacked instead, and so are
+  ⌃⌥R selection and AI rewrite rows. **Settings… → Word suggestions → Bubble layout: Vertical** always stacks them.
 - **Caret anchoring.** The bubble sits right under the text caret (via Accessibility / UI Automation). It flips above
   the caret near the bottom of the screen and works across monitors. Chromium/Electron apps are supported.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
@@ -72,15 +75,17 @@ reacting, remove the old entry and re-add the app.
 
 ## Using it
 
-Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab` `2` and `Tab` `3` on the others.
+Each bubble option shows the keys that apply it. In the horizontal strip the highlighted option shows `Tab` and the
+others their number (hold Tab and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
+on the others. Options are numbered from the left in the strip and from the top in rows.
 
 | Key | Action |
 |---|---|
-| **Tab** (bubble visible) | Apply the selected row when Tab is released |
-| **Hold Tab + 1 / 2 / 3** | Apply row 1 / 2 / 3 (the digit is not typed) |
-| **Click** a row | Apply that row |
+| **Tab** (bubble visible) | Apply the highlighted option when Tab is released |
+| **Hold Tab + 1 / 2 / 3** | Apply option 1 / 2 / 3 (the digit is not typed) |
+| **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
-| **Shift+↑ / Shift+↓** | Move the selection |
+| **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
 | **Ctrl+1 / 2 / 3** (Pick with Ctrl+1–3 on) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
@@ -92,7 +97,8 @@ Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
-accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), whether **Ctrl+1–3** picks a row
+accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
+default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
 (**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
@@ -120,7 +126,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
-| `--demo-bubble [--items "a\|b"] [--screenshot PNG]` | Show the bubble with sample rows (no key capture) |
+| `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
 | `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
 
 ## Privacy
