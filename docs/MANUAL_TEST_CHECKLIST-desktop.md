@@ -98,3 +98,15 @@
 - [ ] Off: no completion rows in any of the above; the live conversion row and Space suggestions still work.
 - [ ] Esc on a completion bubble hides it, and no completion comes back for that word even after a pause; the next word gets completions again.
 - [ ] Space or Enter after a word never shows completions, only the usual conversion / spelling rows.
+
+## Horizontal bubble (agent-verified with --demo-bubble --screenshot on the Mac, dark and light; not run live)
+- [x] `--demo-bubble --items "ภาษา|ภาษี|ภาษาอังกฤษ" --screenshot x.png`: one strip of three buttons, an outlined `Tab` keycap on the first and filled `2` / `3` on the others; the self-check lines say OK and the panel matches the layout.
+- [x] `--select 1`: the `Tab` keycap moves to the second button and the strip keeps its width. `--light` looks right.
+- [x] One option over 240 px (`--items "สวัสดีครับ|ภาษาไทย ทดสอบ วรรณยุกต์ ก่ ก้ ก๊ ก๋ ภาษาอังกฤษ|l;ylfu"`) stacks the bubble as rows. `--vertical` stacks short options too.
+- [ ] Live, After a pause: type `hel` and stop. The strip appears with the first label at the caret's x; keep typing `m`: the options update in place without a flash or a jump, and the strip narrows from its left edge.
+- [ ] Click each button: that option is applied. Click the padding or the gap between two buttons: nothing is applied, the click does not reach the app, and the bubble stays.
+- [ ] Shift+↓ / Shift+↑ move the highlight along the strip; clicks still land on the right button afterwards.
+- [ ] Near the bottom of the screen the strip flips above the caret; near the right edge it stays on screen.
+- [ ] ⌃⌥R on a selection, and AI rewrite presets, "Rewriting…" and the result, are always rows.
+- [ ] Settings → Word suggestions → Bubble layout: Vertical gives the old rows on the next bubble and survives a restart (`prefs.json` has `"bubble_layout": "vertical"`); an older prefs.json opens as Horizontal.
+- [ ] Windows (Notepad, 100% and 150% scaling): the strip window is exactly the panel, nothing is clipped, and clicks hit the right button.
