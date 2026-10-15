@@ -1845,6 +1845,8 @@ mod tests {
         let followers = |prev: &str, ws: &[&String]| Bigrams::new(ws.iter().take(20_000).enumerate().map(|(i, w)| (prev.to_string(), w.to_string(), 1.0 + i as f64 % 97.0)));
         (e.en_bigrams, e.thai_bigrams) = (Some(followers("the", &en_words)), Some(followers("ที่", &th_words)));
         println!("-- memory of {} words, followers: the {} ที่ {}", e.words.len(), e.en_bigrams.as_ref().unwrap().followers("the").len(), e.thai_bigrams.as_ref().unwrap().followers("ที่").len());
+        let t = Instant::now(); let json = e.words.to_json();
+        println!("words.json: {} KB, to_json {:.2} ms", json.len() / 1024, t.elapsed().as_secs_f64() * 1e3);
         e.opts.complete = CompleteMode::Typing;
         measure(&mut e);
     }
