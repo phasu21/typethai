@@ -165,6 +165,16 @@ ln -sf "$PWD/scripts/typethai.sh" ~/.local/bin/typethai
 typethai          # build + (re)start; log in ~/Library/Logs/typethai.log
 ```
 
+Word pair counts for context-aware completion (model sections 12 and 13) are rebuilt from the corpora in
+`DATA_LICENSES.md`. The first `min:top` level goes into the output model, and the others are only evaluated. The
+script prints the `.ttm` size and held-out top-3 completion hit rates per level.
+
+```sh
+scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DATA/SHA256SUMS
+python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
+PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 5:all 3:all 2:all
+```
+
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The
 corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test checklists.
 
@@ -172,8 +182,9 @@ corpora are not included; see `DATA_LICENSES.md`. `docs/` holds the manual test 
 
 - Code: **MIT**, © 2026 phasu21 (`LICENSE`).
 - Model (`typethai.ttm`): derived from Thai and English **Wikipedia** (CC BY-SA 4.0), the **PyThaiNLP** Thai word
-  list (CC0), the **Wisesight Sentiment** corpus (CC0) and the **FrequencyWords** English frequency list (CC BY-SA
-  4.0). It is distributed under CC BY-SA 4.0.
+  list (CC0), the **Wisesight Sentiment** corpus (CC0), the **FrequencyWords** English frequency list (CC BY-SA
+  4.0), and, for word pair counts, **scb-mt-en-th-2020** (CC BY-SA 4.0, including Taskmaster-1, CC BY 4.0) and
+  **Tatoeba** (CC BY 2.0 FR). It is distributed under CC BY-SA 4.0.
 - Evaluation-only data (not in the model): Wongnai reviews (LGPL-3.0) and the Thai Toxicity Tweet Corpus
   (CC BY-NC 3.0).
 
