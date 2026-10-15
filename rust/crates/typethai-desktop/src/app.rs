@@ -44,6 +44,7 @@ impl App {
         let prefs_path = prefs::prefs_beside(&cli.state);
         engine.never = Prefs::load(&prefs_path).never;
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
+        engine.load_completers(&m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
         Ok(App { engine, state_path: cli.state.clone(), prefs_path })
     }

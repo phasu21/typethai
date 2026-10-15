@@ -336,6 +336,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         service_settings(st);
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
+        let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         // a few AX reads after each key: the first is often still the pre-keystroke caret
         if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
             st.move_due = None; st.last_move = Some(now);

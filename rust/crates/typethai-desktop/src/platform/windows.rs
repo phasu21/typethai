@@ -240,11 +240,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 unsafe fn control(st: &mut State) -> bool {
     service_settings(st);
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
+    let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
     if bridge::take(&bridge::REQ_QUIT) { st.app.save(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
 /// Low-level hooks are delivered to the installing thread's message loop, so they live on their own thread with the
-/// Engine; gpui owns the main thread. A 100 ms thread timer services tray requests (pause / quit).
+/// Engine; gpui owns the main thread. A 100 ms thread timer services tray requests (pause / quit) and the typing pause
+/// that brings up word completions.
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
