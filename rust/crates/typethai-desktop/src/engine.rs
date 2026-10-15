@@ -221,6 +221,8 @@ pub struct Engine {
     /// The last key was a Tab that inserted itself: a second Tab runs Guess.
     tab_pending: bool,
     tab: TabChord,
+    /// The bubble was opened by ⌃⌥R and offers something to apply: Enter applies the highlighted row, like Tab.
+    fixing: bool,
     line: Vec<Committed>,
     /// Index of the first word of the current line in `line` (after Enter the last word is kept so Tab still applies).
     line_start: usize,
@@ -260,7 +262,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default() }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -323,6 +325,7 @@ impl Engine {
             || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3')))
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
             || (matches!(k, Key::PickRow(_)) && self.picks_rows())
+            || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -371,6 +374,7 @@ impl Engine {
     }
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
     fn show(&mut self, items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
+        self.fixing = false;
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
         let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
             else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); Action::ShowBubble(items) };
@@ -435,6 +439,9 @@ impl Engine {
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
+            Key::Boundary(Boundary::Enter) if self.fixing && self.bubble_visible() => {
+                let mut o = self.on_hotkey(Hotkey::Accept(self.sel.idx)); o.swallow = true; o
+            }
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
         }
@@ -1009,6 +1016,8 @@ impl Engine {
         }
         Outcome { swallow: true, actions: acts }
     }
+    /// Some row on the bubble applies a fix (a notice only closes it).
+    fn offers_fix(&self) -> bool { self.bubble.iter().any(|b| !matches!(b.kind, BubbleKind::Rewrite(RewriteRow::Notice))) }
     fn rewriting(&self) -> bool { self.capturing.is_some() || matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(_), .. })) }
     /// Keys a rewrite session survives. Anything else ends it first; unlike suggestions, Space/Enter/Backspace too,
     /// because the selection the rows refer to has just been edited.
@@ -1017,6 +1026,7 @@ impl Engine {
             // holding the hotkey autorepeats: while capturing that is a no-op, not a restart
             Key::Hotkey(Hotkey::Rewrite) => self.capturing.is_some(),
             Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss) => self.bubble_visible(),
+            Key::Boundary(Boundary::Enter) => self.fixing && self.bubble_visible(),
             _ => false,
         }
     }
@@ -1034,7 +1044,8 @@ impl Engine {
         let mut a = vec![];
         match r {
             RewriteRow::Preset(preset, text) => {
-                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a);
+                // Enter while it runs is the user confirming, not a newline
+                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a); self.fixing = true;
                 a.push(Action::Rewrite(Job::Run(Run { req: id, preset, text, cfg: self.rewrite.clone() })));
             }
             RewriteRow::Busy(_) => {}
@@ -1155,10 +1166,12 @@ impl Engine {
                     Captured::Secure => vec![],
                 };
                 self.show(rows, &mut a);
+                self.fixing = self.offers_fix();
             }
             Reply::Rewritten(id, res) if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(RewriteRow::Busy(b)), .. }) if *b == id) => {
                 let r = match res { Ok(t) => row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Result(t)), Err(f) => row(&f.message(), RewriteRow::Notice) };
                 self.show(vec![r], &mut a);
+                self.fixing = self.offers_fix();
             }
             _ => {}
         }
@@ -1947,6 +1960,33 @@ mod tests {
         e.on_key(Key::Esc);
         let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false });
         assert_eq!(labels(&e), ["is this"], "no key: the local fix alone, no notice");
+    }
+    #[test] fn enter_applies_a_fix_offered_by_ctrl_opt_r() {
+        let Some(mut e) = engine() else { return };
+        typ(&mut e, "l;ylfu ");
+        let id = start(&mut e); e.on_reply(captured(id, Captured::NoSelection));
+        assert_eq!(labels(&e)[0], "สวัสดี");
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(o.swallow, "Enter confirms instead of typing a newline");
+        assert_eq!(o.actions[0], Action::Replace { delete: 7, insert: "สวัสดี ".into(), then: None });
+        assert!(!e.bubble_visible());
+        e.reset();
+        let id = start(&mut e); e.on_reply(captured(id, Captured::Text("l;ylfu".into())));
+        assert_eq!(labels(&e)[0], "สวัสดี");
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(o.swallow); assert!(o.actions.contains(&Action::Rewrite(Job::Paste("สวัสดี".into()))), "{:?}", o.actions);
+    }
+    #[test] fn enter_is_a_newline_over_other_bubbles_and_notices() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "hel"); assert!(e.bubble_visible());
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(!o.swallow, "a completion bubble: Enter is the user's newline");
+        e.reset();
+        let id = start(&mut e); e.on_reply(captured(id, Captured::NoSelection));
+        assert_eq!(labels(&e), ["Select text or type a word first"]);
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(!o.swallow, "a notice offers nothing to confirm");
     }
     #[test] fn with_rewrite_off_a_selection_gets_the_local_rows() {
         let Some(mut e) = engine_typo() else { return };
