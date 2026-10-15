@@ -111,6 +111,23 @@ pub enum BubbleKind {
     Complete { typed: String, insert: String },
     /// While rewrite rows are on the bubble they are the rewrite session's whole state.
     Rewrite(RewriteRow) }
+/// Why an option is offered: it was typed on the other keyboard layout and becomes text in this language, or it fixes
+/// a typo. The bubble shows options grouped by it, conversions first, under a tab that names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason { Layout(InputLang), Typo }
+impl BubbleItem {
+    /// None for finishing the word, the AI rows and notices: what the bubble offers anyway, not a fix. Undoing a
+    /// conversion converts back; a Guess that also fixes a typo is still mainly a conversion.
+    pub fn reason(&self) -> Option<Reason> {
+        match &self.kind {
+            BubbleKind::Live { .. } | BubbleKind::Convert { .. } | BubbleKind::ConvertPrev { .. } | BubbleKind::Guess { .. } | BubbleKind::UndoConversion =>
+                Some(Reason::Layout(lang_of(&self.label))),
+            BubbleKind::Typo { .. } => Some(Reason::Typo),
+            BubbleKind::Rewrite(RewriteRow::Fixed(why, _)) => Some(*why),
+            BubbleKind::Complete { .. } | BubbleKind::Rewrite(RewriteRow::Preset(..) | RewriteRow::Busy(_) | RewriteRow::Result(_) | RewriteRow::Notice) => None,
+        }
+    }
+}
 /// The visible rewrite phases; a bubble holds rows of one phase.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RewriteRow {
@@ -120,6 +137,9 @@ pub enum RewriteRow {
     Busy(ReqId),
     /// Result: Tab pastes this full text (the label may be a preview).
     Result(String),
+    /// A local fix of the selection, made on this computer: Tab pastes this full text, the selection in the other
+    /// layout or with its typos fixed, as `Reason` says.
+    Fixed(Reason, String),
     /// Nothing to offer / no key / failure; the label is the message.
     Notice,
 }
@@ -395,8 +415,10 @@ impl Engine {
         out
     }
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
-    fn show(&mut self, items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
+    fn show(&mut self, mut items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
         self.fixing = false;
+        // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks
+        items.sort_by_key(|i| match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 });
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
         let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
             else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); Action::ShowBubble(items) };
@@ -1070,7 +1092,7 @@ impl Engine {
                 a.push(Action::Rewrite(Job::Run(Run { req: id, preset, text, cfg: self.rewrite.clone() })));
             }
             RewriteRow::Busy(_) => {}
-            RewriteRow::Result(text) => { self.show(vec![], &mut a); a.push(Action::Rewrite(Job::Paste(text))) }
+            RewriteRow::Result(text) | RewriteRow::Fixed(_, text) => { self.show(vec![], &mut a); a.push(Action::Rewrite(Job::Paste(text))) }
             RewriteRow::Notice => self.show(vec![], &mut a),
         }
         Outcome { swallow: true, actions: a }
@@ -1114,9 +1136,13 @@ impl Engine {
         let spans = word_spans(text);
         let flips = self.selection_flips(text, &spans);
         let converted = splice(text, &spans, flips.iter().map(|f| f.as_ref().map(|(w, _)| w.clone())).collect());
-        let mut out: Vec<String> = vec![];
-        for t in [converted, self.fix_selection(text, &spans, &flips)].into_iter().flatten() { if !out.contains(&t) { out.push(t) } }
-        out.into_iter().map(|t| row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Result(t))).collect()
+        // the language the flipped words become: Thai unless every flip is the reverse one, back to English keys
+        let lang = if flips.iter().flatten().all(|(_, rev)| *rev) { InputLang::Latin } else { InputLang::Thai };
+        let mut out: Vec<(Reason, String)> = vec![];
+        for (why, t) in [(Reason::Layout(lang), converted), (Reason::Typo, self.fix_selection(text, &spans, &flips))] {
+            if let Some(t) = t.filter(|t| !out.iter().any(|(_, o)| o == t)) { out.push((why, t)) }
+        }
+        out.into_iter().map(|(why, t)| row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Fixed(why, t))).collect()
     }
     /// Each word typed on the wrong layout, flipped, and whether that is the reverse direction: English keys that read
     /// as Thai, and Thai that reads as English keys. Each direction scores its words as one line.
@@ -1968,6 +1994,28 @@ mod tests {
         assert_eq!(options(&mut e, Captured::Text("รานอาหาร".into())), ["ร้านอาหาร", AI[0], AI[1]]);
         e.on_key(Key::Esc);
         assert_eq!(options(&mut e, Captured::Text("ขอบคุนมาก ประเทษไทย\n".into())), ["ขอบคุณมาก ประเทศไทย\n", AI[0], AI[1]], "a typo inside a run");
+    }
+    #[test] fn each_selection_row_says_what_it_fixes() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FakeSpeller));
+        let reasons = |e: &Engine| e.bubble.iter().map(BubbleItem::reason).collect::<Vec<_>>();
+        options(&mut e, Captured::Text("l;ylfu".into()));
+        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Thai)), None, None], "to Thai, then the AI rows");
+        e.on_key(Key::Esc);
+        options(&mut e, Captured::Text(en_to_th("i dont know")));
+        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Latin)), None, None], "back to the English keys");
+        e.on_key(Key::Esc);
+        options(&mut e, Captured::Text("is ths".into()));
+        assert_eq!(reasons(&e), [Some(Reason::Typo), None, None]);
+    }
+    #[test] fn the_bubble_lists_conversions_then_typo_fixes_then_completions() {
+        let Some(mut e) = engine() else { return };
+        let item = |label: &str, kind| BubbleItem { label: label.into(), kind };
+        let (done, fix, flip) = (item("hello", BubbleKind::Complete { typed: "hel".into(), insert: "hello".into() }),
+            item("help", BubbleKind::Typo { word: "help".into() }), item("สวัสดี", BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() }));
+        let mut a = vec![];
+        e.show(vec![done.clone(), fix.clone(), flip.clone()], &mut a);
+        assert_eq!(a, vec![Action::ShowBubble(vec![flip, fix, done])], "Tab, the digits and clicks count in this order");
     }
     #[test] fn a_correct_selection_gets_only_the_ai_rows_or_a_notice() {
         let Some(mut e) = engine_typo() else { return };

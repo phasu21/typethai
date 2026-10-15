@@ -32,6 +32,13 @@ letters of **Noto Sans** 2.015 (https://github.com/notofonts/latin-greek-cyrilli
 the SIL Open Font License 1.1 (`rust/crates/typethai-desktop/fonts/OFL.txt`). It is renamed typeThai Sans because it is
 a modified version, and it stays under the OFL.
 
+## Bundled flags
+
+`rust/crates/typethai-desktop/flags/th.svg` and `us.svg`, the square flags on the bubble's conversion badges, are from
+**flag-icons** 7.2.3 (https://github.com/lipis/flag-icons), © Panayiotis Lipiridis, under the MIT License
+(`rust/crates/typethai-desktop/flags/LICENSE`). The typo badge's spell-check icon is Lucide's (ISC), from the gpui-kit
+icon catalog.
+
 ## Used for evaluation only (not in the model)
 
 - **Wongnai restaurant reviews** (wongnai-corpus): LGPL-3.0. Used as a held-out test set.

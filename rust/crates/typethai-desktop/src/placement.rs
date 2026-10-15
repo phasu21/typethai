@@ -55,10 +55,12 @@ pub struct Opts {
     /// Bubble x relative to caret x (logical px). -17 = -(PAD 6 + BORDER 1 + ROW_PX 10): the first row's text starts
     /// exactly at the caret's x. The bubble passes its own layout's `text_x` (a strip's first label sits further in).
     pub caret_dx: f64,
+    /// The bubble window's transparent margin (logical px), around what it draws: it may cover the gap to the caret.
+    pub inset: f64,
     /// Assumed pointer height when anchoring at the mouse (logical px).
     pub mouse_h: f64,
 }
-impl Default for Opts { fn default() -> Self { Opts { gap: 6.0, margin: 4.0, lower_fraction: 0.72, max_field_h: 120.0, caret_dx: -17.0, mouse_h: 22.0 } } }
+impl Default for Opts { fn default() -> Self { Opts { gap: 6.0, margin: 4.0, lower_fraction: 0.72, max_field_h: 120.0, caret_dx: -17.0, inset: 0.0, mouse_h: 22.0 } } }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source { Caret, Field, Mouse }
@@ -123,7 +125,7 @@ pub fn place(anchor: &Anchor, size: (f64, f64), monitors: &[Monitor], o: &Opts) 
     let (cx, cy) = (line.x, line.y + line.h / 2.0);
     let mi = monitor_for(monitors, cx, cy)?;
     let m = monitors[mi]; let s = m.size_scale.max(0.01); let v = m.visible;
-    let (w, h) = (size.0 * s, size.1 * s); let gap = o.gap * s; let margin = o.margin * s;
+    let (w, h) = (size.0 * s, size.1 * s); let gap = (o.gap - o.inset) * s; let margin = o.margin * s;
     let line = if source == Source::Mouse { Rect::new(line.x, line.y, 0.0, o.mouse_h * s) } else { line };
     // Sit on the caret line itself. A short text field is taller than the glyphs; stretching to the field
     // frame drops the bubble below the caret.
@@ -157,6 +159,13 @@ mod tests {
     #[test] fn below_caret_by_default() {
         let r = p(caret(400.0, 200.0), &[MAC]);
         assert!(!r.above); assert_eq!(r.rect.y, 200.0 + 18.0 + 6.0); assert_eq!(r.rect.x, 383.0); assert_eq!(r.source, Source::Caret);
+    }
+    #[test] fn a_transparent_margin_may_cover_the_gap_but_what_is_drawn_keeps_it() {
+        let o = Opts { inset: 10.0, ..Opts::default() };
+        let below = place(&caret(400.0, 200.0), SZ, &[MAC], &o).unwrap();
+        assert_eq!(below.rect.y + 10.0, 200.0 + 18.0 + 6.0, "the drawn top is 6 below the caret");
+        let above = place(&caret(400.0, 840.0), SZ, &[MAC], &o).unwrap();
+        assert_eq!(above.rect.bottom() - 10.0, 840.0 - 6.0, "and its bottom 6 above it");
     }
     #[test] fn short_field_still_uses_the_caret_line() {
         // a 36pt field around an 18pt caret must not push the bubble down to the field's bottom edge
