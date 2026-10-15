@@ -1,0 +1,186 @@
+//! AI rewrite of the selected text: presets, config, the OpenAI-compatible wire format. The only module that knows
+//! JSON request/response shapes.
+use serde_json::{json, Value};
+
+/// One async request (a selection capture or an HTTP call), minted by the Engine. Ids only grow, so a reply is current
+/// exactly when the engine's state still names its id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReqId(u64);
+impl ReqId { pub fn next(self) -> ReqId { ReqId(self.0 + 1) } }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset { Fix, Translate }
+impl Preset {
+    pub const ALL: [Preset; 2] = [Preset::Fix, Preset::Translate];
+    pub fn label(self) -> &'static str { match self { Preset::Fix => "Fix typos", Preset::Translate => "Translate TH↔EN" } }
+    fn instructions(self) -> &'static str { match self { Preset::Fix => FIX, Preset::Translate => TRANSLATE } }
+}
+const FIX: &str = "You fix spelling and typing mistakes in Thai and English text. Keep the wording, meaning, tone and punctuation exactly the same; change only misspelled words. If there are no mistakes, return the text unchanged. Output only the resulting text. No quotes, no explanation, no preamble.";
+const TRANSLATE: &str = "You translate between Thai and English. Detect the language of the text, then translate Thai into natural English or English into natural Thai. Translate every detail; do not summarize or leave anything out. Do not add ครับ or ค่ะ unless the source text is polite. Output only the translated text. No quotes, no explanation, no preamble.";
+
+pub const NO_SELECTION: &str = "No selected text found";
+pub const NO_KEY: &str = "Add an API key in Settings";
+pub const REWRITING: &str = "Rewriting…";
+/// Longest result label on the bubble; Tab still pastes the whole text.
+pub const PREVIEW_CHARS: usize = 600;
+const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
+const BAD_URL: &str = "The base URL must start with https:// (http:// only for localhost).";
+
+/// Non-secret settings (prefs.json "rewrite"), normalized on construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config { pub enabled: bool, pub base_url: String, pub model: String }
+impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into() } } }
+impl Config {
+    /// Settings fields: empty values take the defaults; a URL that would send the key in clear is refused.
+    pub fn new(enabled: bool, base_url: &str, model: &str) -> Result<Config, String> { Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model) }) }
+    /// prefs.json: missing or invalid fields fall back to the defaults.
+    pub fn from_json(v: Option<&Value>) -> Config {
+        let Some(v) = v else { return Config::default() };
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
+        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")) }
+    }
+    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model }) }
+}
+fn model_of(raw: &str) -> String { let m = raw.trim(); if m.is_empty() { DEFAULT_MODEL.into() } else { m.into() } }
+fn base_url_of(raw: &str) -> Result<String, String> {
+    let u = raw.trim().trim_end_matches('/');
+    if u.is_empty() { return Ok(DEFAULT_BASE_URL.into()) }
+    match scheme_host(u) {
+        Some((s, _)) if s.eq_ignore_ascii_case("https") => Ok(u.into()),
+        Some((s, h)) if s.eq_ignore_ascii_case("http") && (h.eq_ignore_ascii_case("localhost") || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())) => Ok(u.into()),
+        _ => Err(BAD_URL.into()),
+    }
+}
+fn scheme_host(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let auth = rest.split(['/', '?', '#']).next()?; let hp = auth.rsplit('@').next()?;
+    let host = match hp.strip_prefix('[') { Some(r) => &r[..r.find(']')?], None => hp.split(':').next()? };
+    (!host.is_empty()).then_some((scheme, host))
+}
+
+/// Work the engine hands out through `Action::Rewrite`. No variant can hold the API key.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Job {
+    /// Read the focused field's selection. Answers `Reply::Captured`.
+    Capture(ReqId),
+    /// Call the endpoint. Answers `Reply::Rewritten`.
+    Run(Run),
+    /// Replace the selection with this text through the clipboard. No answer.
+    Paste(String),
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run { pub req: ReqId, pub preset: Preset, pub text: String, pub cfg: Config }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Captured {
+    Text(String),
+    /// The field reports an empty selection, or the clipboard fallback saw no copy.
+    NoSelection,
+    /// No API key stored (checked before reading the selection).
+    NoKey,
+    /// Password field / secure input: refuse silently.
+    Secure,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reply { Captured(ReqId, Captured), Rewritten(ReqId, Result<String, Failure>) }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Failure { NoKey, Timeout, Network, Rejected, RateLimited, Status(u16, Option<String>), BadResponse }
+impl Failure {
+    /// One short line for the notice row.
+    pub fn message(&self) -> String {
+        match self {
+            Failure::NoKey => NO_KEY.into(), Failure::Timeout => "The rewrite timed out".into(), Failure::Network => "Could not reach the rewrite service".into(),
+            Failure::Rejected => "The API key was rejected".into(), Failure::RateLimited => "Rate limited. Try again in a moment".into(),
+            Failure::Status(c, Some(m)) => format!("Rewrite failed ({c}): {}", preview(m, 80)), Failure::Status(c, None) => format!("Rewrite failed ({c})"),
+            Failure::BadResponse => "Unexpected reply from the model".into(),
+        }
+    }
+}
+
+fn endpoint(cfg: &Config) -> String { format!("{}/chat/completions", cfg.base_url) }
+fn body(run: &Run) -> String {
+    let mut b = json!({ "model": run.cfg.model, "temperature": 0.2, "messages": [{ "role": "system", "content": run.preset.instructions() }, { "role": "user", "content": run.text }] });
+    // OpenRouter-only fields; other OpenAI-compatible servers may reject unknown keys
+    if scheme_host(&run.cfg.base_url).is_some_and(|(_, h)| h.eq_ignore_ascii_case("openrouter.ai")) {
+        b["reasoning"] = json!({ "enabled": false }); b["provider"] = json!({ "data_collection": "deny" });
+    }
+    b.to_string()
+}
+fn parse(status: u16, body: &str) -> Result<String, Failure> {
+    let v: Option<Value> = serde_json::from_str(body).ok();
+    match status {
+        200..=299 => v.as_ref().and_then(|v| v["choices"][0]["message"]["content"].as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from).ok_or(Failure::BadResponse),
+        401 | 403 => Err(Failure::Rejected), 429 => Err(Failure::RateLimited),
+        c => Err(Failure::Status(c, v.as_ref().and_then(|v| v["error"]["message"].as_str()).map(String::from))),
+    }
+}
+/// Put the selection's own leading/trailing whitespace back around the model output (a selected line keeps its "\n").
+fn finish(original: &str, out: &str) -> String {
+    let lead = &original[..original.len() - original.trim_start().len()]; let trail = &original[original.trim_end().len()..];
+    format!("{lead}{}{trail}", out.trim())
+}
+/// Label for the result row: at most `max` chars, "…" when cut.
+pub fn preview(text: &str, max: usize) -> String {
+    if text.chars().count() <= max { return text.to_string() }
+    format!("{}…", text.chars().take(max.saturating_sub(1)).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn run(base_url: &str) -> Run { Run { req: ReqId::default().next(), preset: Preset::Fix, text: "helo wrld".into(), cfg: Config::new(true, base_url, "m/x").unwrap() } }
+    #[test] fn openrouter_body_denies_data_collection_and_reasoning() {
+        let b: Value = serde_json::from_str(&body(&run(""))).unwrap();
+        assert_eq!(b, json!({ "model": "m/x", "temperature": 0.2, "reasoning": { "enabled": false }, "provider": { "data_collection": "deny" },
+            "messages": [{ "role": "system", "content": FIX }, { "role": "user", "content": "helo wrld" }] }));
+    }
+    #[test] fn other_servers_get_only_the_standard_fields() {
+        let b: Value = serde_json::from_str(&body(&run("http://localhost:11434/v1"))).unwrap();
+        assert_eq!(b, json!({ "model": "m/x", "temperature": 0.2, "messages": [{ "role": "system", "content": FIX }, { "role": "user", "content": "helo wrld" }] }));
+    }
+    #[test] fn endpoint_joins_without_double_slash() {
+        assert_eq!(endpoint(&Config::new(true, " https://api.example.com/v1/ ", "").unwrap()), "https://api.example.com/v1/chat/completions");
+        assert_eq!(endpoint(&Config::default()), "https://openrouter.ai/api/v1/chat/completions");
+    }
+    #[test] fn config_new_trims_defaults_and_refuses_clear_text_urls() {
+        assert_eq!(Config::new(false, "  ", "  "), Ok(Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into() }));
+        assert_eq!(Config::new(true, "http://127.0.0.1:8080/", " llama ").map(|c| (c.base_url, c.model)), Ok(("http://127.0.0.1:8080".into(), "llama".into())));
+        assert_eq!(Config::new(true, "HTTP://[::1]:1234/v1", "").map(|c| c.base_url), Ok("HTTP://[::1]:1234/v1".into()));
+        assert_eq!(Config::new(true, "http://localhost", "").map(|c| c.base_url), Ok("http://localhost".into()));
+        for bad in ["http://api.example.com/v1", "http://localhost.evil.com", "http://user@127.0.0.1.evil.com", "ftp://localhost", "openrouter.ai/api/v1", "https://"] {
+            assert_eq!(Config::new(true, bad, ""), Err(BAD_URL.to_string()), "{bad}");
+        }
+    }
+    #[test] fn config_json_round_trips_and_falls_back() {
+        let c = Config::new(false, "https://api.example.com/v1", "m/x").unwrap();
+        assert_eq!(Config::from_json(Some(&c.to_json())), c);
+        assert_eq!(Config::from_json(None), Config::default());
+        let v = json!({ "enabled": false, "base_url": "http://example.com", "model": "m/y" });
+        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into() });
+    }
+    #[test] fn parse_maps_status_and_content() {
+        assert_eq!(parse(200, r#"{"choices":[{"message":{"content":"  hello world\n"}}]}"#), Ok("hello world".into()));
+        assert_eq!(parse(200, r#"{"choices":[{"message":{"content":"  "}}]}"#), Err(Failure::BadResponse));
+        assert_eq!(parse(200, r#"{"choices":[]}"#), Err(Failure::BadResponse));
+        assert_eq!(parse(200, "not json"), Err(Failure::BadResponse));
+        assert_eq!(parse(401, r#"{"error":{"message":"No auth"}}"#), Err(Failure::Rejected));
+        assert_eq!(parse(429, ""), Err(Failure::RateLimited));
+        assert_eq!(parse(500, r#"{"error":{"message":"model overloaded"}}"#), Err(Failure::Status(500, Some("model overloaded".into()))));
+        assert_eq!(parse(502, "<html>"), Err(Failure::Status(502, None)));
+    }
+    #[test] fn failure_messages_are_one_short_line() {
+        assert_eq!(Failure::Status(500, Some("model overloaded".into())).message(), "Rewrite failed (500): model overloaded");
+        assert_eq!(Failure::Status(400, Some("x".repeat(200))).message(), format!("Rewrite failed (400): {}…", "x".repeat(79)));
+        assert_eq!(Failure::NoKey.message(), "Add an API key in Settings");
+    }
+    #[test] fn finish_keeps_selection_whitespace() {
+        assert_eq!(finish("  helo wrld\n", "hello world"), "  hello world\n");
+        assert_eq!(finish("helo", " hello \n"), "hello");
+    }
+    #[test] fn preview_cuts_with_ellipsis() {
+        assert_eq!(preview("สวัสดีครับ", 10), "สวัสดีครับ");
+        assert_eq!(preview("abcdef", 4), "abc…");
+    }
+}

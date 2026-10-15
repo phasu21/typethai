@@ -1,7 +1,7 @@
 //! typethai-desktop: system-wide wrong-layout (EN QWERTY -> Thai Kedmanee) auto-converter with a suggestion bubble.
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-mod app; mod bridge; mod engine; mod keys; mod placement; mod prefs;
+mod app; mod bridge; mod engine; mod keys; mod placement; mod prefs; mod rewrite;
 mod inputsrc; mod evallive; mod platform;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
