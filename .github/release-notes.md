@@ -1,5 +1,22 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.4.0**
+- **New bubble.** Suggestions now appear as a row of buttons. Each one shows why it is offered: a 🇹🇭 / 🇺🇸 flag
+  when the word was typed in the wrong layout, a red spelling mark for a typo fix. Click an option to apply it. The
+  old stacked rows are still in Settings → Word suggestions → Bubble layout.
+- **Typo-tolerant suggestions.** A slipped key no longer hides the word you meant: `candel` offers *candle*, and the
+  word before decides between close guesses (`we must candel` offers *cancel*).
+- **⌃⌥R fixes what you point at.** With text selected it offers the text in the other layout and with typos fixed,
+  then AI rewrite if set up. With nothing selected it offers fixes for the word before the caret. Enter applies the
+  highlighted fix.
+- **Pick with Ctrl+1–3** (optional, Settings → Word suggestions).
+- **Smoother bubble.** Options change in place while you type instead of fading out and back in.
+
+**Fixed in 0.4.0**
+- The bubble now appears at the caret in Electron and Chromium apps whose text fields hide it from the usual query
+  (for example Grok Bot), instead of at the left edge of the field.
+- Windows: no more dim box or thin line around the bubble.
+
 **New in 0.3.1**
 - **Noto font.** The bubble and Settings now use Noto Sans Thai with Noto Sans for Latin, bundled in the app, so Thai
   looks the same on macOS and Windows.
