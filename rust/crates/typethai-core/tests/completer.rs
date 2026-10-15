@@ -30,11 +30,15 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 #[test] fn thai_tail_finds_the_incomplete_word() {
     let dict = Dict::new(["ฉัน", "ชอบ", "ภาษา", "ภาษี"].map(String::from));
     let c = Completer::new([("ภาษา".to_string(), 10.0), ("ภาษี".to_string(), 5.0)]);
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1), Some(6));
-    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1), Some(6));
-    assert_eq!(thai_tail("ภาษ", &dict, &c, 1), Some(0));
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4), None);
-    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1), None);
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, None), Some(6));
+    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1, None), Some(6));
+    assert_eq!(thai_tail("ภาษ", &dict, &c, 1, None), Some(0));
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4, None), None);
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, None), None);
+    let s = Slips::default();
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, Some(&s)), Some(6), "a key typed twice");
+    assert_eq!(c.complete("บภาษ", 2, slipping()).words, ["ภาษา", "ภาษี"]);
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, Some(&s)), Some(6), "keys typed right are read as typed");
     assert_eq!(words(&c, &"ฉันชอบภาษ".chars().skip(6).collect::<String>(), 3), ["ภาษา", "ภาษี"]);
 }
 #[test] fn thai_completer_ranks_by_corpus_freq() {

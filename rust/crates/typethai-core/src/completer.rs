@@ -91,14 +91,16 @@ impl Completer {
         let chance: Vec<f64> = spreads.iter().map(|sp| sp.read.p * (0..SIGNALS).filter(|&i| lambda[i] > 0.0).map(|i| lambda[i] * sp.total[i] / whole[i]).sum::<f64>()).collect();
         let all: f64 = chance.iter().sum();
         if all == 0.0 { return Completions::default() }
-        let mut scored: Vec<(&str, f64)> = spreads.iter().zip(&chance).filter(|(_, c)| **c > 0.0)
-            .flat_map(|(sp, c)| { let w = c / all; sp.shares().into_iter().map(move |(x, s)| (x, w * s)) }).collect();
+        // (word, score, the keys as typed reach it)
+        let mut scored: Vec<(&str, f64, bool)> = spreads.iter().zip(&chance).enumerate().filter(|(_, (_, c))| **c > 0.0)
+            .flat_map(|(i, (sp, c))| { let w = c / all; sp.shares().into_iter().map(move |(x, s)| (x, w * s, i == 0)) }).collect();
         // a word several readings reach gets each one's part
         scored.sort_by(|a, b| a.0.cmp(b.0));
-        scored.dedup_by(|b, a| if a.0 == b.0 { a.1 += b.1; true } else { false });
+        scored.dedup_by(|b, a| if a.0 == b.0 { a.1 += b.1; a.2 |= b.2; true } else { false });
+        scored.retain(|x| x.2 || x.1 >= SLIP_FLOOR);
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         let confidence = scored.first().map_or(0.0, |r| r.1);
-        Completions { words: scored.into_iter().take(k).map(|(w, _)| recase(w, prefix)).collect(), confidence }
+        Completions { words: scored.into_iter().take(k).map(|(w, _, _)| recase(w, prefix)).collect(), confidence }
     }
     /// The words a finished `typed` may have meant, best first: `others` (another checker's guesses, which may be more
     /// than one slip away) and the words one slip away, by P(word | cx) × P(typed | word). Guesses this list does not
@@ -248,6 +250,9 @@ const TRUST_HALF: f64 = 4.0;
 fn trust(sig: usize, total: f64) -> f64 { if sig == MINE || sig == MINE_PAIR { total / (total + TRUST_HALF) } else { 1.0 } }
 /// Keys typed before a slip is read into them.
 pub const SLIP_MIN: usize = 3;
+/// Least share of a word only a slip reaches: below it the keys were most likely typed as meant, and the word would
+/// only take a row from the spell checker's completions.
+const SLIP_FLOOR: f64 = 0.01;
 /// Slipped readings of the keys kept besides the keys as typed; the rest are too unlikely to reach the top rows.
 const READINGS: usize = 8;
 /// Extensions taken from each list (corpus words, bigram followers); a word below them cannot reach the top rows.
@@ -407,9 +412,12 @@ fn recase(w: &str, prefix: &str) -> String {
     w[..1].to_ascii_uppercase() + &w[1..]
 }
 /// Thai text has no spaces: the char index where the last (incomplete) word of `run` starts. Longest tail first
-/// (at most 16 chars, at least `min`) that the completer can extend and whose head is fully dictionary-covered.
-pub fn thai_tail(run: &str, dict: &Dict, completer: &Completer, min: usize) -> Option<usize> {
+/// (at most 16 chars, at least `min`) that the completer can extend and whose head is fully dictionary-covered; when
+/// none can, and `slips` is given, the longest that it can extend read with one slip.
+pub fn thai_tail(run: &str, dict: &Dict, completer: &Completer, min: usize, slips: Option<&Slips>) -> Option<usize> {
     let at: Vec<usize> = run.char_indices().map(|(b, _)| b).collect(); let n = at.len();
-    (min.max(1)..=n.min(16)).rev().map(|len| n - len)
-        .find(|&i| completer.extends(&run[at[i]..]) && (i == 0 || dict.coverage_min(&run[..at[i]], 1) == 1.0))
+    let tails = || (min.max(1)..=n.min(16)).rev().map(|len| n - len);
+    let head_ok = |i: usize| i == 0 || dict.coverage_min(&run[..at[i]], 1) == 1.0;
+    tails().find(|&i| completer.extends(&run[at[i]..]) && head_ok(i))
+        .or_else(|| { let s = slips?; tails().find(|&i| completer.extends_slipped(&run[at[i]..], s) && head_ok(i)) })
 }
