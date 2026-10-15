@@ -312,6 +312,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         never: ["lol", "ok", "omg"].map(String::from).to_vec(),
         learned: learned.map(|(w, kept, conv)| typethai_core::personal::Learned { word: w.into(), kept, conv }).to_vec(),
         completion: crate::engine::CompleteMode::default(),
+        learn_words: true,
         rewrite: crate::rewrite::Config::default(),
     }
 }
