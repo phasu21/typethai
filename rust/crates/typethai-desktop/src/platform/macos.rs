@@ -2,7 +2,7 @@
 //! non-activating NSPanel bubble at the caret (AXFocusedUIElement + AXSelectedTextRange + AXBoundsForRange, mouse
 //! fallback), secure-input skip (IsSecureEventInputEnabled / AXSecureTextField), input-source switch to Thai/ABC after applying (TISSelectInputSource), tray.
 #![allow(non_upper_case_globals)]
-use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}};
+use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
 use core_foundation::base::CFRange;
 use std::sync::mpsc::Sender;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
@@ -14,6 +14,10 @@ use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult, EventField};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
+use objc2::rc::autoreleasepool;
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeString};
+use objc2_foundation::{NSArray, NSData, NSString};
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -53,7 +57,7 @@ const kAXValueCGSizeType: u32 = 2;
 const kAXValueCGRectType: u32 = 3;
 const kAXValueCFRangeType: u32 = 4;
 
-struct State { app: App, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str }
+struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static TX: RefCell<Option<Sender<UiMsg>>> = const { RefCell::new(None) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -106,10 +110,15 @@ unsafe fn switch_input(lang: InputLang) {
 }
 
 // ---------- injection ----------
-fn post_key(src: &CGEventSource, code: u16, down: bool) {
-    if let Ok(e) = CGEvent::new_keyboard_event(src.clone(), code, down) { e.set_flags(CGEventFlags::CGEventFlagNull); e.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, MAGIC); e.post(CGEventTapLocation::Session); }
+fn post_key(src: &CGEventSource, code: u16, down: bool, flags: CGEventFlags) {
+    if let Ok(e) = CGEvent::new_keyboard_event(src.clone(), code, down) { e.set_flags(flags); e.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, MAGIC); e.post(CGEventTapLocation::Session); }
 }
-fn tap(src: &CGEventSource, code: u16) { post_key(src, code, true); post_key(src, code, false); }
+fn tap(src: &CGEventSource, code: u16) { post_key(src, code, true, CGEventFlags::CGEventFlagNull); post_key(src, code, false, CGEventFlags::CGEventFlagNull); }
+/// Cmd+`code` with exactly the Command flag: a Private source, so the Ctrl+Option still held from the hotkey never leaks in.
+fn command(code: u16) {
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::Private) else { return };
+    post_key(&src, code, true, CGEventFlags::CGEventFlagCommand); post_key(&src, code, false, CGEventFlags::CGEventFlagCommand);
+}
 fn inject(delete: usize, insert: &str, then: Option<Boundary>) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::Private) else { return };
     for _ in 0..delete { tap(&src, 0x33); }
@@ -161,17 +170,22 @@ unsafe fn enable_ax_tree(app: AXUIElementRef, pid: i32, bundle: &str) {
     let r2 = if is_chromium_browser(bundle) { AXUIElementSetAttributeValue(app, CFString::new("AXEnhancedUserInterface").as_concrete_TypeRef(), t.as_CFTypeRef()) } else { 1 };
     eprintln!("typethai: AX tree enable pid {pid} {bundle}: AXManualAccessibility={} AXEnhancedUserInterface={}", r1 == 0, if is_chromium_browser(bundle) { (r2 == 0).to_string() } else { "n/a".into() });
 }
+/// The app's AX element (release it), with a short messaging timeout and its AX tree switched on.
+unsafe fn app_element(pid: i32, bundle: &str) -> AXUIElementRef { let e = AXUIElementCreateApplication(pid); AXUIElementSetMessagingTimeout(e, 0.25); enable_ax_tree(e, pid, bundle); e }
 /// Focused element: system-wide AXFocusedUIElement, else the frontmost app's AXFocusedUIElement.
 unsafe fn focused_element(app: Option<AXUIElementRef>) -> Option<CFType> {
     focused().or_else(|| app.and_then(|a| ax_attr(a, "AXFocusedUIElement")))
 }
 unsafe fn ax_point(v: &CFType) -> Option<CGPoint> { let mut pt = CGPoint::new(0.0, 0.0); if AXValueGetValue(v.as_CFTypeRef(), kAXValueCGPointType, &mut pt as *mut _ as *mut c_void) { Some(pt) } else { None } }
 unsafe fn ax_size(v: &CFType) -> Option<core_graphics::geometry::CGSize> { let mut s = core_graphics::geometry::CGSize::new(0.0, 0.0); if AXValueGetValue(v.as_CFTypeRef(), kAXValueCGSizeType, &mut s as *mut _ as *mut c_void) { Some(s) } else { None } }
-/// Caret rect from the selected range. See `placement::caret_top` for the one-line AppKit correction.
-unsafe fn caret_rect(fe: AXUIElementRef) -> Option<(Rect, &'static str)> {
+unsafe fn selected_range(fe: AXUIElementRef) -> Option<CFRange> {
     let rv = ax_attr(fe, "AXSelectedTextRange")?;
     let mut range = CFRange { location: 0, length: 0 };
-    if !AXValueGetValue(rv.as_CFTypeRef(), kAXValueCFRangeType, &mut range as *mut _ as *mut c_void) { return None }
+    AXValueGetValue(rv.as_CFTypeRef(), kAXValueCFRangeType, &mut range as *mut _ as *mut c_void).then_some(range)
+}
+/// Caret rect from the selected range. See `placement::caret_top` for the one-line AppKit correction.
+unsafe fn caret_rect(fe: AXUIElementRef) -> Option<(Rect, &'static str)> {
+    let range = selected_range(fe)?;
     if range.length > 0 {
         if let Some(r) = bounds_for(fe, range.location + range.length - 1, 1) {
             return Some((Rect::new(r.origin.x + r.size.width, r.origin.y, 1.0, r.size.height), "range-end"));
@@ -195,7 +209,7 @@ pub fn caret_anchor() -> (Anchor, String) {
     unsafe {
         let mut a = Anchor { caret: None, field: None, mouse: mouse_location() };
         let fm = frontmost();
-        let app = fm.as_ref().map(|(pid, b, _)| { let e = AXUIElementCreateApplication(*pid); AXUIElementSetMessagingTimeout(e, 0.25); enable_ax_tree(e, *pid, b); e });
+        let app = fm.as_ref().map(|(pid, b, _)| app_element(*pid, b));
         let appname = fm.as_ref().map(|(_, b, n)| format!("{n} ({b})")).unwrap_or_else(|| "?".into());
         let mut how = "no-focused-element";
         if let Some(f) = focused_element(app) {
@@ -237,7 +251,7 @@ fn arm_caret_follow(st: &mut State) {
         st.move_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(30));
     }
 }
-fn run_actions(_st: &mut State, acts: Vec<Action>) {
+fn run_actions(st: &mut State, acts: Vec<Action>) {
     for a in acts { match a {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
         Action::SwitchInput(l) => unsafe { switch_input(l) },
@@ -245,11 +259,54 @@ fn run_actions(_st: &mut State, acts: Vec<Action>) {
         Action::ShowBubble(items) => {
             send(UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), anchor: unsafe { anchor() } });
             // the tap sees the key before the app moves its caret
-            arm_caret_follow(_st);
+            arm_caret_follow(st);
         }
         Action::HideBubble => { bridge::set_geom(None); send(UiMsg::Hide) }
-        Action::Rewrite(_) => {}
+        Action::Rewrite(job) => st.worker.submit(job),
     } }
+}
+
+// ---------- rewrite: selection + clipboard, on the desk thread ----------
+struct MacHost;
+impl rewrite::Host for MacHost {
+    /// Every pasteboard item as its (type, bytes) pairs.
+    type Snap = Vec<Vec<(String, Vec<u8>)>>;
+    fn is_secure(&mut self) -> bool { unsafe { secure_now() } }
+    fn selection_via_accessibility(&mut self) -> Option<String> {
+        autoreleasepool(|_| unsafe {
+            let app = frontmost().map(|(pid, b, _)| app_element(pid, &b));
+            let r = focused_element(app).and_then(|f| {
+                let fe = f.as_CFTypeRef() as AXUIElementRef;
+                let t = ax_attr(fe, "AXSelectedText")?.downcast::<CFString>()?.to_string();
+                // an empty AXSelectedText over a non-empty range means the app does not expose the text
+                (!t.is_empty() || selected_range(fe).is_none_or(|r| r.length == 0)).then_some(t)
+            });
+            if let Some(e) = app { CFRelease(e as CFTypeRef); }
+            r
+        })
+    }
+    fn clip_seq(&mut self) -> u64 { NSPasteboard::generalPasteboard().changeCount() as u64 }
+    fn clip_snapshot(&mut self) -> Self::Snap {
+        autoreleasepool(|_| NSPasteboard::generalPasteboard().pasteboardItems().map(|items| items.iter().map(|it| it.types().iter().filter_map(|t| Some((t.to_string(), it.dataForType(&t)?.to_vec()))).collect()).collect()).unwrap_or_default())
+    }
+    fn clip_restore(&mut self, s: Self::Snap) {
+        autoreleasepool(|_| {
+            let items: Vec<_> = s.iter().map(|pairs| { let it = NSPasteboardItem::new(); for (t, d) in pairs { it.setData_forType(&NSData::with_bytes(d), &NSString::from_str(t)); } ProtocolObject::from_retained(it) }).collect();
+            let pb = NSPasteboard::generalPasteboard(); pb.clearContents(); if !items.is_empty() { pb.writeObjects(&NSArray::from_retained_slice(&items)); }
+        })
+    }
+    fn clip_read_text(&mut self) -> Option<String> { autoreleasepool(|_| NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())) }
+    fn clip_write_transient(&mut self, text: &str) {
+        // nspasteboard.org markers: clipboard managers skip transient and concealed items
+        autoreleasepool(|_| {
+            let it = NSPasteboardItem::new(); it.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+            for marker in ["org.nspasteboard.TransientType", "org.nspasteboard.ConcealedType"] { it.setData_forType(&NSData::new(), &NSString::from_str(marker)); }
+            let pb = NSPasteboard::generalPasteboard(); pb.clearContents(); pb.writeObjects(&NSArray::from_retained_slice(&[ProtocolObject::from_retained(it)]));
+        })
+    }
+    fn post_copy(&mut self) { command(0x08) }
+    fn post_paste(&mut self) { command(0x09) }
+    fn pause(&mut self, ms: u64) { std::thread::sleep(std::time::Duration::from_millis(ms)) }
 }
 
 // ---------- event tap ----------
@@ -335,6 +392,7 @@ fn service_settings(st: &mut State) {
 extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
     with(|st| {
         service_settings(st);
+        while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
         // a few AX reads after each key: the first is often still the pre-keystroke caret
@@ -363,7 +421,7 @@ fn capture_thread(app: App, tx: Sender<UiMsg>) {
     let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
     let rl = CFRunLoop::get_current();
     rl.add_source(&src, unsafe { kCFRunLoopCommonModes }); tap.enable();
-    ST.with(|s| *s.borrow_mut() = Some(State { app, last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "" }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "" }));
     let timer = CFRunLoopTimer::new(core_foundation::date::CFDate::now().abs_time() + 0.2, 0.025, 0, 0, timer_cb, std::ptr::null_mut());
     rl.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
     CFRunLoop::run_current();
