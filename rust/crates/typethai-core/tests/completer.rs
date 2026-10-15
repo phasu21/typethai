@@ -1,4 +1,12 @@
-use typethai_core::{completer::{thai_tail, Completer}, dict::Dict};
+use std::collections::HashMap;
+use typethai_core::{completer::{thai_tail, Completer}, dict::Dict, ModelFiles};
+/// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
+fn model() -> Option<ModelFiles> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
+    if p.join("model.json").exists() { return Some(ModelFiles::load_json_dir(&p).unwrap()) }
+    if let Some(t) = std::env::var_os("TYPETHAI_MODEL") { return Some(ModelFiles::load(std::path::Path::new(&t)).unwrap()) }
+    eprintln!("model files missing; skipping"); None
+}
 fn en() -> Completer { Completer::new([("hello", 10.0), ("help", 30.0), ("helmet", 5.0), ("he", 99.0), ("world", 1.0)].map(|(w, f)| (w.to_string(), f))) }
 fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).words }
 
@@ -27,4 +35,21 @@ fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).wor
     assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4), None);
     assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1), None);
     assert_eq!(words(&c, &"ฉันชอบภาษ".chars().skip(6).collect::<String>(), 3), ["ภาษา", "ภาษี"]);
+}
+#[test] fn thai_completer_ranks_by_corpus_freq() {
+    let Some(m) = model() else { return };
+    let c = m.thai_completer();
+    assert_eq!(words(&c, "ภาษ", 4), ["ภาษา", "ภาษี", "ภาษาอังกฤษ", "ภาษาไทย"]);
+    assert_eq!(words(&c, "ขอบ", 1), ["ขอบคุณ"]); assert_eq!(words(&c, "สวั", 1), ["สวัสดี"]);
+}
+#[test] fn english_freq_roundtrips_through_pack() {
+    let Some(mut m) = model() else { return };
+    if std::env::var_os("TYPETHAI_MODEL").is_some() { assert_eq!(m.english_freq.len(), 0, "a pre-EN_FREQ .ttm loads with none"); }
+    (m.thai, m.english, m.thai_words, m.wordfreq) = Default::default(); // debug-build deflate of the full model takes ~50 s
+    m.english_freq = HashMap::from([("hello".to_string(), 3.0), ("help".to_string(), 7.0)]);
+    let back = ModelFiles::unpack(&m.pack()).unwrap();
+    assert_eq!(back.english_freq, HashMap::from([("hello".to_string(), 3.0), ("help".to_string(), 7.0)]));
+    assert_eq!(words(&back.english_completer(), "Hel", 2), ["Help", "Hello"]);
+    m.english_freq.clear();
+    assert_eq!(ModelFiles::unpack(&m.pack()).unwrap().english_freq.len(), 0);
 }
