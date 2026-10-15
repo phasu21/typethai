@@ -1,6 +1,6 @@
 //! Messages and shared state between the key-capture thread (CGEventTap / low-level hooks, owns the Engine) and the
 //! gpui UI thread (bubble window + tray).
-use crate::engine::{BubbleItem, BubbleKind};
+use crate::engine::{BubbleItem, BubbleKind, InputLang, Reason};
 use crate::placement::{Anchor, Rect};
 use crate::prefs::{SettingsCmd, SettingsSnap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,7 @@ pub enum UiMsg {
     /// Highlight this row (Shift+Up/Down).
     Select(usize),
     /// `layout`: what the bubble asks for; `layout` falls back to rows when a strip does not fit.
-    Show { items: Vec<String>, layout: BubbleLayout, anchor: Anchor },
+    Show { items: Vec<Opt>, layout: BubbleLayout, anchor: Anchor },
     /// The caret moved while the bubble is shown: re-place it (same size; skipped if the rect doesn't change).
     Move(Anchor),
     Hide,
@@ -28,8 +28,30 @@ impl UiMsg {
     /// a result in place, which should not flip the layout under the reader.
     pub fn show(items: Vec<BubbleItem>, pref: BubbleLayout, anchor: Anchor) -> UiMsg {
         let layout = if items.iter().any(|i| matches!(i.kind, BubbleKind::Rewrite(_))) { BubbleLayout::Vertical } else { pref };
-        UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), layout, anchor }
+        UiMsg::Show { items: items.iter().map(|i| Opt { reason: i.reason(), label: i.label.clone() }).collect(), layout, anchor }
     }
+}
+
+/// One option as the bubble draws it: its label, and why it is offered (the badge on it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Opt { pub label: String, pub reason: Option<Reason> }
+
+/// The flag on a conversion's badge, a bundled square SVG (`flags/`) for the language its text becomes: the US flag for
+/// English, as the keys are the US layout's. A typo fix's badge shows a spell-check icon instead.
+pub fn flag(lang: InputLang) -> &'static str { match lang { InputLang::Thai => "flags/th.svg", InputLang::Latin => "flags/us.svg" } }
+
+/// A run of options with the same reason: `len` options from `start`. A strip draws each as one group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run { pub start: usize, pub len: usize, pub reason: Option<Reason> }
+pub fn runs(reasons: &[Option<Reason>]) -> Vec<Run> {
+    let mut out: Vec<Run> = vec![];
+    for (i, r) in reasons.iter().enumerate() {
+        match out.last_mut() {
+            Some(run) if run.reason == *r => run.len += 1,
+            _ => out.push(Run { start: i, len: 1, reason: *r }),
+        }
+    }
+    out
 }
 
 /// How the bubble lays out its options: one horizontal strip of buttons, or stacked rows. As a setting it is what the
@@ -42,7 +64,7 @@ pub const PAD: f64 = 6.0;
 pub const ROW_H: f64 = 30.0;
 /// Bubble chrome metrics (logical units). One row = [px ROW_PX][label column (wraps)][gap][Tab keycap][px ROW_PX], at least ROW_H tall.
 pub const BORDER: f64 = 1.0;
-/// Panel corner radius; also the native layer clip radius on macOS.
+/// Corner radius of the rows' panel and of a strip's groups.
 pub const RADIUS: f64 = 8.0;
 pub const ROW_PX: f64 = 10.0;
 pub const FONT_PX: f64 = 15.0;
@@ -54,6 +76,18 @@ pub const DIGIT_CAP_W: f64 = 18.0;
 pub const KEYCAP_GAP: f64 = 2.0;
 pub const KEYCAP_H: f64 = 18.0;
 pub const KEYCAP_FONT_PX: f64 = 11.0;
+/// An option's badge: gpui-kit's Medium `Badge` size, round. On a strip button it overhangs the top-right corner,
+/// `BADGE_UP` above it and `OPT_GAP` past its right edge, so it ends where the next button starts. In a row, which has no
+/// box to hang on, it sits in its own column before the key hint.
+pub const BADGE_D: f64 = 16.0;
+pub const BADGE_UP: f64 = 6.0;
+pub const BADGE_ICON: f64 = 10.0;
+/// A strip has no panel: each run of options is its own surface (fill, border, shadow) around its buttons, `GROUP_PAD`
+/// inside its border, runs `GROUP_GAP_X` apart. The window keeps `SHADOW_M` of transparent margin around what it draws
+/// (the strip's groups or the rows' panel) for their shadow and the badges' overhang: the window has no shadow of its own.
+pub const GROUP_GAP_X: f64 = 8.0;
+pub const GROUP_PAD: f64 = 3.0;
+pub const SHADOW_M: f64 = 10.0;
 /// Width reserved for the widest key hint: `Tab` and a digit.
 pub const HINT_SLOT_W: f64 = TAB_CAP_W + KEYCAP_GAP + DIGIT_CAP_W;
 /// Added to every measured single-line width: Thai upper/lower marks and tone marks on the last cluster can paint a
@@ -75,18 +109,25 @@ pub const OPT_GAP: f64 = 4.0;
 /// side are no longer read at a glance.
 pub const STRIP_LABEL_MAX: f64 = 240.0;
 
-/// The bubble's geometry in logical px, window-relative. `h` and the rows' `cells` are only the first guess for the
-/// vertical layout (rows wrap; the real heights come from gpui's laid-out panel, see `Ui::reconcile`). The strip never
-/// wraps, so its guess is exact.
+/// The bubble's geometry in logical px, window-relative. `h` and the rows' `cells` and badges are only the first guess
+/// for the vertical layout (rows wrap; the real heights come from gpui's laid-out panel, see `Ui::reconcile`). The strip
+/// never wraps, so its guess is exact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     /// What the bubble is drawn as, after the fallback from a strip that does not fit.
     pub kind: BubbleLayout,
+    /// The window: what is drawn and the transparent `margin` around it.
     pub w: f64, pub h: f64,
+    pub margin: f64,
+    /// What is drawn and takes clicks, with the badges: the rows' panel, or each strip run's box.
+    pub surfaces: Vec<Rect>,
+    pub runs: Vec<Run>,
     /// Each option's label column: one shared width for the rows (the widest label, clamped), each label's own in a strip.
     pub label_w: Vec<f64>,
-    /// Each option's box: the row, or the button.
+    /// Each option's box, the first option highlighted: the row, or the button (see `cells_at`).
     pub cells: Vec<Rect>,
+    /// Why each option is offered: its badge.
+    pub reasons: Vec<Option<Reason>>,
 }
 impl Layout {
     /// Where the first option's text starts, from the bubble's left edge. Placement puts it at the caret's x, so the
@@ -94,42 +135,55 @@ impl Layout {
     pub fn text_x(&self) -> f64 {
         match (self.kind, self.cells.first()) {
             (BubbleLayout::Horizontal, Some(c)) => c.x + OPT_BORDER + OPT_PX + hint_w(true) + HINT_GAP,
-            _ => PAD + BORDER + ROW_PX,
+            _ => self.margin + PAD + BORDER + ROW_PX,
         }
     }
 }
-/// Lay out options from their measured one-line label widths. A strip when `wanted` is one, every label is at most
-/// `STRIP_LABEL_MAX` and the whole strip fits `max_w` (the monitor's visible width minus margins); otherwise rows.
-pub fn layout(label_widths: &[f64], max_w: f64, wanted: BubbleLayout) -> Layout {
+/// Lay out options from their measured one-line label widths and their reasons (a badge each). A strip when `wanted` is
+/// one, every label is at most `STRIP_LABEL_MAX` and the whole strip fits `max_w` (the monitor's visible width minus
+/// margins); otherwise rows.
+pub fn layout(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64, wanted: BubbleLayout) -> Layout {
+    debug_assert_eq!(label_widths.len(), reasons.len());
     let max_w = max_w.max(MIN_W);
     if wanted == BubbleLayout::Horizontal && label_widths.iter().all(|w| *w <= STRIP_LABEL_MAX) {
-        let s = strip(label_widths);
+        let s = strip(label_widths, reasons);
         if s.w <= max_w { return s }
     }
-    rows(label_widths, max_w)
+    rows(label_widths, reasons, max_w)
 }
 /// Rows: the label column is the widest label, clamped so the bubble is in [MIN_W, max_w]. Longer labels wrap; nothing
-/// is truncated.
-fn rows(label_widths: &[f64], max_w: f64) -> Layout {
+/// is truncated. When any row has a badge, every row keeps a badge column before its key hint.
+fn rows(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64) -> Layout {
     let widest = label_widths.iter().copied().fold(0.0, f64::max).ceil();
-    let label_w = widest.clamp(MIN_W - CHROME_W, max_w - CHROME_W);
-    let (inset, w) = (PAD + BORDER, CHROME_W + label_w);
+    let badge_col = if reasons.iter().any(Option::is_some) { BADGE_D + HINT_GAP } else { 0.0 };
+    let (chrome, m) = (CHROME_W + badge_col, SHADOW_M);
+    let label_w = widest.clamp(MIN_W - chrome, max_w - chrome - 2.0 * m);
+    let (inset, pw) = (m + PAD + BORDER, chrome + label_w);
     let mut y = inset;
-    let cells = label_widths.iter().map(|lw| { let c = Rect::new(inset, y, w - 2.0 * inset, ROW_H * (lw / label_w).ceil().max(1.0)); y = c.bottom(); c }).collect();
-    Layout { kind: BubbleLayout::Vertical, w, h: y + inset, label_w: vec![label_w; label_widths.len()], cells }
+    let cells: Vec<Rect> = label_widths.iter().map(|lw| { let c = Rect::new(inset, y, pw - 2.0 * (PAD + BORDER), ROW_H * (lw / label_w).ceil().max(1.0)); y = c.bottom(); c }).collect();
+    let ph = y + PAD + BORDER - m;
+    Layout { kind: BubbleLayout::Vertical, w: pw + 2.0 * m, h: ph + 2.0 * m, margin: m, surfaces: vec![Rect::new(m, m, pw, ph)], runs: runs(reasons), label_w: vec![label_w; label_widths.len()], cells, reasons: reasons.to_vec() }
 }
-/// One button per option, left to right. The first is highlighted when the bubble appears; moving the highlight swaps
-/// which button carries the wider Tab keycap, so the strip's width never changes.
-fn strip(label_widths: &[f64]) -> Layout {
-    let inset = PAD + BORDER;
+/// One button per option, left to right, in a box per run. The first option is highlighted when the bubble appears;
+/// moving the highlight swaps which button carries the wider Tab keycap, so the strip's width never changes.
+fn strip(label_widths: &[f64], reasons: &[Option<Reason>]) -> Layout {
+    let (top, inset) = (SHADOW_M, BORDER + GROUP_PAD);
     let label_w: Vec<f64> = label_widths.iter().map(|w| w.ceil()).collect();
-    let mut x = inset;
-    let cells: Vec<Rect> = label_w.iter().enumerate().map(|(i, lw)| {
-        let c = Rect::new(x, inset, 2.0 * (OPT_BORDER + OPT_PX) + hint_w(i == 0) + HINT_GAP + lw, OPT_H);
-        x = c.right() + OPT_GAP; c
-    }).collect();
-    let w = cells.last().map_or(2.0 * inset, |c| c.right() + inset);
-    Layout { kind: BubbleLayout::Horizontal, w, h: 2.0 * inset + OPT_H, label_w, cells }
+    let runs = runs(reasons);
+    let (mut x, mut cells, mut surfaces) = (SHADOW_M, vec![], vec![]);
+    for (k, run) in runs.iter().enumerate() {
+        let left = if k == 0 { x } else { x + GROUP_GAP_X };
+        x = left + inset;
+        for i in run.start..run.start + run.len {
+            if i > run.start { x += OPT_GAP }
+            let c = Rect::new(x, top + inset, 2.0 * (OPT_BORDER + OPT_PX) + hint_w(i == 0) + HINT_GAP + label_w[i], OPT_H);
+            x = c.right(); cells.push(c);
+        }
+        x += inset;
+        surfaces.push(Rect::new(left, top, x - left, 2.0 * inset + OPT_H));
+    }
+    let h = top + 2.0 * inset + OPT_H + SHADOW_M;
+    Layout { kind: BubbleLayout::Horizontal, w: x + SHADOW_M, h, margin: SHADOW_M, surfaces, runs, label_w, cells, reasons: reasons.to_vec() }
 }
 /// A strip option's key hint: the Tab keycap on the highlighted option, its number on the others.
 pub fn hint_w(highlighted: bool) -> f64 { if highlighted { TAB_CAP_W } else { DIGIT_CAP_W } }
@@ -139,15 +193,49 @@ pub fn max_width_for(visible_w: f64) -> f64 { visible_w - 2.0 * SCREEN_MARGIN }
 /// `cells` = each option's box in logical units relative to the bubble's top-left (a row, or a strip button);
 /// `scale` converts logical units to the global units of `frame` (Windows DPI; 1.0 on macOS).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub scale: f64 }
+/// `solid` = what is drawn: the surfaces and badges; the window's transparent margin is not.
+pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub solid: Vec<Rect>, pub scale: f64 }
 impl Geom {
-    /// Option index under a global point, if the point is on the bubble (Some(None) = on the bubble but not on an
-    /// option: the panel's padding, or a gap between buttons).
+    /// Option index under a global point, if the point is on what the bubble draws (Some(None) = on the bubble but not
+    /// on an option: the panel's padding, a group's border, a badge's overhang). None off it, the transparent margin too,
+    /// so those clicks reach the app.
     pub fn hit(&self, x: f64, y: f64) -> Option<Option<usize>> {
         if !self.frame.contains(x, y) { return None }
         let (lx, ly) = ((x - self.frame.x) / self.scale, (y - self.frame.y) / self.scale);
-        Some(self.cells.iter().position(|c| c.contains(lx, ly)))
+        if let Some(i) = self.cells.iter().position(|c| c.contains(lx, ly)) { return Some(Some(i)) }
+        self.solid.iter().any(|r| r.contains(lx, ly)).then_some(None)
     }
+}
+impl Layout {
+    /// Each option's box with option `sel` highlighted. In a strip the Tab keycap moves to it: its button widens, the
+    /// first narrows and the buttons between move; the strip's width stays.
+    pub fn cells_at(&self, sel: usize) -> Vec<Rect> {
+        if self.kind == BubbleLayout::Vertical { return self.cells.clone() }
+        let grow = |i: usize| hint_w(i == sel) - hint_w(i == 0);
+        let mut dx = 0.0;
+        self.cells.iter().enumerate().map(|(i, c)| { let r = Rect::new(c.x + dx, c.y, c.w + grow(i), c.h); dx += grow(i); r }).collect()
+    }
+    /// The surfaces with option `sel` highlighted: a strip run's box follows its buttons.
+    pub fn surfaces_at(&self, sel: usize) -> Vec<Rect> {
+        if self.kind == BubbleLayout::Vertical { return self.surfaces.clone() }
+        let (cells, inset) = (self.cells_at(sel), BORDER + GROUP_PAD);
+        self.runs.iter().zip(&self.surfaces).map(|(run, s)| {
+            let (a, b) = (cells[run.start].x - inset, cells[run.start + run.len - 1].right() + inset);
+            Rect::new(a, s.y, b - a, s.h)
+        }).collect()
+    }
+    /// Each badge with option `sel` highlighted: on a button's top-right corner, or in a row's badge column.
+    pub fn badges(&self, sel: usize) -> Vec<(Reason, Rect)> { self.badges_of(sel).into_iter().map(|(_, r, at)| (r, at)).collect() }
+    /// The same, with the option each badge marks.
+    pub fn badges_of(&self, sel: usize) -> Vec<(usize, Reason, Rect)> {
+        let at = |c: &Rect| match self.kind {
+            BubbleLayout::Horizontal => Rect::new(c.right() + OPT_GAP - BADGE_D, c.y - BADGE_UP, BADGE_D, BADGE_D),
+            BubbleLayout::Vertical => Rect::new(c.right() - ROW_PX - HINT_SLOT_W - HINT_GAP - BADGE_D, c.y + (ROW_H - BADGE_D) / 2.0, BADGE_D, BADGE_D),
+        };
+        self.cells_at(sel).iter().zip(&self.reasons).enumerate().filter_map(|(i, (c, r))| Some((i, (*r)?, at(c)))).collect()
+    }
+    /// What takes clicks before gpui has laid the bubble out: the surfaces and the badges.
+    pub fn solid(&self, sel: usize) -> Vec<Rect> { self.surfaces_at(sel).into_iter().chain(self.badges(sel).into_iter().map(|(_, r)| r)).collect() }
 }
 pub static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 pub fn geom() -> Option<Geom> { GEOM.lock().unwrap().clone() }
@@ -177,63 +265,143 @@ pub fn take_settings() -> Vec<SettingsCmd> { std::mem::take(&mut SETTINGS_CMDS.l
 mod tests {
     use super::*;
     use crate::engine::RewriteRow;
-    const INSET: f64 = PAD + BORDER;
+    use crate::rewrite::{Preset, ReqId};
+    // a row's distance from the window's edge: the shadow margin, then the panel's border and padding
+    const INSET: f64 = SHADOW_M + PAD + BORDER;
+    fn plain(label_widths: &[f64], max_w: f64, wanted: BubbleLayout) -> Layout { layout(label_widths, &vec![None; label_widths.len()], max_w, wanted) }
+    const TH: Option<Reason> = Some(Reason::Layout(InputLang::Thai));
+    const EN: Option<Reason> = Some(Reason::Layout(InputLang::Latin));
+    const TYPO: Option<Reason> = Some(Reason::Typo);
+    fn shown(items: Vec<BubbleItem>, pref: BubbleLayout) -> (Vec<Opt>, BubbleLayout) {
+        match UiMsg::show(items, pref, Anchor { caret: None, field: None, mouse: Some((0.0, 0.0)) }) { UiMsg::Show { items, layout, .. } => (items, layout), m => panic!("{m:?}") }
+    }
+    fn item(label: &str, kind: BubbleKind) -> BubbleItem { BubbleItem { label: label.into(), kind } }
+    fn opt(label: &str, reason: Option<Reason>) -> Opt { Opt { label: label.into(), reason } }
     #[test] fn short_options_make_a_strip_sized_to_its_buttons() {
-        let l = layout(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
+        let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
         assert_eq!(l.kind, BubbleLayout::Horizontal);
         assert_eq!(l.label_w, vec![41.0, 61.0, 90.0]);
-        // [border+pad][Tab 30][gap 8][label][pad+border]; the others carry an 18 px number keycap
-        assert_eq!(l.cells, vec![Rect::new(7.0, 7.0, 101.0, 32.0), Rect::new(112.0, 7.0, 109.0, 32.0), Rect::new(225.0, 7.0, 138.0, 32.0)]);
-        assert_eq!((l.w, l.h), (370.0, 46.0));
-        assert_eq!(l.text_x(), 56.0, "the first label, after the Tab keycap");
-        assert_eq!(layout(&[40.0], 1392.0, BubbleLayout::Vertical).text_x(), 17.0);
+        // [shadow margin 10][group border+pad 4][border+pad][Tab 30][gap 8][label][pad+border]; the others carry an
+        // 18 px number keycap, 4 px apart
+        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 101.0, 32.0), Rect::new(119.0, 14.0, 109.0, 32.0), Rect::new(232.0, 14.0, 138.0, 32.0)]);
+        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 364.0, 40.0)]);
+        assert_eq!((l.w, l.h, l.margin), (384.0, 60.0, 10.0));
+        assert_eq!(l.text_x(), 63.0, "the first label, after the Tab keycap");
+        assert_eq!(plain(&[40.0], 1392.0, BubbleLayout::Vertical).text_x(), 27.0, "margin, panel border and padding, row padding");
     }
     #[test] fn a_long_label_or_a_narrow_screen_stacks_the_bubble() {
-        let long = layout(&[40.0, 241.0], 1392.0, BubbleLayout::Horizontal);
+        let long = plain(&[40.0, 241.0], 1392.0, BubbleLayout::Horizontal);
         assert_eq!(long.kind, BubbleLayout::Vertical, "a label past STRIP_LABEL_MAX");
-        assert_eq!(layout(&[40.0, 240.0], 1392.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal, "at the limit");
-        // three 200 px labels: 3 * (22 + 8 + 200) + 30 + 2 * 18 + 2 * 4 + 14 = 778 px
-        assert_eq!(layout(&[200.0; 3], 778.0, BubbleLayout::Horizontal).w, 778.0);
-        let narrow = layout(&[200.0; 3], 777.0, BubbleLayout::Horizontal);
+        assert_eq!(plain(&[40.0, 240.0], 1392.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal, "at the limit");
+        // three 200 px labels: 3 * (22 + 8 + 200) + 30 + 2 * 18 + 2 * 4 + 2 * 4 + 2 * 10 = 792 px
+        assert_eq!(plain(&[200.0; 3], 792.0, BubbleLayout::Horizontal).w, 792.0);
+        let narrow = plain(&[200.0; 3], 791.0, BubbleLayout::Horizontal);
         assert_eq!(narrow.kind, BubbleLayout::Vertical, "the strip is one px wider than the screen allows");
-        assert_eq!(narrow.w, CHROME_W + 200.0);
-        assert_eq!(layout(&[40.0], 1392.0, BubbleLayout::Vertical).kind, BubbleLayout::Vertical, "the setting");
+        assert_eq!(narrow.w, CHROME_W + 200.0 + 2.0 * SHADOW_M);
+        assert_eq!(plain(&[40.0], 1392.0, BubbleLayout::Vertical).kind, BubbleLayout::Vertical, "the setting");
     }
     #[test] fn rows_widen_to_the_screen_then_wrap() {
-        let l = layout(&[20.0, 30.0], 1400.0, BubbleLayout::Vertical);
-        assert_eq!((l.w, l.label_w.clone()), (MIN_W, vec![MIN_W - CHROME_W; 2]));
-        assert_eq!(l.cells, vec![Rect::new(INSET, INSET, MIN_W - 2.0 * INSET, ROW_H), Rect::new(INSET, INSET + ROW_H, MIN_W - 2.0 * INSET, ROW_H)]);
+        let l = plain(&[20.0, 30.0], 1400.0, BubbleLayout::Vertical);
+        assert_eq!((l.w, l.label_w.clone()), (MIN_W + 2.0 * SHADOW_M, vec![MIN_W - CHROME_W; 2]));
+        let row_w = MIN_W - 2.0 * (PAD + BORDER);
+        assert_eq!(l.cells, vec![Rect::new(INSET, INSET, row_w, ROW_H), Rect::new(INSET, INSET + ROW_H, row_w, ROW_H)]);
+        assert_eq!(l.surfaces, vec![Rect::new(SHADOW_M, SHADOW_M, MIN_W, 2.0 * (PAD + BORDER + ROW_H))]);
         assert_eq!(l.h, 2.0 * INSET + 2.0 * ROW_H);
-        assert_eq!(layout(&[100.0, 180.0, 312.4], 1400.0, BubbleLayout::Vertical).label_w, vec![313.0; 3]);
+        assert_eq!(plain(&[100.0, 180.0, 312.4], 1400.0, BubbleLayout::Vertical).label_w, vec![313.0; 3]);
         // much wider than the screen: the bubble takes the max width and the first row wraps over 3 lines
-        let mw = max_width_for(1440.0); let l = layout(&[2.5 * (mw - CHROME_W), 50.0], mw, BubbleLayout::Horizontal);
+        let mw = max_width_for(1440.0); let l = plain(&[2.5 * (mw - CHROME_W), 50.0], mw, BubbleLayout::Horizontal);
         assert_eq!((l.kind, l.w), (BubbleLayout::Vertical, mw));
         assert_eq!(l.cells.iter().map(|c| (c.y, c.h)).collect::<Vec<_>>(), vec![(INSET, 3.0 * ROW_H), (INSET + 3.0 * ROW_H, ROW_H)]);
     }
     #[test] fn a_click_finds_the_row_or_the_button_under_it() {
-        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: layout(&[60.0, 260.0, 30.0], 300.0, BubbleLayout::Vertical).cells };
+        let l = plain(&[60.0, 260.0, 30.0], 300.0, BubbleLayout::Vertical);
+        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0) };
         assert_eq!(rows.hit(50.0, 50.0), None, "off the bubble");
         assert_eq!(rows.hit(150.0, 100.0 + INSET + 5.0), Some(Some(0)));
         assert_eq!(rows.hit(150.0, 100.0 + INSET + ROW_H + 40.0), Some(Some(1)), "the second line of a wrapped row");
         assert_eq!(rows.hit(150.0, 100.0 + INSET + 3.0 * ROW_H + 1.0), Some(Some(2)));
-        assert_eq!(rows.hit(150.0, 101.0), Some(None), "the panel's padding");
-        // strip at 1.5x (Windows DPI): buttons at x 7..108, 112..221, 225..363 logical
-        let strip = Geom { frame: Rect::new(0.0, 0.0, 555.0, 69.0), scale: 1.5, cells: layout(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal).cells };
-        assert_eq!(strip.hit(10.0 * 1.5, 20.0 * 1.5), Some(Some(0)));
-        assert_eq!(strip.hit(107.0 * 1.5, 20.0 * 1.5), Some(Some(0)));
-        assert_eq!(strip.hit(110.0 * 1.5, 20.0 * 1.5), Some(None), "the gap between two buttons");
-        assert_eq!(strip.hit(150.0 * 1.5, 20.0 * 1.5), Some(Some(1)));
-        assert_eq!(strip.hit(300.0 * 1.5, 20.0 * 1.5), Some(Some(2)));
-        assert_eq!(strip.hit(300.0 * 1.5, 3.0 * 1.5), Some(None), "above the buttons");
-        assert_eq!(strip.hit(366.0 * 1.5, 20.0 * 1.5), Some(None), "right of the last button");
+        assert_eq!(rows.hit(150.0, 100.0 + SHADOW_M + 2.0), Some(None), "the panel's padding");
+        assert_eq!(rows.hit(150.0, 101.0), None, "the shadow margin: the click is the app's");
+        // strip at 1.5x (Windows DPI): one group at x 10..374, y 10..50 logical; buttons at x 14..115, 119..228, 232..370
+        let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
+        let strip = Geom { frame: Rect::new(0.0, 0.0, 576.0, 90.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0) };
+        let at = |x: f64, y: f64| strip.hit(x * 1.5, y * 1.5);
+        assert_eq!((at(20.0, 20.0), at(114.0, 20.0), at(150.0, 20.0), at(300.0, 20.0)), (Some(Some(0)), Some(Some(0)), Some(Some(1)), Some(Some(2))));
+        assert_eq!(at(117.0, 20.0), Some(None), "the gap between two buttons of a group");
+        assert_eq!(at(300.0, 12.0), Some(None), "the group's padding above the buttons");
+        assert_eq!(at(300.0, 5.0), None, "the shadow margin: the click is the app's");
+        assert_eq!(at(378.0, 20.0), None, "right of the group");
     }
     #[test] fn rewrite_rows_are_stacked_and_word_options_follow_the_setting() {
-        let anchor = Anchor { caret: None, field: None, mouse: Some((0.0, 0.0)) };
-        let word = |w: &str| BubbleItem { label: w.into(), kind: BubbleKind::Complete { typed: "he".into(), insert: w.into() } };
-        let fix = BubbleItem { label: "hello world".into(), kind: BubbleKind::Rewrite(RewriteRow::Result("hello world".into())) };
-        let shown = |items: Vec<BubbleItem>, pref| match UiMsg::show(items, pref, anchor) { UiMsg::Show { items, layout, .. } => (items, layout), m => panic!("{m:?}") };
-        assert_eq!(shown(vec![word("help"), word("hello")], BubbleLayout::Horizontal), (vec!["help".to_string(), "hello".into()], BubbleLayout::Horizontal));
+        let word = |w: &str| item(w, BubbleKind::Complete { typed: "he".into(), insert: w.into() });
+        let fix = item("hello world", BubbleKind::Rewrite(RewriteRow::Result("hello world".into())));
+        assert_eq!(shown(vec![word("help"), word("hello")], BubbleLayout::Horizontal), (vec![opt("help", None), opt("hello", None)], BubbleLayout::Horizontal));
         assert_eq!(shown(vec![word("help")], BubbleLayout::Vertical).1, BubbleLayout::Vertical);
         assert_eq!(shown(vec![fix, word("hello")], BubbleLayout::Horizontal).1, BubbleLayout::Vertical);
+    }
+    #[test] fn each_option_says_why_it_is_offered() {
+        let words = vec![
+            item("สวัสดี", BubbleKind::Live { typed: "l;ylfu".into(), thai: "สวัสดี".into(), prev: 0 }),
+            item("i dont", BubbleKind::Live { typed: "dont".into(), thai: "dont".into(), prev: 1 }),
+            item("สวัสดี", BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() }),
+            item("i dont", BubbleKind::ConvertPrev { k: 1 }),
+            item("ร้านอาหาร", BubbleKind::Guess { k: 0, typed: Some("i'ko[kg]kp".into()), targets: vec!["ร้านอาหาร".into()] }),
+            item("l;ylfu", BubbleKind::UndoConversion),
+            item("hello", BubbleKind::Typo { word: "hello".into() }),
+            item("ภาษาไทย", BubbleKind::Complete { typed: "ภาษ".into(), insert: "ภาษาไทย".into() }),
+        ];
+        assert_eq!(shown(words, BubbleLayout::Horizontal).0, vec![
+            opt("สวัสดี", TH), opt("i dont", EN), opt("สวัสดี", TH), opt("i dont", EN), opt("ร้านอาหาร", TH), opt("l;ylfu", EN),
+            opt("hello", TYPO), opt("ภาษาไทย", None)]);
+        let rw = |label: &str, r: RewriteRow| item(label, BubbleKind::Rewrite(r));
+        let rows = vec![
+            rw("สวัสดี world", RewriteRow::Fixed(Reason::Layout(InputLang::Thai), "สวัสดี world".into())),
+            rw("is this", RewriteRow::Fixed(Reason::Typo, "is this".into())),
+            rw("Fix typos", RewriteRow::Preset(Preset::Fix, "is ths".into())),
+            rw("Rewriting…", RewriteRow::Busy(ReqId::default())),
+            rw("Is this?", RewriteRow::Result("Is this?".into())),
+            rw("No suggestions", RewriteRow::Notice),
+        ];
+        assert_eq!(shown(rows, BubbleLayout::Horizontal).0, vec![
+            opt("สวัสดี world", TH), opt("is this", TYPO), opt("Fix typos", None), opt("Rewriting…", None), opt("Is this?", None), opt("No suggestions", None)]);
+    }
+    #[test] fn options_run_in_groups_by_reason() {
+        let r = |start, len, reason| Run { start, len, reason };
+        assert_eq!(runs(&[TH, TYPO, TYPO, None, None]), vec![r(0, 1, TH), r(1, 2, TYPO), r(3, 2, None)]);
+        assert_eq!(runs(&[TH, EN]), vec![r(0, 1, TH), r(1, 1, EN)]);
+        assert_eq!(runs(&[]), vec![]);
+    }
+    #[test] fn a_strip_hangs_each_badge_on_its_buttons_corner() {
+        let l = layout(&[40.2, 61.0, 90.0], &[TH, TYPO, TYPO], 1392.0, BubbleLayout::Horizontal);
+        // a box per run, GROUP_GAP_X (8) apart, inside the 10 px shadow margin
+        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 109.0, 40.0), Rect::new(127.0, 10.0, 259.0, 40.0)]);
+        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 101.0, 32.0), Rect::new(131.0, 14.0, 109.0, 32.0), Rect::new(244.0, 14.0, 138.0, 32.0)]);
+        // 6 px above each button and 4 px past it: the second badge ends where the third button starts
+        assert_eq!(l.badges(0), vec![(Reason::Layout(InputLang::Thai), Rect::new(103.0, 8.0, 16.0, 16.0)),
+            (Reason::Typo, Rect::new(228.0, 8.0, 16.0, 16.0)), (Reason::Typo, Rect::new(370.0, 8.0, 16.0, 16.0))]);
+        assert_eq!((l.w, l.h), (396.0, 60.0));
+        // the highlight on the second: the Tab keycap (12 px wider than a digit) moves there, and the first group shrinks
+        assert_eq!(l.cells_at(1), vec![Rect::new(14.0, 14.0, 89.0, 32.0), Rect::new(119.0, 14.0, 121.0, 32.0), Rect::new(244.0, 14.0, 138.0, 32.0)]);
+        assert_eq!(l.surfaces_at(1), vec![Rect::new(10.0, 10.0, 97.0, 40.0), Rect::new(115.0, 10.0, 271.0, 40.0)]);
+        assert_eq!(l.badges(1).iter().map(|(_, b)| b.x).collect::<Vec<_>>(), vec![91.0, 228.0, 370.0]);
+        let window = Rect::new(0.0, 0.0, l.w, l.h);
+        assert!(l.badges(0).iter().chain(&l.badges(2)).all(|(_, b)| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "no badge is clipped");
+        assert_eq!(l.text_x(), 63.0);
+        let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0) };
+        assert_eq!(g.hit(110.0, 9.0), Some(None), "the badge's overhang applies nothing");
+        assert_eq!(g.hit(20.0, 30.0), Some(Some(0)));
+        assert_eq!(g.hit(123.0, 30.0), None, "between the groups: the app's");
+        assert_eq!(g.hit(50.0, 5.0), None, "the shadow margin: the app's");
+        // three 200 px labels fill 792 px as one group; as three, each group's border, padding and gap take 16 px more
+        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 816.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal);
+        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 815.0, BubbleLayout::Horizontal).kind, BubbleLayout::Vertical);
+    }
+    #[test] fn rows_keep_a_badge_column_when_any_row_has_a_badge() {
+        let l = layout(&[100.0, 180.0, 50.0], &[TH, TYPO, None], 1400.0, BubbleLayout::Vertical);
+        // CHROME_W 92 + the badge column (16 + 8) + the widest label, in the 10 px shadow margin; each badge centred
+        // before the key hint
+        assert_eq!((l.w, l.h, l.label_w[0]), (316.0, 124.0, 180.0));
+        assert_eq!(l.badges(1), vec![(Reason::Layout(InputLang::Thai), Rect::new(215.0, 24.0, 16.0, 16.0)), (Reason::Typo, Rect::new(215.0, 54.0, 16.0, 16.0))]);
+        assert_eq!(plain(&[100.0, 180.0, 50.0], 1400.0, BubbleLayout::Vertical).w, 292.0, "no badges, no column");
     }
 }

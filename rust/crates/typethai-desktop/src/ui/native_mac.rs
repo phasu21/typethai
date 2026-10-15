@@ -14,10 +14,6 @@ fn flip(r: NSRect, ph: f64) -> Rect { Rect::new(r.origin.x, ph - (r.origin.y + r
 pub fn monitors_any_thread() -> Vec<Monitor> { if MainThreadMarker::new().is_some() { monitors() } else { MONS.lock().unwrap().clone() } }
 static MONS: std::sync::Mutex<Vec<Monitor>> = std::sync::Mutex::new(Vec::new());
 pub fn monitors() -> Vec<Monitor> { let m = monitors_main(); *MONS.lock().unwrap() = m.clone(); m }
-/// Corner radius of the layer clip (the probe marker is a thin bar).
-pub fn set_radius(n: &Native, r: f64) {
-    unsafe { let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*n.view, layer]; if !layer.is_null() { let _: () = objc2::msg_send![layer, setCornerRadius: r]; } }
-}
 fn monitors_main() -> Vec<Monitor> {
     let screens = NSScreen::screens(mtm()); let ph = primary_h();
     screens.iter().map(|s| Monitor { frame: flip(s.frame(), ph), visible: flip(s.visibleFrame(), ph), size_scale: 1.0, pixel: s.backingScaleFactor() }).collect()
@@ -40,18 +36,13 @@ pub fn prepare(n: &Native) {
     w.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
     w.setOpaque(false);
     w.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
-    // gpui's CAMetalLayer must not be opaque either, or the area outside the rounded panel is filled.
+    // gpui's CAMetalLayer must not be opaque either, or the area around what the bubble draws is filled
     unsafe {
         let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*n.view, layer];
-        if !layer.is_null() {
-            let _: () = objc2::msg_send![layer, setOpaque: false];
-            // gpui's transparent window still fills the area outside the rounded panel, so clip the layer itself to the
-            // panel's corner radius: the corners become truly see-through and the window shadow follows the rounded shape.
-            let _: () = objc2::msg_send![layer, setCornerRadius: crate::bridge::RADIUS];
-            let _: () = objc2::msg_send![layer, setMasksToBounds: true];
-        }
+        if !layer.is_null() { let _: () = objc2::msg_send![layer, setOpaque: false]; }
     }
-    w.setHidesOnDeactivate(false); w.setIgnoresMouseEvents(false); w.setHasShadow(true);
+    // no window server shadow: it would outline the whole window; the bubble draws its own around what it shows
+    w.setHidesOnDeactivate(false); w.setIgnoresMouseEvents(false); w.setHasShadow(false);
     // gpui gives PopUp windows the utility-window animation, which fades every orderOut / orderFront
     w.setAnimationBehavior(objc2_app_kit::NSWindowAnimationBehavior::None);
 }
@@ -60,7 +51,6 @@ pub fn show(n: &Native, r: Rect) {
     n.win.setFrame_display(NSRect::new(NSPoint::new(r.x, ph - r.y - r.h), NSSize::new(r.w, r.h)), true);
     n.view.setFrameSize(NSSize::new(r.w, r.h)); // no-op if AppKit already resized it
     n.win.orderFrontRegardless(); // shows without activating our app or making the panel key
-    n.win.invalidateShadow();
 }
 pub fn hide(n: &Native) { n.win.orderOut(None); }
 

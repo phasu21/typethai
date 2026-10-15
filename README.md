@@ -22,6 +22,9 @@ unless you press a key.
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
+- **Why each option is offered.** A badge marks every fix: the flag of the language a wrong-layout word becomes
+  (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. Finishing the
+  word has no badge. Conversions come first, then typo fixes, then completions, so Tab is the conversion when there is one.
 - **Horizontal or vertical bubble.** By default the options sit side by side in one strip, numbered left to right.
   A bubble with a long option (over about 28 letters) or one too wide for the screen is stacked instead, and so are
   ⌃⌥R selection and AI rewrite rows. **Settings… → Word suggestions → Bubble layout: Vertical** always stacks them.
