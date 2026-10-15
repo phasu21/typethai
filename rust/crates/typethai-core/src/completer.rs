@@ -24,7 +24,8 @@ impl Completer {
             *m.entry(w.to_ascii_lowercase()).or_default() += f;
         }
         let words: Vec<(String, f64)> = m.into_iter().collect();
-        let cum = std::iter::once(0.0).chain(words.iter().scan(0.0, |a, (_, f)| { *a += f; Some(*a) })).collect();
+        let mut cum: Vec<f64> = std::iter::once(0.0).chain(words.iter().scan(0.0, |a, (_, f)| { *a += f; Some(*a) })).collect();
+        cum.shrink_to_fit();
         Completer { trie: Trie::new(&words), words, cum }
     }
     pub fn is_empty(&self) -> bool { self.words.is_empty() }
