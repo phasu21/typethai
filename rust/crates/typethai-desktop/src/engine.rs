@@ -8,7 +8,7 @@ use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, reverse::{RevDecision, Reverse}, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -208,6 +208,9 @@ pub struct Options {
     /// Reverse direction (English typed on the Thai layout): auto-convert at a boundary above `rev_auto`, live bubble
     /// above `rev_live` (calibrated on dev, see README v11).
     pub rev_auto: f64, pub rev_live: f64,
+    /// Lower reverse band, offered only after a pause or at a boundary: a known English word of `REV_SUGGEST_LEN`+ keys
+    /// whose Thai reading is not a dictionary word (`stab` -> หะฟิ scores 0.76).
+    pub rev_suggest: f64,
     /// A word left as Thai is offered together with the next word (in the live bubble, and again after Space)
     /// when that next word is confident and this word's probability with that right context is above `rev_prev`.
     pub rev_prev: f64,
@@ -232,7 +235,7 @@ pub struct Options {
     pub bubble: BubbleLayout,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
-    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
+    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
     complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default, 250 ms, is above the
 /// gap between keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms; the shorter ones
@@ -270,6 +273,11 @@ pub const STRICT_BAND: f64 = 0.9;
 pub const REV_AUTO: f64 = 0.98;
 /// Reverse live-bubble threshold.
 pub const REV_LIVE: f64 = 0.98;
+/// With the conditions on `Options::rev_suggest`: 0 of 9,433 Thai words, prefixes and joins of the model's top 3,000
+/// Thai words, typed on the Thai layout, are offered, against 4,835 of the top 5,000 English words of 4+ letters
+/// (2,165 at `REV_LIVE`).
+pub const REV_SUGGEST: f64 = 0.6;
+pub const REV_SUGGEST_LEN: usize = 4;
 /// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
 pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 /// Tab held this long on its own opens the ⌃⌥R rows, like the hotkey: the selection, or the word before the caret.
@@ -394,10 +402,19 @@ impl Engine {
     }
     /// Reverse P(English intended) for `last` given the reverse-mode words before it on the line.
     pub fn rev_prob(&self, last: &str) -> (f64, bool) {
-        let Some(r) = &self.rev else { return (0.0, false) };
+        self.rev_score(last).map_or((0.0, false), |(p, d)| (p, d.convertible))
+    }
+    fn rev_score(&self, last: &str) -> Option<(f64, RevDecision)> {
+        let r = self.rev.as_ref()?;
         let tail: Vec<&str> = self.line[self.line_start.min(self.line.len())..].iter().rev().take_while(|c| c.rev).take(self.opts.context_words).map(|c| c.typed.as_str()).collect::<Vec<_>>().into_iter().rev().chain([last]).collect();
-        let ds = r.decide_line(&self.det, &tail); let ok = ds.last().is_some_and(|d| d.convertible);
-        (*r.line_probs(&ds).last().unwrap_or(&0.0), ok)
+        let mut ds = r.decide_line(&self.det, &tail); let p = *r.line_probs(&ds).last()?;
+        Some((p, ds.pop()?))
+    }
+    /// The `rev_suggest` band (see there), for a pause or a boundary.
+    fn rev_suggestable(&self, typed: &str) -> bool {
+        if self.blocked(typed) || typed.chars().count() < REV_SUGGEST_LEN || !typed.chars().all(|c| c.is_ascii_alphabetic()) { return false }
+        if !self.en_comp.as_ref().is_some_and(|c| c.has(typed)) { return false }
+        self.rev_score(typed).is_some_and(|(p, d)| d.convertible && !d.th_word && p > self.opts.rev_suggest)
     }
     pub fn bubble_visible(&self) -> bool { !self.bubble.is_empty() }
     pub fn selected(&self) -> usize { self.sel.idx }
@@ -773,10 +790,11 @@ impl Engine {
             }
             if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + self.opts.tab_hold }))) }
         }
-        if self.opts.complete != CompleteMode::Pause { return acts }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
         self.last_key = None;
-        self.update_completions(true, &[], &mut acts);
+        // English on the Thai layout below the live bar: its reverse row, which also keeps Thai completions away
+        if self.opts.live && self.thai_active && !self.live_visible() && self.rev_suggestable(&self.word) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
+        if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
         acts
     }
     /// The completion rows on the bubble now.
@@ -1036,11 +1054,12 @@ impl Engine {
         }
         let (p, ok) = self.rev_prob(&typed);
         let mut with_prev = 0usize;
-        if ok && p > self.opts.rev_auto {
+        let sure = ok && p > self.opts.rev_auto;
+        if sure || self.rev_suggestable(&typed) {
             // right context: up to 3 preceding words left as Thai (e.g. "i" = ร) are re-scored now that
             // this word follows them, and offered together with it if they clear `rev_prev`
             let k = self.rev_prev_count(&typed);
-            if self.opts.auto_convert {
+            if self.opts.auto_convert && sure {
                 // legacy (--auto-convert): flip at the boundary
                 swallow = true; converted = Some(typed.clone()); with_prev = k;
                 let start = self.line.len() - k;
@@ -3111,5 +3130,23 @@ mod tests {
         e.reset(); typ(&mut e, "hel"); assert_eq!(idle(&mut e, 600), vec![], "no English frequencies: no English completion");
         e.reset(); typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "Thai still completes");
+    }
+    #[test] fn english_on_the_thai_layout_below_the_live_bar_is_offered_after_a_pause() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.thai_comp = Some(Completer::new([("ฟิวเจอร์".to_string(), 9.0), ("ฟิต".to_string(), 5.0)]));
+        e.en_comp = Some(Completer::new([("stab".to_string(), 3.0), ("stable".to_string(), 9.0)]));
+        typ_th(&mut e, "หะฟิ");
+        assert!(!e.bubble_visible(), "stab scores under the live bar while typing");
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["stab"], "the English word, not ฟิวเจอร์");
+        assert_eq!(replaced(&[e.on_key(Key::Tab)]), ["stab"]);
+        e.reset(); typ_th(&mut e, "หะฟิ ");
+        assert_eq!(labels(&e), ["stab"], "offered after Space too");
+        e.reset(); typ_th(&mut e, "ฟิ"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["ฟิวเจอร์", "ฟิต"], "Thai still completes");
+        e.reset(); e.en_comp = Some(Completer::new([("stable".to_string(), 9.0)]));
+        typ_th(&mut e, "หะฟิ"); idle(&mut e, 600);
+        assert!(!labels(&e).contains(&"stab".to_string()), "only words the English list knows");
     }
 }
