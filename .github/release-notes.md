@@ -1,5 +1,9 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.2.1**
+- macOS: typeThai could quit on its own after a while. It read the keyboard input source from its key-capture
+  thread, and macOS 26 stops apps that do that. Input-source reads and switches now happen on the main thread.
+
 **New in 0.2.0**
 - **AI rewrite (optional).** Select text and press **⌃⌥R** (Ctrl+Alt+R on Windows), then pick *Fix typos* or
   *Translate TH↔EN*. Tab shows the result, and Tab again replaces the selection. It uses your own API key with
