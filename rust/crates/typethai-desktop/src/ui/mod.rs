@@ -198,6 +198,7 @@ pub fn run(rx: Receiver<UiMsg>) {
         Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
         None => {}
     }
+                    #[cfg(target_os = "macos")] super::platform::macos::sync_input_source();
                     if stop || quit_at.is_some_and(|t| Instant::now() > t) { cx.quit(); }
                 });
                 if stop { break }

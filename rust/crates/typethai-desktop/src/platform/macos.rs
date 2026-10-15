@@ -5,6 +5,7 @@
 use crate::{app::{hotkey_for, App}, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
 use core_foundation::base::CFRange;
 use std::sync::mpsc::Sender;
+use std::sync::atomic::Ordering;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -94,6 +95,11 @@ unsafe fn tis_sources() -> Vec<(Source, CFType)> {
     }).collect()
 }
 pub fn input_sources() -> Vec<Source> { unsafe { tis_sources().into_iter().map(|(s, _)| s).collect() } }
+/// Main thread only (see `bridge::INPUT_THAI`): make a switch the tap asked for, then publish the current source.
+pub fn sync_input_source() {
+    let req = bridge::REQ_SWITCH_INPUT.lock().unwrap().take();
+    unsafe { if let Some(lang) = req { switch_input(lang) } bridge::INPUT_THAI.store(input_source_is_thai(), Ordering::SeqCst); }
+}
 /// Switch to the installed source fitting `lang`, unless the current one already fits. Warns once per language if none.
 unsafe fn switch_input(lang: InputLang) {
     let cur = TISCopyCurrentKeyboardInputSource();
@@ -254,7 +260,7 @@ fn arm_caret_follow(st: &mut State) {
 fn run_actions(st: &mut State, acts: Vec<Action>) {
     for a in acts { match a {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
-        Action::SwitchInput(l) => unsafe { switch_input(l) },
+        Action::SwitchInput(l) => *bridge::REQ_SWITCH_INPUT.lock().unwrap() = Some(l),
         Action::Select(i) => send(UiMsg::Select(i)),
         Action::ShowBubble(items) => {
             send(UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), anchor: unsafe { anchor() } });
@@ -347,7 +353,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up.
             // The active input source decides the direction: Thai active -> reverse detector (English typed on Kedmanee),
             // or bypass entirely when the reverse model is off (--no-reverse). Keys always arrive as US-QWERTY chars.
-            let thai = unsafe { input_source_is_thai() };
+            let thai = bridge::INPUT_THAI.load(Ordering::SeqCst);
             st.app.engine.set_thai_active(thai);
             if !matches!(key, Key::Hotkey(_)) && !st.app.engine.is_bubble_key(&key) {
                 let first = matches!(key, Key::Char(_)) && st.app.engine.buffer().is_empty();
@@ -436,6 +442,7 @@ pub fn run(app: App) {
             eprintln!("typeThai needs Accessibility permission: System Settings > Privacy & Security > Accessibility. Grant it and relaunch.");
         }
     }
+    sync_input_source();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("typethai-capture".into()).spawn(move || capture_thread(app, tx)).expect("capture thread");
     crate::ui::run(rx); // gpui owns the main thread / NSApplication run loop

@@ -86,6 +86,10 @@ pub fn set_geom(g: Option<Geom>) { *GEOM.lock().unwrap() = g; }
 /// Tray -> capture thread requests (polled by a timer on the capture thread).
 pub static REQ_TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
 pub static REQ_QUIT: AtomicBool = AtomicBool::new(false);
+/// macOS input source, owned by the main thread: on macOS 26 HIToolbox traps when TIS is called off the main queue, and
+/// the event tap runs on its own thread. The tap reads the last answer and leaves switches here for the UI loop.
+pub static INPUT_THAI: AtomicBool = AtomicBool::new(false);
+pub static REQ_SWITCH_INPUT: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
 /// `--settings`: open the Settings window once the UI is up.
 pub static REQ_OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 /// Settings window wants a fresh snapshot. Commands, if any, are applied first.
