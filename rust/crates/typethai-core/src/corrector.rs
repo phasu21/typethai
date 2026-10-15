@@ -1,49 +1,9 @@
 //! Word-level correction suggestions (mirrors src/corrector.ts).
-use crate::keymap::{EN_SHIFTED, EN_UNSHIFTED, TH_SHIFTED, TH_UNSHIFTED};
+use crate::keymap::{adjacent, en_pos as pos_map_en, thai_pos as pos_map};
 use crate::{ngram::Ngram, normalize::normalize_thai};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
-const ROWS: [&str; 4] = ["`1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./"];
-#[derive(Clone, Copy)] struct Pos { r: i32, c: i32, shift: bool }
-fn pos_map() -> &'static HashMap<char, Pos> {
-    static M: OnceLock<HashMap<char, Pos>> = OnceLock::new();
-    M.get_or_init(|| {
-        let mut m = HashMap::new();
-        let en: Vec<char> = EN_UNSHIFTED.chars().collect();
-        let th: Vec<char> = TH_UNSHIFTED.chars().collect(); let ths: Vec<char> = TH_SHIFTED.chars().collect();
-        let _ = EN_SHIFTED;
-        for (i, k) in en.iter().enumerate() {
-            let r = ROWS.iter().position(|row| row.contains(*k)).unwrap();
-            let c = ROWS[r].chars().position(|x| x == *k).unwrap();
-            m.entry(th[i]).or_insert(Pos { r: r as i32, c: c as i32, shift: false });
-            m.entry(ths[i]).or_insert(Pos { r: r as i32, c: c as i32, shift: true });
-        }
-        m
-    })
-}
-fn pos_map_en() -> &'static HashMap<char, Pos> {
-    static M: OnceLock<HashMap<char, Pos>> = OnceLock::new();
-    M.get_or_init(|| {
-        let mut m = HashMap::new();
-        let en: Vec<char> = EN_UNSHIFTED.chars().collect();
-        let ens: Vec<char> = EN_SHIFTED.chars().collect();
-        for (i, k) in en.iter().enumerate() {
-            let r = ROWS.iter().position(|row| row.contains(*k)).unwrap();
-            let c = ROWS[r].chars().position(|x| x == *k).unwrap();
-            m.entry(*k).or_insert(Pos { r: r as i32, c: c as i32, shift: false });
-            if let Some(sk) = ens.get(i) { m.entry(*sk).or_insert(Pos { r: r as i32, c: c as i32, shift: true }); }
-        }
-        m
-    })
-}
-fn adjacent(a: Pos, b: Pos) -> bool {
-    if a.r == b.r { return (a.c - b.c).abs() == 1 }
-    if b.r == a.r - 1 { return b.c == a.c || b.c == a.c + 1 }
-    if b.r == a.r + 1 { return b.c == a.c || b.c == a.c - 1 }
-    false
-}
 #[derive(Clone, Copy)]
 pub struct Costs { pub shift: f64, pub adj: f64, pub adj_shift: f64, pub sub: f64, pub dup: f64, pub ins_adj: f64, pub ins: f64, pub del: f64, pub trans: f64 }
 pub const DEFAULT_COSTS: Costs = Costs { shift: 0.3, adj: 0.5, adj_shift: 0.8, sub: 1.0, dup: 0.4, ins_adj: 0.7, ins: 1.0, del: 0.8, trans: 0.5 };

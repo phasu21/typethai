@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use typethai_core::{completer::{thai_tail, Bigrams, Completer, Context, WordMemory, WORD_CAP}, dict::Dict, ModelFiles};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Context, WordMemory, WORD_CAP}, dict::Dict, slip::Slips, ModelFiles};
 /// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
 fn model() -> Option<ModelFiles> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
@@ -30,11 +30,15 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 #[test] fn thai_tail_finds_the_incomplete_word() {
     let dict = Dict::new(["ฉัน", "ชอบ", "ภาษา", "ภาษี"].map(String::from));
     let c = Completer::new([("ภาษา".to_string(), 10.0), ("ภาษี".to_string(), 5.0)]);
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1), Some(6));
-    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1), Some(6));
-    assert_eq!(thai_tail("ภาษ", &dict, &c, 1), Some(0));
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4), None);
-    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1), None);
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, None), Some(6));
+    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1, None), Some(6));
+    assert_eq!(thai_tail("ภาษ", &dict, &c, 1, None), Some(0));
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4, None), None);
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, None), None);
+    let s = Slips::default();
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, Some(&s)), Some(6), "a key typed twice");
+    assert_eq!(c.complete("บภาษ", 2, slipping()).words, ["ภาษา", "ภาษี"]);
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, Some(&s)), Some(6), "keys typed right are read as typed");
     assert_eq!(words(&c, &"ฉันชอบภาษ".chars().skip(6).collect::<String>(), 3), ["ภาษา", "ภาษี"]);
 }
 #[test] fn thai_completer_ranks_by_corpus_freq() {
@@ -65,7 +69,7 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 #[test] fn the_previous_word_reorders_by_bigram() {
     let c = Completer::new([("but", 50.0), ("be", 30.0), ("by", 20.0)].map(|(w, f)| (w.to_string(), f)));
     let b = Bigrams::new([("to", "be", 10.0), ("to", "buy", 2.0)].map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
-    let after = |prev| c.complete("b", 3, Context { prev, bigrams: Some(&b), memory: None });
+    let after = |prev| c.complete("b", 3, Context { prev, bigrams: Some(&b), ..Context::default() });
     assert_eq!(words(&c, "b", 3), ["but", "be", "by"]);
     assert_eq!(after(Some("To")).words, ["be", "but", "buy"]);
     assert_eq!(after(Some("to")).confidence, (1.0 * 30.0 / 100.0 + 2.0 * 10.0 / 12.0) / 3.0);
@@ -94,7 +98,7 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
     let mut m = WordMemory::default();
     for _ in 0..6 { m.learn(None, "helmet") }
     m.learn(Some("say"), "hello"); m.learn(Some("say"), "hello");
-    let after = |prev| c.complete("hel", 3, Context { prev, memory: Some(&m), bigrams: None }).words;
+    let after = |prev| c.complete("hel", 3, Context { prev, memory: Some(&m), ..Context::default() }).words;
     assert_eq!(after(None), ["helmet", "help", "hello"]);
     assert_eq!(after(Some("say")), ["hello", "helmet", "help"]);
 }
@@ -119,4 +123,40 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
     assert_eq!(dict.segment("ฉันชอบภาษาไทยxyzภาษ"), ["ฉัน", "ชอบ", "ภาษาไทย", "xyzภาษ"]);
     assert_eq!(dict.segment("ๆชอบมาก"), ["ๆ", "ชอบ", "มาก"]);
     assert_eq!(dict.segment(""), Vec::<&str>::new());
+}
+fn slipping<'a>() -> Context<'a> { Context { slips: Some(Slips { rate: 0.01 }), ..Context::default() } }
+#[test] fn a_slip_reaches_the_word_meant() {
+    let c = Completer::new([("candle", 6692.0), ("cancel", 12681.0), ("handel", 264.0)].map(|(w, f)| (w.to_string(), f)));
+    assert_eq!(c.complete("candel", 3, Context::default()), Default::default(), "no word starts with the keys as typed");
+    let got = c.complete("candel", 3, slipping());
+    assert_eq!(got.words, ["candle", "cancel"], "a swap is likelier than a neighbouring key; handel, a far key away, holds under 1%");
+    // candle is reached twice: swapped `el`, and `candl` with an extra `e` (next to `d`)
+    let (swap, near, far) = (6692.0 * 0.01 * (0.15 + 0.08 / 8.0), 12681.0 * 0.01 * 0.30 / 6.0, 264.0 * 0.01 * 0.05 / 30.0);
+    assert!((got.confidence - swap / (swap + near + far)).abs() < 1e-12, "{}", got.confidence);
+    assert_eq!(c.complete("Candel", 1, slipping()).words, ["Candle"]);
+    assert!(c.extends_slipped("candel", &Slips::default()) && !c.extends_slipped("xyzzy", &Slips::default()));
+}
+#[test] fn keys_typed_right_keep_their_extensions_on_top() {
+    let c = en();
+    assert_eq!(c.complete("hel", 3, slipping()).words, ["help", "hello", "helmet"]);
+    assert_eq!(c.complete("hrl", 3, slipping()).words, ["help", "hello", "helmet"], "r is next to e");
+    assert_eq!(c.complete("he", 3, slipping()).words, ["help", "hello", "helmet"], "two keys are read as typed");
+}
+#[test] fn the_previous_word_picks_the_reading() {
+    let c = Completer::new([("candle", 100.0), ("cancel", 100.0)].map(|(w, f)| (w.to_string(), f)));
+    let b = Bigrams::new([("lit", "candle", 10.0), ("to", "cancel", 10.0)].map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
+    let after = |prev| c.complete("candel", 2, Context { prev: Some(prev), bigrams: Some(&b), ..slipping() }).words;
+    assert_eq!(after("lit"), ["candle", "cancel"]);
+    assert_eq!(after("to"), ["cancel", "candle"]);
+    assert_eq!(after("of"), ["candle", "cancel"], "no pairs after this word: the likelier slip wins");
+}
+#[test] fn a_finished_word_is_corrected_by_frequency_and_slip() {
+    let c = Completer::new([("candle", 6692.0), ("cancel", 12681.0), ("handel", 264.0), ("dandle", 50.0)].map(|(w, f)| (w.to_string(), f)));
+    let guesses = ["cancel", "candle", "candela", "dandle", "Handel"].map(String::from);
+    assert_eq!(c.correct("candel", 5, slipping(), &guesses), ["candle", "cancel", "Handel", "dandle", "candela"], "dandle is two slips away; candela is not a known word");
+    assert_eq!(c.correct("candel", 5, slipping(), &[]), ["candle", "cancel", "handel"], "the words one slip away");
+    assert_eq!(c.correct("Candel", 1, slipping(), &[]), ["Candle"]);
+    assert_eq!(c.correct("candle", 2, slipping(), &guesses), ["dandle", "cancel"], "the typed word is never offered; dandle is one slip from it, cancel two");
+    let b = Bigrams::new([("to", "cancel", 10.0)].map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
+    assert_eq!(c.correct("candel", 2, Context { prev: Some("to"), bigrams: Some(&b), ..slipping() }, &guesses), ["cancel", "candle"]);
 }
