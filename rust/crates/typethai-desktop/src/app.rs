@@ -4,7 +4,7 @@ use crate::prefs::{self, Prefs};
 use std::path::PathBuf;
 use typethai_core::{personal::{PersonalModel, DEFAULT_PERSONAL}, ModelFiles};
 
-pub struct Cli { pub model: PathBuf, pub state: PathBuf, pub switch_input: bool, pub reverse: bool, pub list_sources: bool, pub eval_live: Option<String>, pub eval_split: String, pub eval_reverse: bool, pub no_typo: bool, pub simulate: bool, pub auto_convert: bool }
+pub struct Cli { pub model: PathBuf, pub state: PathBuf, pub switch_input: bool, pub reverse: bool, pub list_sources: bool, pub eval_live: Option<String>, pub eval_split: String, pub eval_reverse: bool, pub no_typo: bool, pub simulate: bool, pub auto_convert: bool, pub open_settings: bool }
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)] { std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into()).join("typethai") }
     #[cfg(target_os = "macos")] { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into()).join("Library/Application Support/typethai") }
@@ -18,13 +18,13 @@ fn default_model() -> PathBuf {
 }
 impl Cli {
     pub fn parse() -> Cli {
-        let mut c = Cli { model: default_model(), state: config_dir().join("personal.json"), switch_input: true, reverse: true, list_sources: false, eval_live: None, eval_split: "dev".into(), eval_reverse: false, no_typo: false, simulate: false, auto_convert: false };
+        let mut c = Cli { model: default_model(), state: config_dir().join("personal.json"), switch_input: true, reverse: true, list_sources: false, eval_live: None, eval_split: "dev".into(), eval_reverse: false, no_typo: false, simulate: false, auto_convert: false, open_settings: false };
         let mut it = std::env::args().skip(1);
         while let Some(a) = it.next() { match a.as_str() {
             "--model" => c.model = it.next().expect("--model PATH").into(), "--state" => c.state = it.next().expect("--state PATH").into(),
             "--switch-layout" => c.switch_input = true, "--no-switch-input" => c.switch_input = false, "--no-reverse" => c.reverse = false, "--list-input-sources" => c.list_sources = true,
-            "--eval-live" => c.eval_live = it.next(), "--reverse" => c.eval_reverse = true, "--split" => c.eval_split = it.next().expect("--split dev|test"), "--no-typo" => c.no_typo = true, "--simulate" => c.simulate = true, "--auto-convert" => c.auto_convert = true,
-            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable)."); std::process::exit(0) }
+            "--eval-live" => c.eval_live = it.next(), "--reverse" => c.eval_reverse = true, "--split" => c.eval_split = it.next().expect("--split dev|test"), "--no-typo" => c.no_typo = true, "--simulate" => c.simulate = true, "--auto-convert" => c.auto_convert = true, "--settings" => c.open_settings = true,
+            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--settings] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable).\n--settings opens the Settings window at launch, for when the tray icon is hidden."); std::process::exit(0) }
             x => { eprintln!("unknown arg {x}"); std::process::exit(2) }
         } }
         c

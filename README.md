@@ -71,7 +71,7 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
 
-The menu-bar icon also has **Settings…**. From there you can list words that stay as you type them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
+The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From there you can list words that stay as you type them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
 with the defaults) and press **Save key**. The key is kept in the macOS Keychain or Windows Credential Manager, never in

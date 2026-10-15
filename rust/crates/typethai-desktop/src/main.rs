@@ -47,6 +47,7 @@ fn main() {
     }
     let cli = app::Cli::parse();
     if cli.list_sources { platform::print_input_sources(); return }
+    bridge::REQ_OPEN_SETTINGS.store(cli.open_settings, std::sync::atomic::Ordering::SeqCst);
     if let Some(dir) = &cli.eval_live { if cli.eval_reverse { evallive::run_reverse(&cli, dir, &cli.eval_split) } else { evallive::run(&cli, dir, &cli.eval_split) } return }
     let app = match app::App::load(&cli) { Ok(a) => a, Err(e) => { eprintln!("typethai: {e}"); std::process::exit(1) } };
     if cli.simulate { platform::sim::run(app) } else { platform::run(app) }

@@ -190,6 +190,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
                     } }
                     ui.reconcile(cx);
+                    if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
                     match tray.as_ref().and_then(|t| t.poll()) {
         Some(super::platform::tray::TrayCmd::TogglePause) => bridge::REQ_TOGGLE_PAUSE.store(true, std::sync::atomic::Ordering::SeqCst),
         Some(super::platform::tray::TrayCmd::CheckUpdate) => { std::thread::spawn(|| { crate::platform::check_for_updates(); }); }
