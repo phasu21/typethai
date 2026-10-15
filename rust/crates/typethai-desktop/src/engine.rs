@@ -2,6 +2,7 @@
 //! The platform layer feeds `Key`s (already mapped to the US-QWERTY character the key would produce), and executes the
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
+use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use typethai_core::{reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, TokenDecision};
 
@@ -14,7 +15,9 @@ pub trait Speller {
     fn guesses(&self, word: &str) -> Option<Vec<String>>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause }
+pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause,
+    /// Ctrl+Opt/Alt+R: rewrite the selected text.
+    Rewrite }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     /// A printable key, as the US-QWERTY char it produces (e.g. `;` for the ว key).
@@ -58,6 +61,8 @@ pub enum Action {
     Select(usize),
     /// Switch the OS input source to fit the text just inserted (platform: no-op if already that kind).
     SwitchInput(InputLang),
+    /// Hand to the rewrite worker. Answers come back through `Engine::on_reply`.
+    Rewrite(Job),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct BubbleItem { pub label: String, pub kind: BubbleKind }
@@ -71,7 +76,21 @@ pub enum BubbleKind {
     ConvertPrev { k: usize },
     /// Guess (double Tab / hotkey): replace the last `k` committed words, and the buffer `typed` when it is Some, with
     /// `targets` (one per word, in order).
-    Guess { k: usize, typed: Option<String>, targets: Vec<String> } }
+    Guess { k: usize, typed: Option<String>, targets: Vec<String> },
+    /// While rewrite rows are on the bubble they are the rewrite session's whole state.
+    Rewrite(RewriteRow) }
+/// The visible rewrite phases; a bubble holds rows of one phase.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RewriteRow {
+    /// Choosing: one row per `Preset::ALL`, each carrying the captured selection.
+    Preset(Preset, String),
+    /// Pending: "Rewriting…" until `Reply::Rewritten` for this id.
+    Busy(ReqId),
+    /// Result: Tab pastes this full text (the label may be a preview).
+    Result(String),
+    /// No selection / no key / failure; the label is the message.
+    Notice,
+}
 /// What the key handler should do with the original key event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome { pub swallow: bool, pub actions: Vec<Action> }
@@ -146,11 +165,16 @@ pub struct Engine {
     pub never: BTreeSet<String>,
     /// English spelling suggestions for words left as typed; None disables them.
     pub speller: Option<Box<dyn Speller + Send>>,
+    /// prefs.json "rewrite". The API key is not here; only the rewrite worker reads it.
+    pub rewrite: rewrite::Config,
+    /// The selection read in flight. Only Some while the bubble is empty (the one rewrite phase with no rows).
+    capturing: Option<ReqId>,
+    last_req: ReqId,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default() }
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -195,9 +219,9 @@ impl Engine {
     /// Keys the platform must route to the engine even when it would otherwise bypass it (Thai layout active, secure
     /// field check): the bubble controls, while the bubble is up.
     pub fn is_bubble_key(&self, k: &Key) -> bool { self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc) }
-    /// Focus change, mouse click, secure field, layout change: forget everything.
+    /// Focus change, mouse click, secure field, layout change, any non-bubble key during a rewrite: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
-        self.word.clear(); self.tab_pending = false; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
+        self.word.clear(); self.tab_pending = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
     fn decisions(&self, last: &str) -> Vec<TokenDecision> {
@@ -252,6 +276,7 @@ impl Engine {
     fn on_key_inner(&mut self, k: Key) -> Outcome {
         if let Key::Hotkey(Hotkey::TogglePause) = k { self.paused = !self.paused; let a = self.reset(); return Outcome { swallow: true, actions: a } }
         if self.paused { return Outcome::pass() }
+        if self.rewriting() && !self.rewrite_keeps(&k) { let mut a = self.reset(); let mut o = self.on_key_inner(k); a.append(&mut o.actions); o.actions = a; return o }
         match k {
             Key::Char(c) => {
                 self.tab_pending = false;
@@ -303,10 +328,11 @@ impl Engine {
             SettingsCmd::RemoveNever(w) => self.remove_never(&w),
             SettingsCmd::Forget(w) => self.forget_learned(&w),
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
+            SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -664,6 +690,7 @@ impl Engine {
                     BubbleKind::Convert { .. } => return self.on_hotkey(Hotkey::ForceConvert),
                     BubbleKind::ConvertPrev { k } => self.flip_prev(k, &mut acts),
                     BubbleKind::Guess { k, typed, targets } => self.apply_guess(k, typed, targets, &mut acts),
+                    BubbleKind::Rewrite(row) => return self.accept_rewrite(row),
                     BubbleKind::Typo { word } => if let Some((n, c)) = self.last_on_screen() {
                         let c = c.clone();
                         acts.push(Action::Replace { delete: n, insert: format!("{word}{}", c.after()), then: None });
@@ -673,11 +700,67 @@ impl Engine {
                 self.show(vec![], &mut acts);
             }
             Hotkey::Dismiss => { self.show(vec![], &mut acts); return Outcome { swallow: false, actions: acts } }
+            Hotkey::Rewrite => return self.start_rewrite(),
             Hotkey::TogglePause => unreachable!(),
         }
         Outcome { swallow: true, actions: acts }
     }
+    fn rewriting(&self) -> bool { self.capturing.is_some() || matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(_), .. })) }
+    /// Keys a rewrite session survives. Anything else ends it first; unlike suggestions, Space/Enter/Backspace too,
+    /// because the selection the rows refer to has just been edited.
+    fn rewrite_keeps(&self, k: &Key) -> bool {
+        match k {
+            // holding the hotkey autorepeats: while capturing that is a no-op, not a restart
+            Key::Hotkey(Hotkey::Rewrite) => self.capturing.is_some(),
+            Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss) => self.bubble_visible(),
+            _ => false,
+        }
+    }
+    fn mint(&mut self) -> ReqId { self.last_req = self.last_req.next(); self.last_req }
+    fn start_rewrite(&mut self) -> Outcome {
+        if !self.rewrite.enabled { return Outcome::pass() }
+        if self.capturing.is_some() { return Outcome { swallow: true, actions: vec![] } }
+        let mut a = self.reset(); let id = self.mint(); self.capturing = Some(id);
+        a.push(Action::Rewrite(Job::Capture(id)));
+        Outcome { swallow: true, actions: a }
+    }
+    fn accept_rewrite(&mut self, r: RewriteRow) -> Outcome {
+        let mut a = vec![];
+        match r {
+            RewriteRow::Preset(preset, text) => {
+                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a);
+                a.push(Action::Rewrite(Job::Run(Run { req: id, preset, text, cfg: self.rewrite.clone() })));
+            }
+            RewriteRow::Busy(_) => {}
+            RewriteRow::Result(text) => { self.show(vec![], &mut a); a.push(Action::Rewrite(Job::Paste(text))) }
+            RewriteRow::Notice => self.show(vec![], &mut a),
+        }
+        Outcome { swallow: true, actions: a }
+    }
+    /// A rewrite worker answer. Stale answers (cancelled or superseded) change nothing.
+    pub fn on_reply(&mut self, r: Reply) -> Vec<Action> {
+        let mut a = vec![];
+        match r {
+            Reply::Captured(id, c) if self.capturing == Some(id) => {
+                self.capturing = None;
+                let rows = match c {
+                    Captured::Text(t) if !t.trim().is_empty() => Preset::ALL.map(|p| row(p.label(), RewriteRow::Preset(p, t.clone()))).to_vec(),
+                    Captured::Text(_) | Captured::NoSelection => vec![row(rewrite::NO_SELECTION, RewriteRow::Notice)],
+                    Captured::NoKey => vec![row(rewrite::NO_KEY, RewriteRow::Notice)],
+                    Captured::Secure => vec![],
+                };
+                self.show(rows, &mut a);
+            }
+            Reply::Rewritten(id, res) if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(RewriteRow::Busy(b)), .. }) if *b == id) => {
+                let r = match res { Ok(t) => row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Result(t)), Err(f) => row(&f.message(), RewriteRow::Notice) };
+                self.show(vec![r], &mut a);
+            }
+            _ => {}
+        }
+        a
+    }
 }
+fn row(label: &str, r: RewriteRow) -> BubbleItem { BubbleItem { label: label.to_string(), kind: BubbleKind::Rewrite(r) } }
 
 #[cfg(test)]
 mod tests {
@@ -1245,5 +1328,126 @@ mod tests {
         e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
         typ(&mut e, "mu ");
         assert_eq!(labels(&e), ["ที", "my"]);
+    }
+    use crate::rewrite::{Captured, Failure, Job, Preset, Reply, ReqId, Run};
+    /// Ctrl+Opt+R: swallowed, hands out a capture job.
+    fn start(e: &mut Engine) -> ReqId {
+        let o = e.on_key(Key::Hotkey(Hotkey::Rewrite)); assert!(o.swallow);
+        match o.actions.last() { Some(Action::Rewrite(Job::Capture(id))) => *id, a => panic!("expected a capture job, got {a:?}") }
+    }
+    fn job_run(o: &Outcome) -> Run { match o.actions.last() { Some(Action::Rewrite(Job::Run(r))) => r.clone(), a => panic!("expected a run job, got {a:?}") } }
+    /// Start, capture `text` and pick the selected preset with Tab.
+    fn pending(e: &mut Engine, text: &str) -> Run {
+        let id = start(e); e.on_reply(Reply::Captured(id, Captured::Text(text.into())));
+        let o = e.on_key(Key::Tab); assert!(o.swallow); job_run(&o)
+    }
+    #[test] fn rewrite_fix_then_paste() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e);
+        e.on_reply(Reply::Captured(id, Captured::Text("helo wrld".into())));
+        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+        let o = e.on_key(Key::Tab); let run = job_run(&o);
+        assert_eq!((run.preset, run.text.as_str(), run.cfg.model.as_str()), (Preset::Fix, "helo wrld", "google/gemma-4-26b-a4b-it"));
+        assert_eq!(labels(&e), ["Rewriting…"]);
+        e.on_reply(Reply::Rewritten(run.req, Ok("hello world".into())));
+        assert_eq!(labels(&e), ["hello world"]);
+        let o = e.on_key(Key::Tab); assert!(o.swallow);
+        assert_eq!(o.actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste("hello world".into()))]);
+        assert!(!e.bubble_visible());
+        assert!(!e.on_key(Key::Tab).swallow, "the session is over: Tab is a tab again");
+    }
+    #[test] fn rewrite_select_next_or_click_picks_translate() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("สวัสดี".into())));
+        assert_eq!(e.on_key(Key::SelectNext).actions, vec![Action::Select(1)]);
+        assert_eq!(job_run(&e.on_key(Key::Tab)).preset, Preset::Translate);
+        e.on_key(Key::Esc);
+        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("สวัสดี".into())));
+        let run = job_run(&e.on_key(Key::Hotkey(Hotkey::Accept(1))));
+        assert_eq!((run.preset, run.text.as_str()), (Preset::Translate, "สวัสดี"));
+    }
+    #[test] fn rewrite_typing_cancels_pending_and_late_result_is_ignored() {
+        let Some(mut e) = engine() else { return };
+        let run = pending(&mut e, "helo");
+        let o = e.on_key(Key::Char('a'));
+        assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
+        assert_eq!(e.on_reply(Reply::Rewritten(run.req, Ok("hello".into()))), vec![]);
+        assert!(!e.bubble_visible());
+    }
+    #[test] fn rewrite_space_cancels_choosing() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e); e.on_reply(Reply::Captured(id, Captured::Text("helo".into())));
+        let o = e.on_key(Key::Boundary(Boundary::Space));
+        assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
+    }
+    #[test] fn rewrite_esc_while_capturing_drops_capture() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e);
+        let o = e.on_key(Key::Esc); assert!(!o.swallow, "nothing on screen to dismiss: Esc reaches the app");
+        assert_eq!(e.on_reply(Reply::Captured(id, Captured::Text("helo".into()))), vec![]);
+        assert!(!e.bubble_visible());
+    }
+    #[test] fn rewrite_newer_request_wins() {
+        let Some(mut e) = engine() else { return };
+        let old = pending(&mut e, "one");
+        e.on_key(Key::Esc);
+        let id = start(&mut e);
+        e.on_reply(Reply::Captured(id, Captured::Text("two".into())));
+        assert_eq!(e.on_reply(Reply::Rewritten(old.req, Ok("ONE".into()))), vec![]);
+        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+        let new = job_run(&e.on_key(Key::Tab));
+        assert_eq!(e.on_reply(Reply::Rewritten(old.req, Ok("ONE".into()))), vec![], "a reply for the earlier run never matches the newer one");
+        e.on_reply(Reply::Rewritten(new.req, Ok("TWO".into())));
+        assert_eq!(labels(&e), ["TWO"]);
+    }
+    #[test] fn rewrite_failure_shows_notice_and_tab_dismisses() {
+        let Some(mut e) = engine() else { return };
+        let run = pending(&mut e, "helo");
+        e.on_reply(Reply::Rewritten(run.req, Err(Failure::Rejected)));
+        assert_eq!(labels(&e), ["The API key was rejected"]);
+        let o = e.on_key(Key::Tab); assert!(o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
+    }
+    #[test] fn rewrite_no_selection_and_no_key_notices() {
+        let Some(mut e) = engine() else { return };
+        for (c, want) in [(Captured::NoSelection, "No selected text found"), (Captured::Text(" \n ".into()), "No selected text found"), (Captured::NoKey, "Add an API key in Settings")] {
+            let id = start(&mut e); e.on_reply(Reply::Captured(id, c));
+            assert_eq!(labels(&e), [want]);
+            e.on_key(Key::Esc);
+        }
+    }
+    #[test] fn rewrite_secure_refuses_silently() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e);
+        assert_eq!(e.on_reply(Reply::Captured(id, Captured::Secure)), vec![]);
+        assert!(!e.on_key(Key::Tab).swallow, "no session left");
+    }
+    #[test] fn rewrite_disabled_or_paused_passes_hotkey() {
+        let Some(mut e) = engine() else { return };
+        e.rewrite.enabled = false;
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: false, actions: vec![] });
+        e.rewrite.enabled = true; e.on_key(Key::Hotkey(Hotkey::TogglePause));
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: false, actions: vec![] });
+    }
+    #[test] fn rewrite_autorepeat_does_not_restart() {
+        let Some(mut e) = engine() else { return };
+        let id = start(&mut e);
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: true, actions: vec![] });
+        e.on_reply(Reply::Captured(id, Captured::Text("helo".into())));
+        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+    }
+    #[test] fn rewrite_tab_while_pending_keeps_waiting() {
+        let Some(mut e) = engine() else { return };
+        let run = pending(&mut e, "helo");
+        assert_eq!(e.on_key(Key::Tab), Outcome { swallow: true, actions: vec![] });
+        assert_eq!(labels(&e), ["Rewriting…"]);
+        e.on_reply(Reply::Rewritten(run.req, Ok("hello".into())));
+        assert_eq!(labels(&e), ["hello"]);
+    }
+    #[test] fn rewrite_starts_over_a_suggestion_bubble() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        typ(&mut e, "ths "); assert_eq!(labels(&e), ["this", "the"]);
+        let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
+        assert!(matches!(o.actions.as_slice(), [Action::HideBubble, Action::Rewrite(Job::Capture(_))]), "{:?}", o.actions);
     }
 }

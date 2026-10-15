@@ -42,7 +42,7 @@ impl App {
         let opts = Options { switch_input: cli.switch_input, typo_suggestions: !cli.no_typo, auto_convert: cli.auto_convert, ..Options::default() };
         let mut engine = Engine::new(m.learn_detector(), personal, corrector, opts);
         let prefs_path = prefs::prefs_beside(&cli.state);
-        engine.never = Prefs::load(&prefs_path).never;
+        let p = Prefs::load(&prefs_path); engine.never = p.never; engine.rewrite = p.rewrite;
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
         Ok(App { engine, state_path: cli.state.clone(), prefs_path })
@@ -55,9 +55,9 @@ impl App {
         self.engine.events_since_save = 0;
     }
     pub fn maybe_save(&mut self) { if self.engine.events_since_save >= 10 { self.save() } }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone() }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), rewrite: self.engine.rewrite.clone() }.save(&self.prefs_path); }
 }
 /// Hotkeys are Ctrl+Alt (Windows) / Ctrl+Option (macOS) + key char.
 pub fn hotkey_for(c: char) -> Option<Hotkey> {
-    Some(match c.to_ascii_lowercase() { 'z' => Hotkey::Undo, 'x' => Hotkey::ForceConvert, 'g' => Hotkey::Guess, '1' => Hotkey::Accept(0), '2' => Hotkey::Accept(1), '3' => Hotkey::Accept(2), 'p' => Hotkey::TogglePause, _ => return None })
+    Some(match c.to_ascii_lowercase() { 'z' => Hotkey::Undo, 'x' => Hotkey::ForceConvert, 'g' => Hotkey::Guess, '1' => Hotkey::Accept(0), '2' => Hotkey::Accept(1), '3' => Hotkey::Accept(2), 'p' => Hotkey::TogglePause, 'r' => Hotkey::Rewrite, _ => return None })
 }

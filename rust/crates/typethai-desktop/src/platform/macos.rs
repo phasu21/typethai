@@ -248,6 +248,7 @@ fn run_actions(_st: &mut State, acts: Vec<Action>) {
             arm_caret_follow(_st);
         }
         Action::HideBubble => { bridge::set_geom(None); send(UiMsg::Hide) }
+        Action::Rewrite(_) => {}
     } }
 }
 

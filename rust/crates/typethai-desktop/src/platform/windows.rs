@@ -141,6 +141,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::Select(i) => { let _ = st.tx.send(UiMsg::Select(i)); }
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::Show { items: items.into_iter().map(|i| i.label).collect(), anchor: an }); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
+        Action::Rewrite(_) => {}
     } }
 }
 

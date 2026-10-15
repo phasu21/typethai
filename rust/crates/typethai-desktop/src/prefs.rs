@@ -2,6 +2,7 @@
 //! Stored beside `personal.json` so a learning reset does not clear the list, and so `personal.json`
 //! stays compatible with the TypeScript app.
 use crate::engine::Action;
+use crate::rewrite;
 use std::collections::BTreeSet;
 use std::path::Path;
 use typethai_core::keymap::th_to_en;
@@ -13,10 +14,12 @@ pub enum SettingsCmd {
     RemoveNever(String),
     Forget(String),
     ResetLearning,
+    /// Never carries the API key; that goes from the Settings window straight to the keyring.
+    SetRewrite(rewrite::Config),
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetRewrite(_))
     }
 }
 
@@ -24,6 +27,7 @@ impl SettingsCmd {
 pub struct SettingsSnap {
     pub never: Vec<String>,
     pub learned: Vec<Learned>,
+    pub rewrite: rewrite::Config,
 }
 
 /// One English key token: trimmed, lowercased, no whitespace.
@@ -38,12 +42,12 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String> }
+pub struct Prefs { pub never: BTreeSet<String>, pub rewrite: rewrite::Config }
 impl Prefs {
     pub fn load(path: &Path) -> Prefs {
         let Ok(text) = std::fs::read_to_string(path) else { return Prefs::default() };
-        match parse_never(&text) {
-            Some(never) => Prefs { never },
+        match parse(&text) {
+            Some(p) => p,
             None => {
                 eprintln!("typeThai: prefs unreadable ({}); starting with an empty list", path.display());
                 Prefs::default()
@@ -51,7 +55,7 @@ impl Prefs {
         }
     }
     pub fn to_json(&self) -> String {
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>() }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "rewrite": self.rewrite.to_json() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -59,11 +63,10 @@ impl Prefs {
         if std::fs::write(&tmp, self.to_json()).is_ok() { let _ = std::fs::rename(&tmp, path); }
     }
 }
-fn parse_never(text: &str) -> Option<BTreeSet<String>> {
+fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    let Some(n) = v.get("never") else { return Some(BTreeSet::new()) };
-    let items = n.as_array()?;
-    Some(items.iter().filter_map(|x| x.as_str()).filter_map(normalize_word).collect())
+    let never = match v.get("never") { Some(n) => n.as_array()?.iter().filter_map(|x| x.as_str()).filter_map(normalize_word).collect(), None => BTreeSet::new() };
+    Some(Prefs { never, rewrite: rewrite::Config::from_json(v.get("rewrite")) })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -118,7 +121,8 @@ mod tests {
     fn loaded_save(path: &Path) {
         let mut p = Prefs::default();
         p.never.insert("ok".into());
+        p.rewrite = rewrite::Config::new(false, "http://localhost:11434/v1", "llama").unwrap();
         p.save(path);
-        assert_eq!(Prefs::load(path).never, p.never);
+        assert_eq!(Prefs::load(path), p);
     }
 }
