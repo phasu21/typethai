@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use typethai_core::{completer::{thai_tail, Bigrams, Completer}, dict::Dict, ModelFiles};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Context, WordMemory, WORD_CAP}, dict::Dict, ModelFiles};
 /// The unpacked model dir in the tree, else the `.ttm` in `TYPETHAI_MODEL`.
 fn model() -> Option<ModelFiles> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/model");
@@ -8,13 +8,14 @@ fn model() -> Option<ModelFiles> {
     eprintln!("model files missing; skipping"); None
 }
 fn en() -> Completer { Completer::new([("hello", 10.0), ("help", 30.0), ("helmet", 5.0), ("he", 99.0), ("world", 1.0)].map(|(w, f)| (w.to_string(), f))) }
-fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).words }
+fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k, Context::default()).words }
+fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::default() } }
 
 #[test] fn ranks_extensions_by_freq() {
     let c = en();
-    assert_eq!(words(&c, "hel", 2), ["help", "hello"]); assert_eq!(c.complete("hel", 2).confidence, 30.0 / 45.0);
-    assert_eq!(words(&c, "he", 5), ["help", "hello", "helmet"]); assert_eq!(c.complete("he", 1).confidence, 30.0 / 144.0); assert_eq!(words(&c, "he", usize::MAX), ["help", "hello", "helmet"]);
-    assert_eq!(c.complete("xyz", 3), Default::default());
+    assert_eq!(words(&c, "hel", 2), ["help", "hello"]); assert_eq!(c.complete("hel", 2, Context::default()).confidence, 30.0 / 45.0);
+    assert_eq!(words(&c, "he", 5), ["help", "hello", "helmet"]); assert_eq!(c.complete("he", 1, Context::default()).confidence, 30.0 / 144.0); assert_eq!(words(&c, "he", usize::MAX), ["help", "hello", "helmet"]);
+    assert_eq!(c.complete("xyz", 3, Context::default()), Default::default());
     assert!(c.extends("hel")); assert!(!c.extends("help"));
 }
 #[test] fn keeps_typed_case() {
@@ -60,4 +61,62 @@ fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).wor
     assert_eq!(f("to"), [("be", 2.0)]);
     assert_eq!(f("x"), []); assert_eq!(f("a b"), []);
     assert_eq!(b.len(), 4);
+}
+#[test] fn the_previous_word_reorders_by_bigram() {
+    let c = Completer::new([("but", 50.0), ("be", 30.0), ("by", 20.0)].map(|(w, f)| (w.to_string(), f)));
+    let b = Bigrams::new([("to", "be", 10.0), ("to", "buy", 2.0)].map(|(p, n, f)| (p.to_string(), n.to_string(), f)));
+    let after = |prev| c.complete("b", 3, Context { prev, bigrams: Some(&b), memory: None });
+    assert_eq!(words(&c, "b", 3), ["but", "be", "by"]);
+    assert_eq!(after(Some("To")).words, ["be", "but", "buy"]);
+    assert_eq!(after(Some("to")).confidence, (1.0 * 30.0 / 100.0 + 2.0 * 10.0 / 12.0) / 3.0);
+    assert_eq!(after(Some("of")).words, ["but", "be", "by"], "no pairs after this word");
+    assert_eq!(after(None).words, ["but", "be", "by"]);
+}
+#[test] fn finished_words_outrank_corpus_frequency() {
+    let c = en();
+    let mut m = WordMemory::default();
+    m.learn(None, "helmet");
+    assert_eq!(c.complete("hel", 3, mine(&m)).words, ["help", "helmet", "hello"], "one finish is a hint");
+    m.learn(None, "Helmet"); m.learn(None, "helmet");
+    assert_eq!(c.complete("hel", 3, mine(&m)).words, ["helmet", "help", "hello"]);
+    assert_eq!(words(&c, "hel", 3), ["help", "hello", "helmet"], "without the memory");
+}
+#[test] fn a_new_word_is_offered_after_three_finishes() {
+    let c = en();
+    let mut m = WordMemory::default();
+    m.learn(None, "helix"); m.learn(None, "helix");
+    assert_eq!(c.complete("hel", 4, mine(&m)).words, ["help", "hello", "helmet"]);
+    m.learn(None, "helix");
+    assert_eq!(c.complete("hel", 4, mine(&m)).words, ["helix", "help", "hello", "helmet"]);
+}
+#[test] fn pairs_follow_the_previous_word() {
+    let c = en();
+    let mut m = WordMemory::default();
+    for _ in 0..6 { m.learn(None, "helmet") }
+    m.learn(Some("say"), "hello"); m.learn(Some("say"), "hello");
+    let after = |prev| c.complete("hel", 3, Context { prev, memory: Some(&m), bigrams: None }).words;
+    assert_eq!(after(None), ["helmet", "help", "hello"]);
+    assert_eq!(after(Some("say")), ["hello", "helmet", "help"]);
+}
+#[test] fn memory_round_trips_through_json() {
+    let mut m = WordMemory::default();
+    for _ in 0..3 { m.learn(None, "helix") }
+    m.learn(Some("ฉัน"), "ชอบ"); m.learn(Some("say"), "hello");
+    let back = WordMemory::from_json(&m.to_json()).unwrap();
+    assert_eq!(back, m);
+    assert_eq!(en().complete("hel", 2, mine(&back)).words, ["helix", "help"]);
+    assert!(WordMemory::from_json("{\"clock\": 3, \"words\": [").is_err());
+}
+#[test] fn memory_drops_its_weakest_words_past_the_cap() {
+    let mut m = WordMemory::default();
+    for _ in 0..5 { m.learn(None, "keep") }
+    for i in 0..WORD_CAP { m.learn(None, &format!("w{i}")) }
+    assert!(m.count("keep") > 4.5, "five finishes, 4000 words ago");
+    assert_eq!((m.count("w0"), m.count("w400"), m.count("w401") > 0.9), (0.0, 0.0, true), "the oldest 401 of 4001 dropped, down to 3600");
+}
+#[test] fn segment_splits_a_run_into_dictionary_words() {
+    let dict = Dict::new(["ฉัน", "ชอบ", "ภาษา", "ไทย", "ภาษาไทย", "มาก"].map(String::from));
+    assert_eq!(dict.segment("ฉันชอบภาษาไทยxyzภาษ"), [("ฉัน", true), ("ชอบ", true), ("ภาษาไทย", true), ("xyzภาษ", false)]);
+    assert_eq!(dict.segment("ๆชอบมาก"), [("ๆ", false), ("ชอบ", true), ("มาก", true)]);
+    assert_eq!(dict.segment(""), []);
 }

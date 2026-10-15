@@ -5,7 +5,7 @@ use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Completer, Completions}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
+use typethai_core::{completer::{thai_tail, Completer, Completions, Context}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -465,12 +465,12 @@ impl Engine {
             let run = en_to_th(&self.word);
             let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
-            (head.to_string(), comp.complete(tail, k))
+            (head.to_string(), comp.complete(tail, k, Context::default()))
         } else {
             let w = self.word.as_str();
             if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
             let Some(comp) = &self.en_comp else { return vec![] };
-            let mut found = comp.complete(w, k);
+            let mut found = comp.complete(w, k, Context::default());
             if !typing && found.words.len() < k { if let Some(sp) = &self.speller {
                 for g in sp.completions(w) {
                     if found.words.len() >= k { break }
@@ -1684,8 +1684,8 @@ mod tests {
         let (Some(m), Some(mut e)) = (model(), engine()) else { return };
         e.opts.complete = CompleteMode::Typing; e.load_completers(&m); e.speller = crate::platform::spell::system();
         let (th, en) = (m.thai_completer(), m.english_completer());
-        for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
-        for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         let cases: [(&str, bool, String); 4] = [("en hel", false, "hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห"))];
         for (name, thai, k) in cases {
             e.reset(); e.set_thai_active(thai); typ(&mut e, &k);
