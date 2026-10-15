@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 /// Sorted by word (byte order), so the proper extensions of any prefix are one contiguous run right after it.
 pub struct Completer { words: Vec<(String, f64)> }
+/// `confidence`: the top word's share of the frequency of all extensions plus the prefix itself when it is a word, so
+/// a finished word (`you`, `ฉัน`) is not read as a confident prefix of its extensions.
 #[derive(Clone, Debug, Default, PartialEq)] pub struct Completions { pub words: Vec<String>, pub confidence: f64 }
 
 impl Completer {
@@ -26,8 +28,10 @@ impl Completer {
         self.words.get(self.start(&p)).is_some_and(|(w, _)| w.starts_with(&p))
     }
     pub fn complete(&self, prefix: &str, k: usize) -> Completions {
-        let r = self.range(&prefix.to_ascii_lowercase());
-        let (mut total, mut max) = (0.0, 0.0f64);
+        let p = prefix.to_ascii_lowercase();
+        let r = self.range(&p);
+        let own = self.start(&p).checked_sub(1).map(|i| &self.words[i]).filter(|(w, _)| *w == p).map_or(0.0, |e| e.1);
+        let (mut total, mut max) = (own, 0.0f64);
         let mut top: Vec<&(String, f64)> = Vec::new();
         for e in r {
             total += e.1; max = max.max(e.1);

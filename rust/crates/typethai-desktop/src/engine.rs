@@ -1391,6 +1391,11 @@ mod tests {
         assert_eq!(log[0].1.actions, vec![Action::Replace { delete: 3, insert: "help".into(), then: None }, Action::HideBubble, Action::SwitchInput(InputLang::Latin)]);
         e.reset(); e.opts.complete_conf = 0.99;
         let o = typ(&mut e, "hel"); assert!(o.iter().all(|x| bubble_items(x).is_none())); assert!(!e.bubble_visible());
+        // a finished word is not a confident prefix of its extensions
+        e.reset(); e.opts.complete_conf = 0.4; e.en_comp = Some(Completer::new([("you".to_string(), 100.0), ("your".to_string(), 50.0)]));
+        typ(&mut e, "you"); assert!(!e.bubble_visible());
+        e.reset(); e.en_comp = Some(Completer::new([("you".to_string(), 10.0), ("your".to_string(), 50.0)]));
+        typ(&mut e, "you"); assert_eq!(labels(&e), ["your"]);
     }
     #[test] fn pause_mode_offers_completions_once_after_the_idle_time() {
         let Some(mut e) = engine() else { return };

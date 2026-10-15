@@ -13,7 +13,7 @@ fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).wor
 #[test] fn ranks_extensions_by_freq() {
     let c = en();
     assert_eq!(words(&c, "hel", 2), ["help", "hello"]); assert_eq!(c.complete("hel", 2).confidence, 30.0 / 45.0);
-    assert_eq!(words(&c, "he", 5), ["help", "hello", "helmet"]); assert_eq!(words(&c, "he", usize::MAX), ["help", "hello", "helmet"]);
+    assert_eq!(words(&c, "he", 5), ["help", "hello", "helmet"]); assert_eq!(c.complete("he", 1).confidence, 30.0 / 144.0); assert_eq!(words(&c, "he", usize::MAX), ["help", "hello", "helmet"]);
     assert_eq!(c.complete("xyz", 3), Default::default());
     assert!(c.extends("hel")); assert!(!c.extends("help"));
 }
