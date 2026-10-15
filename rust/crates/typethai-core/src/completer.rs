@@ -91,9 +91,10 @@ impl Completer {
         for sp in &spreads { for i in 0..SIGNALS { whole[i] = whole[i].max(sp.total[i]) } }
         let lambda: [f64; SIGNALS] = std::array::from_fn(|i| if whole[i] > 0.0 { WEIGHT[i] * trust(i, whole[i]) } else { 0.0 });
         let chance: Vec<f64> = spreads.iter().map(|sp| sp.read.p * (0..SIGNALS).filter(|&i| lambda[i] > 0.0).map(|i| lambda[i] * sp.total[i] / whole[i]).sum::<f64>()).collect();
-        // the keys as typed may also start a word the list lacks: that reading has no row, but takes its share
+        // the keys as typed may also start a word the list lacks: a reading with no row that takes its share. Only the
+        // corpus signal can say how often such words come; the pairs and the user's words know none of them.
         let lacked = match (cx.unknown, cx.slips.is_some() && p.chars().count() >= SLIP_MIN) {
-            (Some(ng), true) => UNKNOWN * ng.log_prob_start(&p).exp() * lambda.iter().sum::<f64>(),
+            (Some(ng), true) => lambda[UNI] * UNKNOWN * ng.log_prob_start(&p).exp(),
             _ => 0.0,
         };
         let all: f64 = chance.iter().sum::<f64>() + lacked;
