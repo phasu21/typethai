@@ -1816,21 +1816,37 @@ mod tests {
         let (th, en) = (m.thai_completer(), m.english_completer());
         for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
-        let cases: [(&str, bool, String); 4] = [("en hel", false, "hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห"))];
-        for (name, thai, k) in cases {
-            e.reset(); e.set_thai_active(thai); typ(&mut e, &k);
-            let mut ns: Vec<u128> = (0..2000).map(|_| { let t = Instant::now(); std::hint::black_box(e.completion_rows(true)); t.elapsed().as_nanos() }).collect();
-            ns.sort_unstable();
-            println!("{name}: rows {:?} p50 {:.1} us p99 {:.1} us", labels(&e), ns[1000] as f64 / 1e3, ns[1980] as f64 / 1e3);
+        let run = keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห");
+        let cases: [(&str, bool, String); 5] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, run.clone())];
+        let measure = |e: &mut Engine| {
+            for (name, thai, k) in &cases {
+                e.reset(); e.set_thai_active(*thai); typ(e, k);
+                let mut ns: Vec<u128> = (0..2000).map(|_| { let t = Instant::now(); std::hint::black_box(e.completion_rows(true)); t.elapsed().as_nanos() }).collect();
+                ns.sort_unstable();
+                println!("{name}: rows {:?} p50 {:.1} us p99 {:.1} us", labels(e), ns[1000] as f64 / 1e3, ns[1980] as f64 / 1e3);
+            }
+            // whole keystrokes (live row included) over the 30-char run on the English layout, with and without completion
+            for (mode, thai) in [(CompleteMode::Off, false), (CompleteMode::Typing, false), (CompleteMode::Off, true), (CompleteMode::Typing, true)] {
+                e.opts.complete = mode;
+                let mut ns: Vec<u128> = vec![];
+                for _ in 0..50 { e.reset(); e.set_thai_active(thai); for c in run.chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
+                ns.sort_unstable();
+                println!("on_key {mode:?} {}: p50 {:.1} us p99 {:.1} us (n={})", if thai { "thai layout" } else { "en layout" }, ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
+            }
+        };
+        println!("-- no context");
+        measure(&mut e);
+        // worst case for the context path: a memory at its caps, and 20k corpus followers after the previous word
+        let (mut en_words, mut th_words): (Vec<&String>, Vec<&String>) = (m.english_freq.keys().collect(), m.thai_words.iter().collect());
+        en_words.sort(); th_words.sort();
+        for (i, w) in en_words.iter().take(2500).chain(th_words.iter().take(2500)).enumerate() {
+            for j in 0..2 { e.words.learn(Some(["the", "ที่"][(i + j) % 2]), w) }
         }
-        // whole keystrokes (live row included) over the 30-char run on the English layout, with and without completion
-        for mode in [CompleteMode::Off, CompleteMode::Typing] {
-            e.opts.complete = mode;
-            let mut ns: Vec<u128> = vec![];
-            for _ in 0..50 { e.reset(); for c in keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห").chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
-            ns.sort_unstable();
-            println!("on_key {mode:?}: p50 {:.1} us p99 {:.1} us (n={})", ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
-        }
+        let followers = |prev: &str, ws: &[&String]| Bigrams::new(ws.iter().take(20_000).enumerate().map(|(i, w)| (prev.to_string(), w.to_string(), 1.0 + i as f64 % 97.0)));
+        (e.en_bigrams, e.thai_bigrams) = (Some(followers("the", &en_words)), Some(followers("ที่", &th_words)));
+        println!("-- memory of {} words, followers: the {} ที่ {}", e.words.len(), e.en_bigrams.as_ref().unwrap().followers("the").len(), e.thai_bigrams.as_ref().unwrap().followers("ที่").len());
+        e.opts.complete = CompleteMode::Typing;
+        measure(&mut e);
     }
     #[test] fn model_completers_skip_english_without_its_frequencies() {
         let Some(mut m) = model() else { return };

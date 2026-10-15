@@ -54,7 +54,7 @@ impl Completer {
         };
         if let (Some(prev), Some(b)) = (cx.prev, cx.bigrams) {
             // best first, so the first matches are the ones that can rank
-            for (w, c) in b.followers(prev).iter().filter(|(w, _)| w.starts_with(&p)).take(CANDIDATES) { add(BI, w, *c, &mut cands) }
+            for (w, c) in b.followers(prev).iter().take(FOLLOWER_SCAN).filter(|(w, _)| w.starts_with(&p)).take(CANDIDATES) { add(BI, w, *c, &mut cands) }
         }
         if let Some(m) = cx.memory {
             // a word the corpus does not know may be a typo until it has been finished a few times
@@ -95,6 +95,9 @@ const TRUST_HALF: f64 = 4.0;
 fn trust(sig: usize, total: f64) -> f64 { if sig == MINE || sig == MINE_PAIR { total / (total + TRUST_HALF) } else { 1.0 } }
 /// Extensions taken from each list (corpus words, bigram followers); a word below them cannot reach the top rows.
 const CANDIDATES: usize = 32;
+/// Followers of the previous word looked at, best first. The rest are rare after it, and a common word can have tens of
+/// thousands: scanning them all for a prefix few match costs more than a keystroke may.
+const FOLLOWER_SCAN: usize = 1000;
 /// Finishes before a word the corpus does not know is offered. Three recent finishes decay to just under 3.
 pub const NEW_WORD_MIN: f64 = 2.5;
 
