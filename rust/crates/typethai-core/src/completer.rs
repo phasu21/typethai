@@ -1,5 +1,5 @@
 //! Prefix completion over a frequency-ranked word list, read through the slips a typist makes.
-use crate::{dict::Dict, slip::{Slip, Slips}};
+use crate::{dict::Dict, ngram::Ngram, slip::{Slip, Slips}};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
@@ -39,6 +39,8 @@ impl Completer {
     }
     /// A word extends `prefix` read with one slip (`prefix` itself is read as typed, and must have `SLIP_MIN` chars).
     pub fn extends_slipped(&self, prefix: &str, slips: &Slips) -> bool { !self.slipped(&prefix.to_ascii_lowercase(), slips).is_empty() }
+    /// `w` is in the list.
+    pub fn knows(&self, w: &str) -> bool { self.freq(&w.to_ascii_lowercase()).is_some() }
     fn freq(&self, w: &str) -> Option<f64> { self.words.binary_search_by(|(x, _)| x.as_str().cmp(w)).ok().map(|i| self.words[i].1) }
     /// The prefixes one slip from `typed` that some word starts with, likeliest (by corpus share × slip chance)
     /// first, at most `READINGS`. None for fewer than `SLIP_MIN` chars: one slip in two keys can mean anything.
@@ -89,7 +91,12 @@ impl Completer {
         for sp in &spreads { for i in 0..SIGNALS { whole[i] = whole[i].max(sp.total[i]) } }
         let lambda: [f64; SIGNALS] = std::array::from_fn(|i| if whole[i] > 0.0 { WEIGHT[i] * trust(i, whole[i]) } else { 0.0 });
         let chance: Vec<f64> = spreads.iter().map(|sp| sp.read.p * (0..SIGNALS).filter(|&i| lambda[i] > 0.0).map(|i| lambda[i] * sp.total[i] / whole[i]).sum::<f64>()).collect();
-        let all: f64 = chance.iter().sum();
+        // the keys as typed may also start a word the list lacks: that reading has no row, but takes its share
+        let lacked = match (cx.unknown, cx.slips.is_some() && p.chars().count() >= SLIP_MIN) {
+            (Some(ng), true) => UNKNOWN * ng.log_prob_start(&p).exp() * lambda.iter().sum::<f64>(),
+            _ => 0.0,
+        };
+        let all: f64 = chance.iter().sum::<f64>() + lacked;
         if all == 0.0 { return Completions::default() }
         // (word, score, the keys as typed reach it)
         let mut scored: Vec<(&str, f64, bool)> = spreads.iter().zip(&chance).enumerate().filter(|(_, (_, c))| **c > 0.0)
@@ -236,6 +243,9 @@ pub struct Context<'a> {
     pub memory: Option<&'a WordMemory>,
     /// How the keys may differ from the word meant; None reads them as typed.
     pub slips: Option<Slips>,
+    /// How words the list lacks are spelled (a character model): with slips, the keys may start one of them, read as
+    /// typed. None: every word meant is in the list.
+    pub unknown: Option<&'a Ngram>,
 }
 struct Cand<'a> { word: &'a str, n: [f64; SIGNALS] }
 /// The ranking signals: corpus unigram, corpus bigram after `prev`, the user's words, the user's words after `prev`.
@@ -248,6 +258,9 @@ const WEIGHT: [f64; SIGNALS] = [1.0, 2.0, 2.0, 3.0];
 /// The user's counts reach half their weight at this many finished words: one finish is a hint, not a habit.
 const TRUST_HALF: f64 = 4.0;
 fn trust(sig: usize, total: f64) -> f64 { if sig == MINE || sig == MINE_PAIR { total / (total + TRUST_HALF) } else { 1.0 } }
+/// Share of the words typed that the list lacks (names, rare words): about one in ten words of 4+ letters in held-out
+/// English, one in thirty in Thai.
+const UNKNOWN: f64 = 0.05;
 /// Keys typed before a slip is read into them.
 pub const SLIP_MIN: usize = 3;
 /// Least share of a word only a slip reaches: below it the keys were most likely typed as meant, and the word would

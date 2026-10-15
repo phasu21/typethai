@@ -129,7 +129,7 @@ fn slipping<'a>() -> Context<'a> { Context { slips: Some(Slips { rate: 0.01 }), 
     let c = Completer::new([("candle", 6692.0), ("cancel", 12681.0), ("handel", 264.0)].map(|(w, f)| (w.to_string(), f)));
     assert_eq!(c.complete("candel", 3, Context::default()), Default::default(), "no word starts with the keys as typed");
     let got = c.complete("candel", 3, slipping());
-    assert_eq!(got.words, ["candle", "cancel", "handel"], "a swap is likelier than a neighbouring key, and both than a far one");
+    assert_eq!(got.words, ["candle", "cancel"], "a swap is likelier than a neighbouring key; handel, a far key away, holds under 1%");
     // candle is reached twice: swapped `el`, and `candl` with an extra `e` (next to `d`)
     let (swap, near, far) = (6692.0 * 0.01 * (0.15 + 0.08 / 8.0), 12681.0 * 0.01 * 0.30 / 6.0, 264.0 * 0.01 * 0.05 / 30.0);
     assert!((got.confidence - swap / (swap + near + far)).abs() < 1e-12, "{}", got.confidence);

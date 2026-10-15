@@ -350,9 +350,10 @@ impl Engine {
     }
     /// What completion and spelling rows in `lang` are ranked by: `prev` (the word before, when it is in `lang`), the
     /// corpus pairs, the user's words and the slips.
-    fn context<'a>(&'a self, prev: Option<&'a str>, lang: InputLang) -> Context<'a> {
+    pub(crate) fn context<'a>(&'a self, prev: Option<&'a str>, lang: InputLang) -> Context<'a> {
         let bigrams = match lang { InputLang::Thai => self.thai_bigrams.as_ref(), InputLang::Latin => self.en_bigrams.as_ref() };
-        Context { prev: prev.filter(|p| lang_of(p) == lang), bigrams, memory: self.opts.learn_words.then_some(&*self.words), slips: self.opts.slips }
+        let unknown = Some(match lang { InputLang::Thai => &self.det.thai, InputLang::Latin => &self.det.english });
+        Context { prev: prev.filter(|p| lang_of(p) == lang), bigrams, memory: self.opts.learn_words.then_some(&*self.words), slips: self.opts.slips, unknown }
     }
     /// English spelling suggestions for a finished word (`ths` -> this) the spell checker flags: its guesses and, with
     /// slips, the words one slip away, ranked by the completion model after `prev`. Punctuation around the word is kept.
