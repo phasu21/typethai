@@ -1,7 +1,7 @@
 //! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, and AI rewrite,
 //! one sidebar page each.
 use crate::bridge;
-use crate::engine::{CompleteMode, COMPLETE_IDLE_CHOICES_MS};
+use crate::engine::{AcceptKeys, CompleteMode, COMPLETE_IDLE_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite;
 use crate::ui::thai_font;
@@ -31,6 +31,7 @@ struct SettingsView {
 }
 enum KeyState { Checking, Missing, Saved, Failed(String) }
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "Off"), (CompleteMode::Pause, "After a pause"), (CompleteMode::Typing, "While typing")];
+const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "Tab"), (AcceptKeys::TabOrSpace, "Tab or Space")];
 fn delay_label(ms: u64) -> SharedString { format!("{ms} ms").into() }
 const KEY_STORE: &str = if cfg!(windows) { "Credential Manager" } else { "the Keychain" };
 
@@ -278,15 +279,21 @@ impl SettingsView {
             SettingField::dropdown(options,
                 move |cx| delay_label(read.read(cx).snap.complete_idle.as_millis() as u64),
                 move |label, cx| if let Some(&ms) = COMPLETE_IDLE_CHOICES_MS.iter().find(|&&ms| delay_label(ms) == label) { write.update(cx, |v, cx| v.set_complete_idle(ms, cx)) }) };
+        let accept = { let (read, write) = (view.clone(), view.clone());
+            let options = ACCEPT.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+            SettingField::dropdown(options,
+                move |cx| ACCEPT.iter().find(|(a, _)| *a == read.read(cx).snap.accept).map_or("", |(_, l)| l).into(),
+                move |label, cx| if let Some((a, _)) = ACCEPT.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_accept(*a, cx)) }) };
         let learn = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.learn_words, move |on, cx| write.update(cx, |v, cx| v.set_learn_words(on, cx))) };
         let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
             .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
         let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
-        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another.".into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget"], std::iter::empty()),
+        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another. Space can also accept a word typed in the wrong layout.".into(),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
+                Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }
@@ -301,6 +308,12 @@ impl SettingsView {
         if !self.confirm_forget { self.confirm_forget = true; cx.notify(); return; }
         self.confirm_forget = false;
         bridge::push_settings(SettingsCmd::ForgetWords);
+        cx.notify();
+    }
+    fn set_accept(&mut self, accept: AcceptKeys, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.accept = accept;
+        bridge::push_settings(SettingsCmd::SetAccept(accept));
         cx.notify();
     }
     fn set_complete_idle(&mut self, ms: u64, cx: &mut Context<Self>) {
