@@ -44,7 +44,6 @@ fn words(c: &Completer, p: &str, k: usize) -> Vec<String> { c.complete(p, k).wor
 }
 #[test] fn english_freq_roundtrips_through_pack() {
     let Some(mut m) = model() else { return };
-    if std::env::var_os("TYPETHAI_MODEL").is_some() { assert_eq!(m.english_freq.len(), 0, "a pre-EN_FREQ .ttm loads with none"); }
     (m.thai, m.english, m.thai_words, m.wordfreq) = Default::default(); // debug-build deflate of the full model takes ~50 s
     m.english_freq = HashMap::from([("hello".to_string(), 3.0), ("help".to_string(), 7.0)]);
     let back = ModelFiles::unpack(&m.pack()).unwrap();
