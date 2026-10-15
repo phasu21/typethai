@@ -480,7 +480,7 @@ impl Engine {
             let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             // the word before the tail in the run, else the one the line shows before the run
-            let prev = match self.det.th_dict.segment(head).last() { Some((w, _)) => Some(w.to_string()), None => self.word_before(self.line.len()) };
+            let prev = match self.det.th_dict.segment(head).last() { Some((w, word)) => word.then(|| w.to_string()), None => self.word_before(self.line.len()) };
             let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory };
             (head.to_string(), comp.complete(tail, k, cx))
         } else {
