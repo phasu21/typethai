@@ -6,6 +6,7 @@
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
 //! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`. `<Idle>`: a typing pause long enough for word
 //! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
+//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row.
 use crate::{app::{hotkey_for, App}, engine::{Action, Boundary, Key, Outcome}};
 use std::io::BufRead;
 pub fn apply(screen: &mut Vec<char>, acts: &[Action], swallowed: bool, typed: Option<char>) {
