@@ -121,7 +121,7 @@ mod tests {
     fn loaded_save(path: &Path) {
         let mut p = Prefs::default();
         p.never.insert("ok".into());
-        p.rewrite = rewrite::Config::new(false, "http://localhost:11434/v1", "llama").unwrap();
+        p.rewrite = rewrite::Config::new(false, "http://localhost:11434/v1", "llama", "Use formal Thai.").unwrap();
         p.save(path);
         assert_eq!(Prefs::load(path), p);
     }

@@ -4,7 +4,7 @@ use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite;
 use crate::ui::thai_font;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::setting::{RenderOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::{ActiveTheme, IconName, Sizable};
 use gpui_kit::*;
@@ -21,6 +21,7 @@ struct SettingsView {
     key: Entity<InputState>,
     model: SharedString,
     base_url: SharedString,
+    instructions: Entity<TextareaState>,
     key_state: KeyState,
     rewrite_error: Option<String>,
     first_page: usize,
@@ -43,7 +44,7 @@ pub fn apply_snapshot(slot: &mut Option<SettingsWin>, snap: SettingsSnap, cx: &m
     let alive = slot.as_ref().is_some_and(|win| win.handle.update(cx, |_, _, _| ()).is_ok());
     if !alive { *slot = None; return; }
     let Some(win) = slot.as_ref() else { return };
-    let _ = win.handle.update(cx, |_, _, cx| win.view.update(cx, |v, cx| v.show(snap, cx)));
+    let _ = win.handle.update(cx, |_, window, cx| win.view.update(cx, |v, cx| v.show(snap, window, cx)));
 }
 /// `--demo-settings`: the window on `page`, filled with `snap`, never reading the keychain.
 pub fn open_demo(page: usize, snap: SettingsSnap, cx: &mut App) -> Option<SettingsWin> {
@@ -72,10 +73,11 @@ fn build_view(first_page: usize, key_state: Option<KeyState>, window: &mut Windo
     let input = cx.new(|cx| InputState::new(window, cx).placeholder("ok"));
     let watch = input.clone();
     let key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("API key"));
+    let instructions = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 8).placeholder("For example: Use formal Thai. Keep brand names in English."));
     let checked = key_state.is_some();
     let view = cx.new(|_| SettingsView {
         input, snap: SettingsSnap::default(), error: None, loaded: false, confirm_reset: false, key,
-        model: SharedString::default(), base_url: SharedString::default(), key_state: key_state.unwrap_or(KeyState::Checking), rewrite_error: None, first_page,
+        model: SharedString::default(), base_url: SharedString::default(), instructions, key_state: key_state.unwrap_or(KeyState::Checking), rewrite_error: None, first_page,
     });
     view.update(cx, |_, cx| {
         cx.subscribe_in(&watch, window, |this, _, ev: &InputEvent, window, cx| {
@@ -151,24 +153,27 @@ fn keywords<'a>(fixed: &[&str], words: impl Iterator<Item = &'a String>) -> Vec<
 }
 
 impl SettingsView {
-    fn show(&mut self, snap: SettingsSnap, cx: &mut Context<Self>) {
+    fn show(&mut self, snap: SettingsSnap, window: &mut Window, cx: &mut Context<Self>) {
         // fill the rewrite fields once, so later snapshots do not overwrite what is being typed
-        if !self.loaded { self.fill_rewrite(&snap.rewrite); }
+        if !self.loaded { self.fill_rewrite(&snap.rewrite, window, cx); }
         self.loaded = true;
         self.snap = snap;
         cx.notify();
     }
-    fn fill_rewrite(&mut self, c: &rewrite::Config) {
+    fn fill_rewrite(&mut self, c: &rewrite::Config, window: &mut Window, cx: &mut Context<Self>) {
         self.model = c.model.clone().into();
         self.base_url = c.base_url.clone().into();
+        let instructions = c.instructions.clone();
+        self.instructions.update(cx, |i, cx| i.set_value(instructions, window, cx));
     }
     fn set_rewrite_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         bridge::push_settings(SettingsCmd::SetRewrite(rewrite::Config { enabled, ..self.snap.rewrite.clone() }));
         cx.notify();
     }
-    fn save_rewrite(&mut self, cx: &mut Context<Self>) {
-        match rewrite::Config::new(self.snap.rewrite.enabled, &self.base_url, &self.model) {
-            Ok(c) => { self.rewrite_error = None; self.fill_rewrite(&c); bridge::push_settings(SettingsCmd::SetRewrite(c)); }
+    fn save_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let instructions = self.instructions.read(cx).value();
+        match rewrite::Config::new(self.snap.rewrite.enabled, &self.base_url, &self.model, &instructions) {
+            Ok(c) => { self.rewrite_error = None; self.fill_rewrite(&c, window, cx); bridge::push_settings(SettingsCmd::SetRewrite(c)); }
             Err(e) => self.rewrite_error = Some(e),
         }
         cx.notify();
@@ -269,16 +274,18 @@ impl SettingsView {
             SettingField::switch(move |cx| read.read(cx).snap.rewrite.enabled, move |on, cx| write.update(cx, |v, cx| v.set_rewrite_enabled(on, cx))) };
         let key = custom_field(view, |v, view, options, _| field_box(options).child(Input::new(&v.key)
             .suffix(Button::new("save-key").label("Save key").ghost().xsmall().on_click(click(view, |v, window, cx| v.save_key(window, cx))))).into_any_element());
+        let instructions = custom_field(view, |v, _, options, _| field_box(options).child(Textarea::new(&v.instructions)).into_any_element());
         let save = element(view, |v, view, _, paint| div().flex().flex_row().items_center().justify_end().gap(px(12.))
             .children(error_text(paint, &v.rewrite_error).map(|e| e.flex_1()))
-            .child(Button::new("save-rewrite").label("Save").primary().on_click(click(view, |v, _, cx| v.save_rewrite(cx))))
+            .child(Button::new("save-rewrite").label("Save").primary().on_click(click(view, |v, window, cx| v.save_rewrite(window, cx))))
             .into_any_element());
         page("AI rewrite", IconName::Bot,
             format!("Select text and press {hotkey} to fix typos or translate between Thai and English. The text is sent to the service below."),
-            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", hotkey], std::iter::empty()),
+            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", hotkey], std::iter::empty()),
             vec![SettingItem::new("Rewrite selected text", enabled), SettingItem::new("API key", key).description(key_note),
                 SettingItem::new("Model", draft_field(view, |v| v.model.clone(), |v, s| v.model = s)),
-                SettingItem::new("Base URL", draft_field(view, |v| v.base_url.clone(), |v, s| v.base_url = s)), save])
+                SettingItem::new("Base URL", draft_field(view, |v| v.base_url.clone(), |v, s| v.base_url = s)),
+                SettingItem::new("Instructions", instructions).layout(Axis::Vertical).description("Added to both Fix typos and Translate."), save])
     }
 }
 

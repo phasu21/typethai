@@ -30,20 +30,23 @@ const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
 const TIMEOUT: Duration = Duration::from_secs(20);
 const BAD_URL: &str = "The base URL must start with https:// (http:// only for localhost).";
 
-/// Non-secret settings (prefs.json "rewrite"), normalized on construction.
+/// Non-secret settings (prefs.json "rewrite"), normalized on construction. `instructions` is the user's own text,
+/// added to every preset's system prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config { pub enabled: bool, pub base_url: String, pub model: String }
-impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into() } } }
+pub struct Config { pub enabled: bool, pub base_url: String, pub model: String, pub instructions: String }
+impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into(), instructions: String::new() } } }
 impl Config {
     /// Settings fields: empty values take the defaults; a URL that would send the key in clear is refused.
-    pub fn new(enabled: bool, base_url: &str, model: &str) -> Result<Config, String> { Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model) }) }
+    pub fn new(enabled: bool, base_url: &str, model: &str, instructions: &str) -> Result<Config, String> {
+        Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model), instructions: instructions.trim().into() })
+    }
     /// prefs.json: missing or invalid fields fall back to the defaults.
     pub fn from_json(v: Option<&Value>) -> Config {
         let Some(v) = v else { return Config::default() };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
-        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")) }
+        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")), instructions: s("instructions").trim().into() }
     }
-    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model }) }
+    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model, "instructions": self.instructions }) }
 }
 fn model_of(raw: &str) -> String { let m = raw.trim(); if m.is_empty() { DEFAULT_MODEL.into() } else { m.into() } }
 fn base_url_of(raw: &str) -> Result<String, String> {
@@ -103,8 +106,12 @@ impl Failure {
 }
 
 fn endpoint(cfg: &Config) -> String { format!("{}/chat/completions", cfg.base_url) }
+fn system(run: &Run) -> String {
+    let preset = run.preset.instructions();
+    if run.cfg.instructions.is_empty() { preset.into() } else { format!("{preset}\n\nAlso follow these instructions from the user:\n{}", run.cfg.instructions) }
+}
 fn body(run: &Run) -> String {
-    let mut b = json!({ "model": run.cfg.model, "temperature": 0.2, "messages": [{ "role": "system", "content": run.preset.instructions() }, { "role": "user", "content": run.text }] });
+    let mut b = json!({ "model": run.cfg.model, "temperature": 0.2, "messages": [{ "role": "system", "content": system(run) }, { "role": "user", "content": run.text }] });
     // OpenRouter-only fields; other OpenAI-compatible servers may reject unknown keys
     if scheme_host(&run.cfg.base_url).is_some_and(|(_, h)| h.eq_ignore_ascii_case("openrouter.ai")) {
         b["reasoning"] = json!({ "enabled": false }); b["provider"] = json!({ "data_collection": "deny" });
@@ -228,7 +235,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn run(base_url: &str) -> Run { Run { req: ReqId::default().next(), preset: Preset::Fix, text: "helo wrld".into(), cfg: Config::new(true, base_url, "m/x").unwrap() } }
+    fn run(base_url: &str) -> Run { Run { req: ReqId::default().next(), preset: Preset::Fix, text: "helo wrld".into(), cfg: Config::new(true, base_url, "m/x", "").unwrap() } }
     #[test] fn openrouter_body_denies_data_collection_and_reasoning() {
         let b: Value = serde_json::from_str(&body(&run(""))).unwrap();
         assert_eq!(b, json!({ "model": "m/x", "temperature": 0.2, "reasoning": { "enabled": false }, "provider": { "data_collection": "deny" },
@@ -238,25 +245,30 @@ mod tests {
         let b: Value = serde_json::from_str(&body(&run("http://localhost:11434/v1"))).unwrap();
         assert_eq!(b, json!({ "model": "m/x", "temperature": 0.2, "messages": [{ "role": "system", "content": FIX }, { "role": "user", "content": "helo wrld" }] }));
     }
+    #[test] fn user_instructions_follow_the_preset_prompt() {
+        let r = Run { cfg: Config::new(true, "", "m/x", "  Use formal Thai.\n").unwrap(), ..run("") };
+        let b: Value = serde_json::from_str(&body(&r)).unwrap();
+        assert_eq!(b["messages"][0]["content"], format!("{FIX}\n\nAlso follow these instructions from the user:\nUse formal Thai."));
+    }
     #[test] fn endpoint_joins_without_double_slash() {
-        assert_eq!(endpoint(&Config::new(true, " https://api.example.com/v1/ ", "").unwrap()), "https://api.example.com/v1/chat/completions");
+        assert_eq!(endpoint(&Config::new(true, " https://api.example.com/v1/ ", "", "").unwrap()), "https://api.example.com/v1/chat/completions");
         assert_eq!(endpoint(&Config::default()), "https://openrouter.ai/api/v1/chat/completions");
     }
     #[test] fn config_new_trims_defaults_and_refuses_clear_text_urls() {
-        assert_eq!(Config::new(false, "  ", "  "), Ok(Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into() }));
-        assert_eq!(Config::new(true, "http://127.0.0.1:8080/", " llama ").map(|c| (c.base_url, c.model)), Ok(("http://127.0.0.1:8080".into(), "llama".into())));
-        assert_eq!(Config::new(true, "HTTP://[::1]:1234/v1", "").map(|c| c.base_url), Ok("HTTP://[::1]:1234/v1".into()));
-        assert_eq!(Config::new(true, "http://localhost", "").map(|c| c.base_url), Ok("http://localhost".into()));
+        assert_eq!(Config::new(false, "  ", "  ", "  "), Ok(Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into(), instructions: "".into() }));
+        assert_eq!(Config::new(true, "http://127.0.0.1:8080/", " llama ", "").map(|c| (c.base_url, c.model)), Ok(("http://127.0.0.1:8080".into(), "llama".into())));
+        assert_eq!(Config::new(true, "HTTP://[::1]:1234/v1", "", "").map(|c| c.base_url), Ok("HTTP://[::1]:1234/v1".into()));
+        assert_eq!(Config::new(true, "http://localhost", "", "").map(|c| c.base_url), Ok("http://localhost".into()));
         for bad in ["http://api.example.com/v1", "http://localhost.evil.com", "http://user@127.0.0.1.evil.com", "ftp://localhost", "openrouter.ai/api/v1", "https://"] {
-            assert_eq!(Config::new(true, bad, ""), Err(BAD_URL.to_string()), "{bad}");
+            assert_eq!(Config::new(true, bad, "", ""), Err(BAD_URL.to_string()), "{bad}");
         }
     }
     #[test] fn config_json_round_trips_and_falls_back() {
-        let c = Config::new(false, "https://api.example.com/v1", "m/x").unwrap();
+        let c = Config::new(false, "https://api.example.com/v1", "m/x", "Keep it short.").unwrap();
         assert_eq!(Config::from_json(Some(&c.to_json())), c);
         assert_eq!(Config::from_json(None), Config::default());
         let v = json!({ "enabled": false, "base_url": "http://example.com", "model": "m/y" });
-        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into() });
+        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into(), instructions: "".into() });
     }
     #[test] fn parse_maps_status_and_content() {
         assert_eq!(parse(200, r#"{"choices":[{"message":{"content":"  hello world\n"}}]}"#), Ok("hello world".into()));
