@@ -24,6 +24,14 @@ Because the model is derived from Wikipedia text, `typethai.ttm` is distributed 
 "Wikipedia contributors; PyThaiNLP; Wisesight; FrequencyWords (Hermit Dave); scb-mt-en-th-2020
 (AIResearch, VISTEC, SCB), including Taskmaster-1 (Google LLC); Tatoeba contributors". The code that uses it stays MIT.
 
+## Bundled font
+
+`rust/crates/typethai-desktop/fonts/typeThaiSans-*.ttf` (Regular, Medium, SemiBold, Bold) is built by
+`scripts/fonts/build-typethai-sans.py` from **Noto Sans Thai** 2.002 (https://github.com/notofonts/thai) and the Latin
+letters of **Noto Sans** 2.015 (https://github.com/notofonts/latin-greek-cyrillic), both © The Noto Project Authors under
+the SIL Open Font License 1.1 (`rust/crates/typethai-desktop/fonts/OFL.txt`). It is renamed typeThai Sans because it is
+a modified version, and it stays under the OFL.
+
 ## Used for evaluation only (not in the model)
 
 - **Wongnai restaurant reviews** (wongnai-corpus): LGPL-3.0. Used as a held-out test set.

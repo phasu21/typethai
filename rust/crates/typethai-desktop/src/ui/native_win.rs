@@ -2,8 +2,8 @@
 use crate::placement::{Monitor, Rect};
 use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,8 +35,14 @@ pub fn prepare(n: &Native) { unsafe {
     let ex = GetWindowLongPtrW(n.0, GWL_EXSTYLE);
     SetWindowLongPtrW(n.0, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize);
 } }
+/// `rc` is the area gpui draws in. The window keeps an invisible resize frame, so the window rect is grown by it and moved
+/// so that the client area lands exactly on `rc`; otherwise the bubble is cut off on the right and bottom.
 pub fn show(n: &Native, rc: Rect) { unsafe {
-    let _ = SetWindowPos(n.0, Some(HWND_TOPMOST), rc.x.round() as i32, rc.y.round() as i32, rc.w.round() as i32, rc.h.round() as i32, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    let (mut wr, mut cr, mut o) = (RECT::default(), RECT::default(), POINT::default());
+    let (l, t, dw, dh) = if GetWindowRect(n.0, &mut wr).is_ok() && GetClientRect(n.0, &mut cr).is_ok() && ClientToScreen(n.0, &mut o).as_bool() {
+        (o.x - wr.left, o.y - wr.top, (wr.right - wr.left) - cr.right, (wr.bottom - wr.top) - cr.bottom)
+    } else { (0, 0, 0, 0) };
+    let _ = SetWindowPos(n.0, Some(HWND_TOPMOST), rc.x.round() as i32 - l, rc.y.round() as i32 - t, rc.w.round() as i32 + dw, rc.h.round() as i32 + dh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 } }
 pub fn hide(n: &Native) { unsafe { let _ = ShowWindow(n.0, SW_HIDE); } }
 pub fn describe(n: &Native) -> String { let mut rc = RECT::default(); unsafe { let _ = GetWindowRect(n.0, &mut rc); } format!("hwnd rect {:?}", rc) }

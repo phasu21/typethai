@@ -7,7 +7,6 @@
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
 use crate::bridge::{self, Geom, Layout, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::placement::{self, Anchor, Monitor, Opts, Placement, Rect};
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{theme::Theme, ActiveTheme};
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,10 +33,10 @@ pub struct BubbleView {
     pub marker: bool,
 }
 
-/// System UI font with explicit Thai fallbacks (macOS: Thonburi / Sukhumvit Set; Windows: Leelawadee UI / Tahoma).
+/// The bundled typeThai Sans; the system Thai fonts only if it failed to load.
 pub(crate) fn thai_font() -> Font {
-    let mut f = font(".SystemUIFont");
-    f.fallbacks = Some(FontFallbacks::from_fonts(["Thonburi", "Sukhumvit Set", "Ayuthaya", "Leelawadee UI", "Leelawadee", "Tahoma", "Noto Sans Thai"].map(String::from).to_vec()));
+    let mut f = font("typeThai Sans");
+    f.fallbacks = Some(FontFallbacks::from_fonts(["Thonburi", "Sukhumvit Set", "Ayuthaya", "Leelawadee UI", "Leelawadee", "Tahoma"].map(String::from).to_vec()));
     f
 }
 
@@ -49,7 +48,10 @@ impl Render for BubbleView {
         let hover = t.list_hover;
         // selected row is a little stronger in dark mode
         let sel_bg = if dark { t.foreground.opacity(0.22) } else { t.accent };
-        let tab_key = Keystroke::parse("tab").expect("tab");
+        // fixed-size keycaps: the platform fonts differ in width, and the hint slot is reserved in the layout
+        let (cap_fg, cap_bg) = (t.muted_foreground, t.tokens.muted);
+        let cap = move |text: String, w: f64| div().w(px(w as f32)).h(px(bridge::KEYCAP_H as f32)).flex_none().flex().items_center().justify_center()
+            .rounded(px(4.)).bg(cap_bg).text_color(cap_fg).text_size(px(bridge::KEYCAP_FONT_PX as f32)).child(text);
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
         { let mut tb = self.text_bounds.borrow_mut(); tb.clear(); tb.resize(self.items.len(), None); }
         // The panel is the only visible surface: the window is borderless + transparent. Rows wrap and their heights are
@@ -71,9 +73,9 @@ impl Render for BubbleView {
                             .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
                             .child(div().max_w(px(l.label_w as f32)).whitespace_normal().child(label.clone())) })
                     // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
-                    .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(2.))
-                        .child(Kbd::new(tab_key.clone()))
-                        .when(i != selected, |d| d.child(Kbd::new(Keystroke::parse(&(i + 1).to_string()).expect("digit")))))
+                    .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
+                        .child(cap("Tab".into(), bridge::TAB_CAP_W))
+                        .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W))))
             }))).into_any_element()
     }
 }
@@ -165,7 +167,16 @@ fn open_bubble(cx: &mut App) -> Ui {
 }
 
 fn app() -> Application { application().with_assets(assets::Assets).with_quit_mode(QuitMode::Explicit) }
+/// typeThai Sans: Noto Sans Thai with Noto Sans's Latin letters (SIL OFL 1.1, `fonts/OFL.txt`,
+/// `scripts/fonts/build-typethai-sans.py`), bundled so text looks and measures the same on every platform.
+const TYPETHAI_SANS: [&[u8]; 4] = [
+    include_bytes!("../../fonts/typeThaiSans-Regular.ttf"), include_bytes!("../../fonts/typeThaiSans-Medium.ttf"),
+    include_bytes!("../../fonts/typeThaiSans-SemiBold.ttf"), include_bytes!("../../fonts/typeThaiSans-Bold.ttf"),
+];
 fn setup(cx: &mut App) {
+    if let Err(e) = cx.text_system().add_fonts(TYPETHAI_SANS.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect()) {
+        eprintln!("typeThai: typeThai Sans not loaded ({e}); falling back to the system fonts");
+    }
     init(cx);
     #[cfg(target_os = "macos")] cx.set_activation_policy(ActivationPolicy::Accessory);
     Theme::sync_system_appearance(None, cx);
