@@ -424,7 +424,8 @@ impl Engine {
     }
     /// Completions of the buffer, at most 3 rows with the live row. Thai (a Thai layout run, or a wrong-layout word the
     /// live row converts): the run's last word is completed and the rest kept, labelled with that word only. Otherwise
-    /// an English word. `typing`: the completed part needs 3 chars and `complete_conf` (after a pause: 2, ungated).
+    /// an English word. `typing` (inside the key hook): the completed part needs 3 chars and `complete_conf`, and the spell
+    /// checker is skipped (~0.85 ms a call, and a slow tap callback gets the tap disabled); after a pause: 2, ungated, topped up.
     fn completion_rows(&self, typing: bool) -> Vec<BubbleItem> {
         if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return vec![] }
         let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.as_str()), _ => None });
@@ -443,7 +444,7 @@ impl Engine {
             if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
             let Some(comp) = &self.en_comp else { return vec![] };
             let mut found = comp.complete(w, k);
-            if found.words.len() < k && gate(&found) { if let Some(sp) = &self.speller {
+            if !typing && found.words.len() < k { if let Some(sp) = &self.speller {
                 for g in sp.completions(w) {
                     if found.words.len() >= k { break }
                     // keep the typed prefix's case: the checker may capitalise
@@ -1413,6 +1414,19 @@ mod tests {
         // a boundary takes them away and offers nothing for the finished word
         let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    struct CompletingSpeller;
+    impl Speller for CompletingSpeller {
+        fn guesses(&self, _: &str) -> Option<Vec<String>> { None }
+        fn completions(&self, p: &str) -> Vec<String> { if p == "hel" { vec!["helium".into()] } else { vec![] } }
+    }
+    #[test] fn the_spell_checker_tops_up_only_after_a_pause() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        e.en_comp = Some(Completer::new([("help".to_string(), 30.0)])); e.speller = Some(Box::new(CompletingSpeller));
+        typ(&mut e, "hel"); assert_eq!(labels(&e), ["help"], "no spell checker on a keystroke");
+        e.reset(); e.opts.complete = CompleteMode::Pause;
+        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["help", "helium"]);
     }
     #[test] fn esc_mutes_completions_until_the_word_ends() {
         let Some(mut e) = engine() else { return };

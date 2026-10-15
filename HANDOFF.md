@@ -74,8 +74,8 @@ completion frequencies).
   a Word suggestions section in the Settings window (not checked on screen yet).
 - Cost (release, `cargo test --release -p typethai-desktop completion_cost -- --ignored --nocapture`): rows p50
   0.6 us for an English prefix, 8 us for a 30-char Thai run; a whole keystroke 4.4 us (Off) vs 9 us (Typing). The
-  NSSpellChecker top-up costs about 0.85 ms per call, made only when the frequency list has fewer than 3 words and
-  the gate passes.
+  NSSpellChecker top-up costs about 0.85 ms per call, so it runs only for Pause-mode rows (`on_idle`), never inside
+  the key hook (Typing mode uses the frequency list alone); it fills in when the list has fewer than 3 words.
 - Data caveat: the English list holds apostrophe fragments (`was` completes to `wasn`, `are` to `aren`).
 
 ## Open limitations
