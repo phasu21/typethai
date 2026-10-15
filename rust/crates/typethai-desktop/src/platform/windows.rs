@@ -240,10 +240,11 @@ unsafe fn translate(vk: u32) -> Option<Key> {
 unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 && !BUSY.get() {
         let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
-        let is_down = wp.0 as u32 == WM_KEYDOWN || wp.0 as u32 == WM_SYSKEYDOWN;
-        if is_down && k.dwExtraInfo != MAGIC {
+        let m = wp.0 as u32;
+        let (is_down, is_up) = (m == WM_KEYDOWN || m == WM_SYSKEYDOWN, m == WM_KEYUP || m == WM_SYSKEYUP);
+        if (is_down || is_up) && k.dwExtraInfo != MAGIC {
             BUSY.set(true);
-            let swallow = with(|st| handle_key(st, k.vkCode)).unwrap_or(false);
+            let swallow = with(|st| handle_key(st, k.vkCode, is_up)).unwrap_or(false);
             BUSY.set(false);
             if swallow { return LRESULT(1) }
         }
@@ -273,11 +274,15 @@ unsafe fn service_settings(st: &mut State) {
     run_actions(st, hide);
     let _ = st.tx.send(UiMsg::Settings(snap));
 }
-unsafe fn handle_key(st: &mut State, vk: u32) -> bool {
-    if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x}"); }
+unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
+    if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x} up={up}"); }
     let fg = GetForegroundWindow();
     if typing_in_our_window(st, fg) { return false }
-    let Some(key) = translate(vk) else { return false };
+    let key = if up {
+        // the only release that matters: Tab, while it is held over the bubble
+        if vk != VK_TAB.0 as u32 || !st.app.engine.is_bubble_key(&Key::TabUp) { return false }
+        Key::TabUp
+    } else { let Some(key) = translate(vk) else { return false }; key };
     let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
     if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; let a = st.app.engine.reset(); run_actions(st, a); }
     // Thai layout / password field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
