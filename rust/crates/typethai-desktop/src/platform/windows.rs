@@ -181,7 +181,7 @@ fn foreground_is_self(fg: HWND) -> bool {
     pid != 0 && pid == unsafe { GetCurrentProcessId() }
 }
 /// Keys while our Settings window is in front are left alone, so the field can be typed in.
-fn typing_in_our_window(st: &mut State, fg: HWND) -> bool {
+unsafe fn typing_in_our_window(st: &mut State, fg: HWND) -> bool {
     if !foreground_is_self(fg) { return false }
     if fg != st.last_fg {
         st.last_fg = fg;
@@ -191,7 +191,7 @@ fn typing_in_our_window(st: &mut State, fg: HWND) -> bool {
     }
     true
 }
-fn service_settings(st: &mut State) {
+unsafe fn service_settings(st: &mut State) {
     let cmds = bridge::take_settings();
     if cmds.is_empty() && !bridge::take(&bridge::REQ_SETTINGS) { return }
     let (snap, hide) = crate::prefs::apply_commands(&mut st.app, cmds);
