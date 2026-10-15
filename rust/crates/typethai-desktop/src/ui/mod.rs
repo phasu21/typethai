@@ -33,10 +33,10 @@ pub struct BubbleView {
     pub marker: bool,
 }
 
-/// System UI font with explicit Thai fallbacks (macOS: Thonburi / Sukhumvit Set; Windows: Leelawadee UI / Tahoma).
+/// The bundled typeThai Sans; the system Thai fonts only if it failed to load.
 pub(crate) fn thai_font() -> Font {
-    let mut f = font(".SystemUIFont");
-    f.fallbacks = Some(FontFallbacks::from_fonts(["Thonburi", "Sukhumvit Set", "Ayuthaya", "Leelawadee UI", "Leelawadee", "Tahoma", "Noto Sans Thai"].map(String::from).to_vec()));
+    let mut f = font("typeThai Sans");
+    f.fallbacks = Some(FontFallbacks::from_fonts(["Thonburi", "Sukhumvit Set", "Ayuthaya", "Leelawadee UI", "Leelawadee", "Tahoma"].map(String::from).to_vec()));
     f
 }
 
@@ -167,7 +167,16 @@ fn open_bubble(cx: &mut App) -> Ui {
 }
 
 fn app() -> Application { application().with_assets(assets::Assets).with_quit_mode(QuitMode::Explicit) }
+/// typeThai Sans: Noto Sans Thai with Noto Sans's Latin letters (SIL OFL 1.1, `fonts/OFL.txt`,
+/// `scripts/fonts/build-typethai-sans.py`), bundled so text looks and measures the same on every platform.
+const TYPETHAI_SANS: [&[u8]; 4] = [
+    include_bytes!("../../fonts/typeThaiSans-Regular.ttf"), include_bytes!("../../fonts/typeThaiSans-Medium.ttf"),
+    include_bytes!("../../fonts/typeThaiSans-SemiBold.ttf"), include_bytes!("../../fonts/typeThaiSans-Bold.ttf"),
+];
 fn setup(cx: &mut App) {
+    if let Err(e) = cx.text_system().add_fonts(TYPETHAI_SANS.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect()) {
+        eprintln!("typeThai: typeThai Sans not loaded ({e}); falling back to the system fonts");
+    }
     init(cx);
     #[cfg(target_os = "macos")] cx.set_activation_policy(ActivationPolicy::Accessory);
     Theme::sync_system_appearance(None, cx);
