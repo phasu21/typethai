@@ -8,6 +8,7 @@
 //! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
 //! deletes a grapheme per Backspace, here and in the engine's count.
+//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row.
 use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}};
 use std::io::BufRead;
 use unicode_segmentation::UnicodeSegmentation;

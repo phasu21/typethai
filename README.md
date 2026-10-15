@@ -71,6 +71,7 @@ reacting, remove the old entry and re-add the app.
 |---|---|
 | **Tab** (bubble visible) | Apply the selected row when Tab is released |
 | **Hold Tab + 1 / 2 / 3** | Apply row 1 / 2 / 3 (the digit is not typed) |
+| **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the selection |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
@@ -81,7 +82,8 @@ reacting, remove the old entry and re-add the app.
 | **⌃⌥R** | AI rewrite of the selected text: pick *Fix typos* or *Translate TH↔EN*, Tab again to replace the selection |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
-there you can choose when word suggestions show (Off, After a pause, While typing) and how long the pause is, list words that stay as you type
+there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
+accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
