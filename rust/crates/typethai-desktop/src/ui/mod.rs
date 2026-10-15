@@ -7,7 +7,6 @@
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
 use crate::bridge::{self, Geom, Layout, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::placement::{self, Anchor, Monitor, Opts, Placement, Rect};
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{theme::Theme, ActiveTheme};
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -49,7 +48,10 @@ impl Render for BubbleView {
         let hover = t.list_hover;
         // selected row is a little stronger in dark mode
         let sel_bg = if dark { t.foreground.opacity(0.22) } else { t.accent };
-        let tab_key = Keystroke::parse("tab").expect("tab");
+        // fixed-size keycaps: the platform fonts differ in width, and the hint slot is reserved in the layout
+        let (cap_fg, cap_bg) = (t.muted_foreground, t.tokens.muted);
+        let cap = move |text: String, w: f64| div().w(px(w as f32)).h(px(bridge::KEYCAP_H as f32)).flex_none().flex().items_center().justify_center()
+            .rounded(px(4.)).bg(cap_bg).text_color(cap_fg).text_size(px(bridge::KEYCAP_FONT_PX as f32)).child(text);
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
         { let mut tb = self.text_bounds.borrow_mut(); tb.clear(); tb.resize(self.items.len(), None); }
         // The panel is the only visible surface: the window is borderless + transparent. Rows wrap and their heights are
@@ -71,9 +73,9 @@ impl Render for BubbleView {
                             .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
                             .child(div().max_w(px(l.label_w as f32)).whitespace_normal().child(label.clone())) })
                     // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
-                    .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(2.))
-                        .child(Kbd::new(tab_key.clone()))
-                        .when(i != selected, |d| d.child(Kbd::new(Keystroke::parse(&(i + 1).to_string()).expect("digit")))))
+                    .child(div().w(px(bridge::BADGE_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
+                        .child(cap("Tab".into(), bridge::TAB_CAP_W))
+                        .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W))))
             }))).into_any_element()
     }
 }

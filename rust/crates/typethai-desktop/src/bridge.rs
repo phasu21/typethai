@@ -31,8 +31,14 @@ pub const ROW_PX: f64 = 10.0;
 pub const FONT_PX: f64 = 15.0;
 /// Space between the suggestion and its key hint (`Tab`, or `Tab` `2`).
 pub const BADGE_GAP: f64 = 8.0;
-/// Width reserved for the widest key hint: the `Tab` and digit `Kbd`s (`text_xs`, horizontal padding) and the gap.
-pub const BADGE_W: f64 = 58.0;
+/// Key hint keycaps: fixed sizes so the hint fits its slot whatever the platform font.
+pub const TAB_CAP_W: f64 = 30.0;
+pub const DIGIT_CAP_W: f64 = 18.0;
+pub const KEYCAP_GAP: f64 = 2.0;
+pub const KEYCAP_H: f64 = 18.0;
+pub const KEYCAP_FONT_PX: f64 = 11.0;
+/// Width reserved for the widest key hint: `Tab` and a digit.
+pub const BADGE_W: f64 = TAB_CAP_W + KEYCAP_GAP + DIGIT_CAP_W;
 /// Added to every measured single-line width: Thai upper/lower marks and tone marks on the last cluster can paint a
 /// little past the advance width, and layout rounds to device pixels; the slack keeps them inside the column.
 pub const MEASURE_SLACK: f64 = 3.0;
