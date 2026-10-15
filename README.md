@@ -96,6 +96,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b"] [--screenshot PNG]` | Show the bubble with sample rows (no key capture) |
+| `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
 
 ## Privacy
 

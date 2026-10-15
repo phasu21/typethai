@@ -23,6 +23,22 @@ fn main() {
         #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select); return }
         #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
     }
+    // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light]: only the Settings window, with sample
+    // words and no key capture, prefs or keychain
+    if let Some(i) = args.iter().position(|a| a == "--demo-settings") {
+        let mut secs = 30.0; let mut shot: Option<String> = None; let mut search: Option<String> = None; let mut page = 0usize; let mut light = false;
+        let mut it = args[i + 1..].iter();
+        while let Some(a) = it.next() { match a.as_str() {
+            "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(30.0),
+            "--screenshot" => shot = it.next().cloned(),
+            "--search" => search = it.next().cloned(),
+            "--page" => page = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "--light" => light = true,
+            _ => { eprintln!("--demo-settings: unknown option {a:?}"); std::process::exit(2) }
+        } }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo_settings(secs, shot, search, page, light); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (secs, shot, search, page, light); eprintln!("--demo-settings needs macOS or Windows"); std::process::exit(2) }
+    }
     // --probe-caret [--secs N]: log frontmost app / anchor source / caret rect every 500 ms and mark it on screen
     if args.iter().any(|a| a == "--probe-caret") {
         let secs = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(10.0);

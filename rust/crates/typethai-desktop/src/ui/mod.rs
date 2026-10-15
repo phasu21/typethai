@@ -304,5 +304,46 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, items: Opt
     });
 }
 
+fn demo_snap() -> crate::prefs::SettingsSnap {
+    let learned = [("brb", 3.0, 0.0), ("gg", 2.0, 0.5), ("lmao", 1.5, 0.0)];
+    crate::prefs::SettingsSnap {
+        never: ["lol", "ok", "omg"].map(String::from).to_vec(),
+        learned: learned.map(|(w, kept, conv)| typethai_core::personal::Learned { word: w.into(), kept, conv }).to_vec(),
+        rewrite: crate::rewrite::Config::default(),
+    }
+}
+
+/// `--demo-settings`: only the Settings window, filled with sample words and the default rewrite config, on `page`. No key
+/// capture, prefs or keychain. Optionally types `search` into the sidebar search box and forces light mode. With `shot`,
+/// captures the window to a PNG and quits; otherwise stays open `secs` seconds.
+pub fn demo_settings(secs: f64, shot: Option<String>, search: Option<String>, page: usize, light: bool) {
+    app().run(move |cx| {
+        setup(cx);
+        if light { Theme::change(gpui_kit::component::ThemeMode::Light, None, cx); }
+        let Some(h) = settings::open_demo(page, demo_snap(), cx).map(|win| win.handle) else { cx.quit(); return };
+        let shot = shot.clone(); let search = search.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            if let Some(text) = &search {
+                // the search box is the first tab stop: the sidebar comes before the page
+                cx.update(|cx| h.update(cx, |_, window, cx| {
+                    window.blur(cx);
+                    window.focus_next(cx);
+                    for c in text.chars() { window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: c.to_string(), key_char: Some(c.to_string()) }, cx); }
+                })).ok();
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+            }
+            match &shot {
+                Some(path) => {
+                    let n = cx.update(|cx| h.update(cx, |_, window, _| native::native(window)).ok().flatten());
+                    match n.map(|n| native::capture(&n, path)) { Some(Ok(())) => eprintln!("screenshot -> {path}"), Some(Err(e)) => eprintln!("screenshot failed: {e}"), None => eprintln!("screenshot failed: no native window") }
+                }
+                None => cx.background_executor().timer(Duration::from_secs_f64(secs)).await,
+            }
+            cx.update(|cx| cx.quit());
+        }).detach();
+    });
+}
+
 #[allow(dead_code)]
 fn _assert_monitor(_: Monitor) {}
