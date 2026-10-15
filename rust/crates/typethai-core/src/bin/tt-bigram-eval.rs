@@ -33,7 +33,7 @@ impl<'a> Lm<'a> {
         c.entry(prefix.to_string()).or_insert_with(|| self.comp.complete(prefix, CACHED, Context::default()).words).iter().take(k).cloned().collect()
     }
     fn unigram(&self, prefix: &str) -> Vec<String> { self.top(prefix, 3) }
-    fn shipped(&self, prev: &str, prefix: &str) -> Vec<String> { self.comp.complete(prefix, 3, Context { prev: Some(prev), bigrams: Some(self.bg), memory: None }).words }
+    fn shipped(&self, prev: &str, prefix: &str) -> Vec<String> { self.comp.complete(prefix, 3, Context { prev: Some(prev), bigrams: Some(self.bg), memory: None, slips: None }).words }
     fn context(&self, prev: &str, prefix: &str, lambda: f64) -> Vec<String> {
         let Some(m) = &self.marginal else { return self.rank(&self.bg.followers(prev).collect::<Vec<_>>(), prefix, lambda) };
         let key = format!("ctx\t{prefix}");

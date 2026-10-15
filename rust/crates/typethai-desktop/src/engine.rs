@@ -612,14 +612,14 @@ impl Engine {
             // the word before the tail in the run, else the one the line shows before the run
             let d = &self.det.th_dict;
             let prev = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => self.word_before(self.line.len()) };
-            let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory };
+            let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory, slips: None };
             (head.to_string(), run.clone(), comp.complete(tail, k, cx))
         } else {
             let w = self.word.as_str();
             if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
             let Some(comp) = &self.en_comp else { return vec![] };
             let prev = self.word_before(self.line.len());
-            let mut found = comp.complete(w, k, Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Latin), bigrams: self.en_bigrams.as_ref(), memory });
+            let mut found = comp.complete(w, k, Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Latin), bigrams: self.en_bigrams.as_ref(), memory, slips: None });
             if ask.spells() && found.words.len() < k { if let Some(sp) = &self.speller {
                 for g in sp.completions(w) {
                     if found.words.len() >= k { break }
