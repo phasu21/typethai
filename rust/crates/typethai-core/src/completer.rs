@@ -38,13 +38,13 @@ impl Completer {
         let p = prefix.to_ascii_lowercase();
         self.words.get(self.start(&p)).is_some_and(|(w, _)| w.starts_with(&p))
     }
-    /// A word extends `prefix` read with one slip (`prefix` itself is read as typed, and must have `SLIP_MIN` chars).
+    /// A word extends `prefix` read with one slip; never under `SLIP_MIN` chars.
     pub fn extends_slipped(&self, prefix: &str, slips: &Slips) -> bool { !self.slipped(&prefix.to_ascii_lowercase(), slips).is_empty() }
     /// `w` is in the list.
     pub fn knows(&self, w: &str) -> bool { self.freq(&w.to_ascii_lowercase()).is_some() }
     fn freq(&self, w: &str) -> Option<f64> { self.words.binary_search_by(|(x, _)| x.as_str().cmp(w)).ok().map(|i| self.words[i].1) }
     /// The prefixes one slip from `typed` that some word starts with, likeliest (by corpus share × slip chance)
-    /// first, at most `READINGS`. None for fewer than `SLIP_MIN` chars: one slip in two keys can mean anything.
+    /// first, at most `READINGS`. Nothing under `SLIP_MIN` chars: one slip in two keys can mean anything.
     fn slipped(&self, typed: &str, s: &Slips) -> Vec<Reading> {
         let t: Vec<char> = typed.chars().collect();
         if t.len() < SLIP_MIN { return vec![] }

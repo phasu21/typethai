@@ -8,9 +8,10 @@
 //!   Hit: the word is in the top 3 completions (Pause mode, ungated). Clean rows: the same for the word typed right.
 //!   Thai is typed glued to the word before, as Thai runs are, and completed from its tail like the engine does.
 //! - finished: the whole slipped word, as the rows after Space offer it. English: the spell checker's first 3 guesses
-//!   (before) against `en_items`; Thai: the corrector rows (before) against `typo_items`.
-//! Also for the keys typed right: how often a row is a word that does not extend them (noise), split by words the
-//! completer knows and words it does not, and how often the Typing-mode gate would show such a word on top.
+//!   (before) against `en_items`; Thai: the corrector rows (before) against `typo_items`. Also how often it gets rows
+//!   at all (a slip that makes another real word is not flagged), and `Completer::correct` alone, ungated.
+//! - typed right, by words the completer knows and words it lacks: how often the Typing-mode gate would show a wrong
+//!   word on top, and how often (after) a row is a word that does not extend the keys.
 use crate::app::{App, Cli};
 use crate::engine::{Engine, InputLang};
 use std::collections::BTreeMap;
