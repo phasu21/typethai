@@ -29,7 +29,10 @@ unless you press a key.
   Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
   default completions appear after a short pause in typing. **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
-  highlighted word, and **Esc** hides completions until the next word.
+  highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
+  one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in
+  list lacks is offered once you have typed it three times. **Learn from my typing** turns this off, and **Forget
+  learned words** clears it.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
@@ -119,8 +122,11 @@ in between) to run the guess-convert on the current or last word instead of usin
   - Windows: `%APPDATA%\typethai\personal.json`
 
   It holds small weight adjustments plus the words you undid or converted manually. Delete the file to reset learning.
-- Words you asked not to translate, and the word-suggestion setting, are stored next to it, in `prefs.json`. Deleting
+- Words you asked not to translate, and the word-suggestion settings, are stored next to it, in `prefs.json`. Deleting
   `personal.json` leaves them in place.
+- With **Learn from my typing** on (the default), the words you finish and which word came before each are counted in
+  `words.json`, next to `personal.json`, to rank word suggestions. Text in password fields is never seen. Turn the
+  setting off to stop counting, and use **Forget learned words** or delete the file to clear it.
 
 ## Accuracy (measured on held-out data; summary)
 
