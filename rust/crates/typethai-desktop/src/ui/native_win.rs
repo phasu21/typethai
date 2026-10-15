@@ -3,6 +3,7 @@ use crate::placement::{Monitor, Rect};
 use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -34,6 +35,9 @@ pub fn native(window: &Window) -> Option<Native> {
 pub fn prepare(n: &Native) { unsafe {
     let ex = GetWindowLongPtrW(n.0, GWL_EXSTYLE);
     SetWindowLongPtrW(n.0, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize);
+    // no DWM fade when the bubble is shown or hidden
+    let off = windows::core::BOOL(1);
+    let _ = DwmSetWindowAttribute(n.0, DWMWA_TRANSITIONS_FORCEDISABLED, &off as *const _ as *const core::ffi::c_void, std::mem::size_of_val(&off) as u32);
 } }
 /// `rc` is the area gpui draws in. The window keeps an invisible resize frame, so the window rect is grown by it and moved
 /// so that the client area lands exactly on `rc`; otherwise the bubble is cut off on the right and bottom.

@@ -20,7 +20,10 @@ impl Preset {
 const FIX: &str = "You fix spelling and typing mistakes in Thai and English text. Keep the wording, meaning, tone and punctuation exactly the same; change only misspelled words. If there are no mistakes, return the text unchanged. Output only the resulting text. No quotes, no explanation, no preamble.";
 const TRANSLATE: &str = "You translate between Thai and English. Detect the language of the text, then translate Thai into natural English or English into natural Thai. Translate every detail; do not summarize or leave anything out. Do not add ครับ or ค่ะ unless the source text is polite. Output only the translated text. No quotes, no explanation, no preamble.";
 
-pub const NO_SELECTION: &str = "No selected text found";
+/// Nothing selected and no word before the caret.
+pub const NO_SELECTION: &str = "Select text or type a word first";
+/// A word or selection with nothing to fix and no AI rows.
+pub const NO_SUGGESTIONS: &str = "No suggestions";
 pub const NO_KEY: &str = "Add an API key in Settings";
 pub const REWRITING: &str = "Rewriting…";
 /// Longest result label on the bubble; Tab still pastes the whole text.
@@ -83,13 +86,15 @@ pub enum Captured {
     Text(String),
     /// The field reports an empty selection, or the clipboard fallback saw no copy.
     NoSelection,
-    /// No API key stored (checked before reading the selection).
-    NoKey,
     /// Password field / secure input: refuse silently.
     Secure,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub enum Reply { Captured(ReqId, Captured), Rewritten(ReqId, Result<String, Failure>) }
+pub enum Reply {
+    /// `has_key`: an API key is stored (read only when text was captured).
+    Captured { id: ReqId, sel: Captured, has_key: bool },
+    Rewritten(ReqId, Result<String, Failure>),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Failure { NoKey, Timeout, Network, Rejected, RateLimited, Status(u16, Option<String>), BadResponse }
@@ -222,7 +227,7 @@ impl Worker {
     pub fn spawn<H: Host>(make: impl FnOnce() -> H + Send + 'static) -> Worker {
         let (tx, rx) = mpsc::channel(); let (desk, jobs) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("typethai-desk".into()).spawn(move || { let mut h = make(); for job in jobs { match job {
-            Job::Capture(id) => { let c = if secret::load().is_none() { Captured::NoKey } else { capture(&mut h) }; let _ = tx.send(Reply::Captured(id, c)); }
+            Job::Capture(id) => { let sel = capture(&mut h); let has_key = matches!(sel, Captured::Text(_)) && secret::load().is_some(); let _ = tx.send(Reply::Captured { id, sel, has_key }); }
             Job::Paste(text) => paste(&mut h, &text),
             Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = secret::load().ok_or(Failure::NoKey).and_then(|k| call(&r, &k)); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
         } } }).expect("desk thread");

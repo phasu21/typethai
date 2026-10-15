@@ -339,6 +339,7 @@ fn translate(code: u16, flags: u64) -> Option<Key> {
     if ctrl && alt { if let Some(h) = mac_keycode_to_us(code, false, false).and_then(hotkey_for) { return Some(Key::Hotkey(h)) } }
     if code == 0x33 && cmd { return Some(Key::LineDelete) }
     if code == 0x33 && alt && !ctrl { return Some(Key::WordDelete) }
+    if ctrl && !alt && !cmd && !shift { if let Some(d @ '1'..='3') = mac_keycode_to_us(code, false, false) { return Some(Key::PickRow(d as usize - '1' as usize)) } }
     if ctrl || alt || cmd { return Some(Key::Nav) }
     Some(match code {
         0x33 => Key::Backspace, 0x31 => Key::Boundary(Boundary::Space), 0x24 | 0x4C => Key::Boundary(Boundary::Enter),

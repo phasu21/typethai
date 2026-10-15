@@ -4,12 +4,15 @@
 //! as Thai while Thai is active, as the US letter after a switch to ABC); the sim follows `SwitchInput`.
 //! Editing: `<BS>` Backspace, `<A-BS>` Option/Ctrl+Backspace (word), `<C-BS>` Cmd+Backspace (line).
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
-//! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`. `<Idle>`: a typing pause long enough for word
+//! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`, `<C-1>`..`<C-3>` (Ctrl+digit). `<Idle>`: a typing pause long enough for word
 //! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
 //! deletes a grapheme per Backspace, here and in the engine's count.
-//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row.
-use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}};
+//! `^R` (Ctrl+Opt+R) reads the selection at once: the text of the last `<SEL:text>` (taken by that capture), else nothing
+//! selected. The sim answers as if an API key were stored; AI rewrites and pastes are only printed.
+//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row,
+//! `{"pick_with_ctrl":true}` makes `<C-1>`..`<C-3>` pick a row.
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}, rewrite::{Captured, Job, Reply}};
 use std::io::BufRead;
 use unicode_segmentation::UnicodeSegmentation;
 /// One Backspace in an app that deletes `unit`s.
@@ -32,6 +35,7 @@ pub fn apply(screen: &mut Vec<char>, acts: &[Action], swallowed: bool, typed: Op
 pub fn run(mut app: App) {
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap(); let mut screen: Vec<char> = vec![]; let mut bubble: Vec<String> = vec![]; let ch: Vec<char> = line.chars().collect(); let mut i = 0;
+        let mut selection: Option<String> = None;
         while i < ch.len() {
             let rest: String = ch[i..].iter().collect();
             if let Some(id) = rest.strip_prefix("<APP:").and_then(|r| r.split_once('>')).map(|(id, _)| id.to_string()) {
@@ -39,12 +43,17 @@ pub fn run(mut app: App) {
                 println!("  [app: {id}, Backspace deletes a {:?}]", app.engine.delete_unit);
                 i += id.chars().count() + "<APP:>".len(); continue
             }
-            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
+            if let Some(sel) = rest.strip_prefix("<SEL:").and_then(|r| r.split_once('>')).map(|(s, _)| s.to_string()) {
+                println!("  [selected: {sel:?}]");
+                i += sel.chars().count() + "<SEL:>".len(); selection = Some(sel); continue
+            }
+            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
                 i += t.chars().count() - 1;
                 if t == "<TH>" || t == "<EN>" { app.engine.set_thai_active(t == "<TH>"); println!("  [input source: {}]", if t == "<TH>" { "Thai" } else { "ABC" }); i += 1; continue }
-                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None), _ => (Some(Key::Esc), None) }
+                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
+                    "<C-1>" | "<C-2>" | "<C-3>" => (Some(Key::PickRow(t.as_bytes()[3] as usize - b'1' as usize)), None), _ => (Some(Key::Esc), None) }
             } else if ch[i] == '^' && i + 1 < ch.len() { i += 1; (Some(Key::Hotkey(hotkey_for(ch[i]).expect("hotkey"))), None) }
                 else { match ch[i] { ' ' => (Some(Key::Boundary(Boundary::Space)), Some(' ')), '\t' => (Some(Key::Tab), Some('\t')), c => match typethai_core::reverse::th_text_to_keys(&c.to_string()).filter(|_| typethai_core::keymap::is_thai(c)) {
                     // a Thai char in the input = that physical key; the screen shows the Thai char only while Thai is
@@ -55,7 +64,12 @@ pub fn run(mut app: App) {
             // a Tab not held with `<TabDown>` is released right away
             let release = k == Some(Key::Tab) && tok != Some("<TabDown>");
             for (k, typed) in std::iter::once((k, typed)).chain(release.then_some((Some(Key::TabUp), None))) {
-                let o = match &k { Some(k) => app.engine.on_key(k.clone()), None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle) } };
+                let mut o = match &k { Some(k) => app.engine.on_key(k.clone()), None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle) } };
+                let captures: Vec<_> = o.actions.iter().filter_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }).collect();
+                for id in captures {
+                    let sel = selection.take().map_or(Captured::NoSelection, Captured::Text);
+                    o.actions.extend(app.engine.on_reply(Reply::Captured { id, sel, has_key: true }));
+                }
                 let k = k.map_or("Idle".to_string(), |k| format!("{k:?}"));
                 for a in &o.actions { println!("  {k} -> {a:?}"); }
                 if o.swallow && o.actions.is_empty() { println!("  {k} -> (swallowed)"); }
