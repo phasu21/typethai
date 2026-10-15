@@ -7,7 +7,7 @@ const EOS: char = '\u{0003}';
 #[inline] fn k2(a: char, b: char) -> u64 { ((a as u64) << 21) | b as u64 }
 #[inline] fn k3(a: char, b: char, c: char) -> u64 { ((a as u64) << 42) | ((b as u64) << 21) | c as u64 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Ngram {
     pub vocab: f64,
     pub lambdas: [f64; 4],
@@ -59,6 +59,22 @@ impl Ngram {
             lp += (l3 * p3 + l2 * p2 + l1 * p1 + l0 / self.vocab).ln();
         }
         lp / (s.len() - 2) as f64
+    }
+    /// Natural-log probability that a word starts with `t` (no end marker).
+    pub fn log_prob_start(&self, t: &str) -> f64 {
+        let [l3, l2, l1, l0] = self.lambdas;
+        let total = self.total.unwrap_or(1.0);
+        let (mut a, mut b, mut lp) = (BOS, BOS, 0.0);
+        for x in t.chars() {
+            let c3d = self.c3c.get(&k2(a, b)).copied().unwrap_or(0);
+            let c2d = self.c2c.get(&(b as u32)).copied().unwrap_or(0);
+            let p3 = if c3d != 0 { self.c3.get(&k3(a, b, x)).copied().unwrap_or(0) as f64 / c3d as f64 } else { 0.0 };
+            let p2 = if c2d != 0 { self.c2.get(&k2(b, x)).copied().unwrap_or(0) as f64 / c2d as f64 } else { 0.0 };
+            let p1 = self.c1.get(&(x as u32)).copied().unwrap_or(0) as f64 / total;
+            lp += (l3 * p3 + l2 * p2 + l1 * p1 + l0 / self.vocab).ln();
+            (a, b) = (b, x);
+        }
+        lp
     }
     pub fn entries(&self) -> usize { self.c1.len() + self.c2.len() + self.c2c.len() + self.c3.len() + self.c3c.len() }
 }

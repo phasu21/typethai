@@ -8,7 +8,7 @@ use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -186,12 +186,14 @@ pub struct Options {
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
+    /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
+    pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
     pub bubble: BubbleLayout,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
 /// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
@@ -241,6 +243,8 @@ pub struct Engine {
     /// The last key was a Tab that inserted itself: a second Tab runs Guess.
     tab_pending: bool,
     tab: TabChord,
+    /// The bubble was opened by ⌃⌥R and offers something to apply: Enter applies the highlighted row, like Tab.
+    fixing: bool,
     line: Vec<Committed>,
     /// Index of the first word of the current line in `line` (after Enter the last word is kept so Tab still applies).
     line_start: usize,
@@ -280,7 +284,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default() }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -343,6 +347,7 @@ impl Engine {
             || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3')))
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
             || (matches!(k, Key::PickRow(_)) && self.picks_rows())
+            || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -369,28 +374,49 @@ impl Engine {
     pub fn prob(&self, last: &str) -> (f64, Vec<TokenDecision>) {
         let ds = self.decisions(last); let p = *self.personal.line_probs(&ds).last().unwrap_or(&0.0); (p, ds)
     }
-    /// English spelling suggestions for a finished word (`ths` -> this). Punctuation around the word is kept.
-    fn en_items(&self, typed: &str) -> Vec<BubbleItem> {
+    /// What completion and spelling rows in `lang` are ranked by: `prev` (the word before, when it is in `lang`), the
+    /// corpus pairs, the user's words and the slips.
+    pub(crate) fn context<'a>(&'a self, prev: Option<&'a str>, lang: InputLang) -> Context<'a> {
+        let bigrams = match lang { InputLang::Thai => self.thai_bigrams.as_ref(), InputLang::Latin => self.en_bigrams.as_ref() };
+        let unknown = Some(match lang { InputLang::Thai => &self.det.thai, InputLang::Latin => &self.det.english });
+        Context { prev: prev.filter(|p| lang_of(p) == lang), bigrams, memory: self.opts.learn_words.then_some(&*self.words), slips: self.opts.slips, unknown }
+    }
+    /// English spelling suggestions for a finished word (`ths` -> this) the spell checker flags: its guesses and, with
+    /// slips, the words one slip away, ranked by the completion model after `prev`. Punctuation around the word is kept.
+    pub(crate) fn en_items(&self, typed: &str, prev: Option<&str>) -> Vec<BubbleItem> {
         let Some(sp) = &self.speller else { return vec![] };
         if !self.opts.typo_suggestions { return vec![] }
         let core = typed.trim_matches(|c: char| !c.is_ascii_alphabetic());
         if core.len() < 2 || !core.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
         let at = typed.find(core).unwrap_or(0);
         let (pre, post) = (&typed[..at], &typed[at + core.len()..]);
-        sp.guesses(core).unwrap_or_default().into_iter().filter(|g| g != core).take(3)
-            .map(|g| { let word = format!("{pre}{g}{post}"); BubbleItem { label: word.clone(), kind: BubbleKind::Typo { word } } }).collect()
+        let Some(guesses) = sp.guesses(core) else { return vec![] };
+        let fixes = match (self.opts.slips, &self.en_comp) {
+            (Some(_), Some(comp)) => comp.correct(core, 3, self.context(prev, InputLang::Latin), &guesses),
+            _ => guesses.into_iter().filter(|g| g != core).take(3).collect(),
+        };
+        fixes.into_iter().map(|g| { let word = format!("{pre}{g}{post}"); BubbleItem { label: word.clone(), kind: BubbleKind::Typo { word } } }).collect()
     }
-    fn typo_items(&self, thai: &str) -> Vec<BubbleItem> {
+    /// Thai typo fixes for a word the corrector does not know: its suggestions and, with slips, the words one slip
+    /// away, ranked by the completion model after `prev`. A word it knows gets at most its normalised spelling.
+    pub(crate) fn typo_items(&self, thai: &str, prev: Option<&str>) -> Vec<BubbleItem> {
         let Some(c) = &self.corrector else { return vec![] };
         if !self.opts.typo_suggestions { return vec![] }
-        let r = c.suggest(thai, 3, &self.det.thai);
+        let r = c.suggest(thai, TYPO_GUESSES, &self.det.thai);
         if r.in_dict && r.apply.is_none() { return vec![] }
-        let mut out: Vec<BubbleItem> = r.apply.iter().filter(|a| a.as_str() != thai).map(|a| BubbleItem { label: a.clone(), kind: BubbleKind::Typo { word: a.clone() } }).collect();
-        for s in r.suggestions { if out.len() >= 3 { break } if !out.iter().any(|o| o.label == s.word) { out.push(BubbleItem { label: s.word.clone(), kind: BubbleKind::Typo { word: s.word } }) } }
+        let item = |w: String| BubbleItem { label: w.clone(), kind: BubbleKind::Typo { word: w } };
+        if let (false, Some(_), Some(comp)) = (r.in_dict, self.opts.slips, &self.thai_comp) {
+            let guesses: Vec<String> = r.suggestions.iter().map(|s| s.word.clone()).collect();
+            let fixes = comp.correct(&r.normalized, 3, self.context(prev, InputLang::Thai), &guesses);
+            if !fixes.is_empty() { return fixes.into_iter().filter(|w| w != thai).map(item).collect() }
+        }
+        let mut out: Vec<BubbleItem> = r.apply.iter().filter(|a| a.as_str() != thai).cloned().map(item).collect();
+        for s in r.suggestions { if out.len() >= 3 { break } if !out.iter().any(|o| o.label == s.word) { out.push(item(s.word)) } }
         out
     }
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
     fn show(&mut self, mut items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
+        self.fixing = false;
         // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks
         items.sort_by_key(|i| match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 });
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
@@ -457,6 +483,9 @@ impl Engine {
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
+            Key::Boundary(Boundary::Enter) if self.fixing && self.bubble_visible() => {
+                let mut o = self.on_hotkey(Hotkey::Accept(self.sel.idx)); o.swallow = true; o
+            }
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
         }
@@ -628,24 +657,22 @@ impl Engine {
         if self.thai_active && live.is_some() { return vec![] }
         let (min, k) = (ask.min_len(), 3 - usize::from(live.is_some()));
         let gate = |c: &Completions| !ask.gated() || c.confidence >= self.opts.complete_conf;
-        let memory = self.opts.learn_words.then_some(&*self.words);
         // `reading`: the buffer as the rows read it, `head` its part kept in front of each completed word
         let (head, reading, found) = if self.thai_active || live.is_some() {
             let Some(comp) = &self.thai_comp else { return vec![] };
             let run = en_to_th(&self.word);
-            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
+            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             // the word before the tail in the run, else the one the line shows before the run
             let d = &self.det.th_dict;
             let prev = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => self.word_before(self.line.len()) };
-            let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory };
-            (head.to_string(), run.clone(), comp.complete(tail, k, cx))
+            (head.to_string(), run.clone(), comp.complete(tail, k, self.context(prev.as_deref(), InputLang::Thai)))
         } else {
             let w = self.word.as_str();
             if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
             let Some(comp) = &self.en_comp else { return vec![] };
             let prev = self.word_before(self.line.len());
-            let mut found = comp.complete(w, k, Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Latin), bigrams: self.en_bigrams.as_ref(), memory });
+            let mut found = comp.complete(w, k, self.context(prev.as_deref(), InputLang::Latin));
             if ask.spells() && found.words.len() < k { if let Some(sp) = &self.speller {
                 for g in sp.completions(w) {
                     if found.words.len() >= k { break }
@@ -785,6 +812,7 @@ impl Engine {
             return Outcome::pass()
         }
         if self.thai_active { return self.on_boundary_rev(typed, b) }
+        let prev = self.word_before(self.line.len());
         let (p, ds) = self.prob(&typed);
         let d = ds.last().unwrap();
         let thai = d.candidate.clone();
@@ -800,21 +828,21 @@ impl Engine {
             swallow = true; converted = Some(thai.clone());
             acts.push(self.replace(&typed, &thai, Some(b)));
             let mut items = vec![BubbleItem { label: typed.clone(), kind: BubbleKind::UndoConversion }];
-            items.extend(self.typo_items(&thai));
+            items.extend(self.typo_items(&thai, prev.as_deref()));
             self.show(items, &mut acts);
         } else if d.valid && p > self.band(&thai, self.opts.suggest_band) {
             // default: the boundary passes through untouched; the bubble offers the conversion (Tab / hotkey applies)
             let mut items = vec![BubbleItem { label: thai.clone(), kind: BubbleKind::Convert { typed: typed.clone(), thai: thai.clone() } }];
             // the best English spelling stays in reach right under the Thai reading
-            let en = self.en_items(&typed);
+            let en = self.en_items(&typed, prev.as_deref());
             items.extend(en.first().cloned());
-            for t in self.typo_items(&thai) { if t.label != thai { items.push(t) } }
+            for t in self.typo_items(&thai, prev.as_deref()) { if t.label != thai { items.push(t) } }
             items.extend(en.into_iter().skip(1));
             items.truncate(3);
             self.show(items, &mut acts); self.phrase = 1;
         } else {
             // left as English: offer spelling corrections
-            let en = self.en_items(&typed);
+            let en = self.en_items(&typed, prev.as_deref());
             self.show(en, &mut acts); self.phrase = 0;
         }
         self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
@@ -1031,6 +1059,8 @@ impl Engine {
         }
         Outcome { swallow: true, actions: acts }
     }
+    /// Some row on the bubble applies a fix (a notice only closes it).
+    fn offers_fix(&self) -> bool { self.bubble.iter().any(|b| !matches!(b.kind, BubbleKind::Rewrite(RewriteRow::Notice))) }
     fn rewriting(&self) -> bool { self.capturing.is_some() || matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(_), .. })) }
     /// Keys a rewrite session survives. Anything else ends it first; unlike suggestions, Space/Enter/Backspace too,
     /// because the selection the rows refer to has just been edited.
@@ -1039,6 +1069,7 @@ impl Engine {
             // holding the hotkey autorepeats: while capturing that is a no-op, not a restart
             Key::Hotkey(Hotkey::Rewrite) => self.capturing.is_some(),
             Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss) => self.bubble_visible(),
+            Key::Boundary(Boundary::Enter) => self.fixing && self.bubble_visible(),
             _ => false,
         }
     }
@@ -1056,7 +1087,8 @@ impl Engine {
         let mut a = vec![];
         match r {
             RewriteRow::Preset(preset, text) => {
-                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a);
+                // Enter while it runs is the user confirming, not a newline
+                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a); self.fixing = true;
                 a.push(Action::Rewrite(Job::Run(Run { req: id, preset, text, cfg: self.rewrite.clone() })));
             }
             RewriteRow::Busy(_) => {}
@@ -1068,18 +1100,18 @@ impl Engine {
     /// ⌃⌥R with nothing selected: the rows for the word before the caret, the buffer or else the last word on the
     /// line. None when there is no such word.
     fn word_options(&self) -> Option<Vec<BubbleItem>> {
-        if !self.word.is_empty() { return Some(self.word_rows(&self.word, self.thai_active)) }
+        if !self.word.is_empty() { return Some(self.word_rows(&self.word, self.thai_active, self.word_before(self.line.len()))) }
         let c = self.line.last().filter(|_| self.line.len() > self.line_start)?;
         // a converted word's other layout is its undo
         if c.converted.is_some() { return Some(vec![BubbleItem { label: c.orig.clone(), kind: BubbleKind::UndoConversion }]) }
-        Some(self.word_rows(&c.typed, c.rev))
+        Some(self.word_rows(&c.typed, c.rev, self.word_before(self.line.len() - 1)))
     }
     /// The conversion of `typed` (keys typed in the `rev` direction) when it looks meant, and the spelling fixes of the
     /// word as it is and as converted, in the order the boundary bubble uses. A reverse conversion clears a high bar,
     /// so the Thai on screen is not offered fixed next to it; a forward one keeps the English spelling in reach.
-    fn word_rows(&self, typed: &str, rev: bool) -> Vec<BubbleItem> {
+    fn word_rows(&self, typed: &str, rev: bool, prev: Option<String>) -> Vec<BubbleItem> {
         let (screen, target) = if rev { (en_to_th(typed), typed.to_string()) } else { (typed.to_string(), en_to_th(typed)) };
-        let fixes = |text: &str, thai: bool| if thai { self.typo_items(text) } else { self.en_items(text) };
+        let fixes = |text: &str, thai: bool| if thai { self.typo_items(text, prev.as_deref()) } else { self.en_items(text, prev.as_deref()) };
         let converts = if rev { !self.blocked(typed) && { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
         let here = if rev && converts { vec![] } else { fixes(&screen, rev) };
         if !converts { return here.into_iter().take(3).collect() }
@@ -1142,7 +1174,7 @@ impl Engine {
         let to = spans.iter().zip(flips).map(|(&(a, b), f)| { let w = &text[a..b];
             if matches!(f, Some((_, true))) { None }
             else if lang_of(w) == InputLang::Thai { self.fix_thai(w) }
-            else if Instant::now() < deadline { self.en_items(w).into_iter().next().map(|i| i.label) }
+            else if Instant::now() < deadline { self.en_items(w, None).into_iter().next().map(|i| i.label) }
             else { None } }).collect();
         splice(text, spans, to)
     }
@@ -1181,10 +1213,12 @@ impl Engine {
                     Captured::Secure => vec![],
                 };
                 self.show(rows, &mut a);
+                self.fixing = self.offers_fix();
             }
             Reply::Rewritten(id, res) if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Rewrite(RewriteRow::Busy(b)), .. }) if *b == id) => {
                 let r = match res { Ok(t) => row(&rewrite::preview(&t, rewrite::PREVIEW_CHARS), RewriteRow::Result(t)), Err(f) => row(&f.message(), RewriteRow::Notice) };
                 self.show(vec![r], &mut a);
+                self.fixing = self.offers_fix();
             }
             _ => {}
         }
@@ -1198,6 +1232,8 @@ const SELECTION_LOCAL_MAX: usize = 300;
 /// Time the spell checker gets for a selection: about 0.15 ms per right word, 2 to 8 ms per misspelled one (macOS,
 /// measured in `completion_cost`), so a typo-heavy selection is fixed only up to here.
 const SPELL_BUDGET: Duration = Duration::from_millis(25);
+/// Corrector suggestions the Thai typo rows are ranked from.
+const TYPO_GUESSES: usize = 10;
 /// The corrector replaces a Thai word when it would keep it with less confidence than this. In samples, correct runs
 /// score 0.99 and up and runs with a typo 0.35 to 0.71.
 const TYPO_KEEP: f64 = 0.9;
@@ -1996,6 +2032,33 @@ mod tests {
         let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false });
         assert_eq!(labels(&e), ["is this"], "no key: the local fix alone, no notice");
     }
+    #[test] fn enter_applies_a_fix_offered_by_ctrl_opt_r() {
+        let Some(mut e) = engine() else { return };
+        typ(&mut e, "l;ylfu ");
+        let id = start(&mut e); e.on_reply(captured(id, Captured::NoSelection));
+        assert_eq!(labels(&e)[0], "สวัสดี");
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(o.swallow, "Enter confirms instead of typing a newline");
+        assert_eq!(o.actions[0], Action::Replace { delete: 7, insert: "สวัสดี ".into(), then: None });
+        assert!(!e.bubble_visible());
+        e.reset();
+        let id = start(&mut e); e.on_reply(captured(id, Captured::Text("l;ylfu".into())));
+        assert_eq!(labels(&e)[0], "สวัสดี");
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(o.swallow); assert!(o.actions.contains(&Action::Rewrite(Job::Paste("สวัสดี".into()))), "{:?}", o.actions);
+    }
+    #[test] fn enter_is_a_newline_over_other_bubbles_and_notices() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "hel"); assert!(e.bubble_visible());
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(!o.swallow, "a completion bubble: Enter is the user's newline");
+        e.reset();
+        let id = start(&mut e); e.on_reply(captured(id, Captured::NoSelection));
+        assert_eq!(labels(&e), ["Select text or type a word first"]);
+        let o = e.on_key(Key::Boundary(Boundary::Enter));
+        assert!(!o.swallow, "a notice offers nothing to confirm");
+    }
     #[test] fn with_rewrite_off_a_selection_gets_the_local_rows() {
         let Some(mut e) = engine_typo() else { return };
         e.speller = Some(Box::new(FakeSpeller)); e.rewrite.enabled = false;
@@ -2049,6 +2112,8 @@ mod tests {
         e.thai_comp = Some(c(&[("ภาษา", 10.0), ("ภาษี", 5.0), ("ภาษาไทย", 3.0)]));
         e.en_comp = Some(c(&[("help", 30.0), ("hello", 10.0), ("helmet", 5.0)]));
         e.opts.complete = mode;
+        // keys read as typed: in three words, any key one slip from them reads as one of them for sure
+        e.opts.slips = None;
     }
     fn keys(th: &str) -> String { typethai_core::reverse::th_text_to_keys(th).unwrap() }
     fn idle(e: &mut Engine, ms: u64) -> Vec<Action> { let t = e.last_key.expect("a key is pending"); e.on_idle(t + Duration::from_millis(ms)) }
@@ -2529,7 +2594,8 @@ mod tests {
         for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         let run = keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห");
-        let cases: [(&str, bool, String); 5] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, run.clone())];
+        let cases: [(&str, bool, String); 8] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("en a candel", false, "a candel".into()),
+            ("en the tje", false, "the tje".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai slip สวัสก", true, keys("สวัสก")), ("thai run 30", true, run.clone())];
         let measure = |e: &mut Engine| {
             for (name, thai, k) in &cases {
                 e.reset(); e.set_thai_active(*thai); typ(e, k);
@@ -2580,6 +2646,26 @@ mod tests {
         println!("words.json: {} KB, to_json {:.2} ms", json.len() / 1024, t.elapsed().as_secs_f64() * 1e3);
         e.opts.complete = CompleteMode::Typing;
         measure(&mut e);
+    }
+    /// Flags `candel` with the guesses the macOS checker gives, in its order.
+    struct CandelSpeller;
+    impl Speller for CandelSpeller { fn guesses(&self, w: &str) -> Option<Vec<String>> { (w == "candel").then(|| ["cancel", "candle", "Handel"].map(String::from).to_vec()) } }
+    #[test] fn a_slipped_key_still_reaches_the_word_meant() {
+        let (Some(mut m), Some(mut e)) = (model(), engine_typo()) else { return };
+        e.opts.complete = CompleteMode::Pause; e.load_completers(&mut m); e.speller = Some(Box::new(CandelSpeller));
+        typ(&mut e, "candel"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["candles", "candle", "cancel"], "candle is el swapped; mid-word the word may go on");
+        e.opts.slips = None;
+        e.reset(); typ(&mut e, "candel"); assert_eq!(idle(&mut e, 600), vec![], "read as typed, no word starts with candel");
+        e.opts.slips = Some(Slips::default());
+        e.reset(); typ(&mut e, "light a candel "); assert_eq!(labels(&e), ["candle", "cancel", "Handel"]);
+        e.reset(); typ(&mut e, "we must candel "); assert_eq!(labels(&e), ["cancel", "candle", "Handel"], "the previous word decides");
+        // Thai on the Thai layout, completed mid-word; Thai typed on the English layout, fixed under its conversion
+        e.reset(); e.set_thai_active(true); typ(&mut e, &keys("สวัสก")); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["สวัสดี", "สวัสดิ์", "สวัสดิภาพ"], "ก is next to ด");
+        e.reset(); e.set_thai_active(false); typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        assert_eq!(labels(&e), ["โรงเรยีน", "โรงเรียน", "โรงเรือน"], "ยี swapped");
+        e.reset(); typ(&mut e, &format!("{} ", keys("ร้านอาหร"))); assert_eq!(labels(&e), ["ร้านอาหร", "ร้านอาหาร"], "า left out");
     }
     #[test] fn model_completers_skip_english_without_its_frequencies() {
         let Some(mut m) = model() else { return };
