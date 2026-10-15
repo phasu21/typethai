@@ -76,8 +76,9 @@ The menu-bar icon also has **Settings…**. From there you can list words that s
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
 with the defaults) and press **Save key**. The key is kept in the macOS Keychain or Windows Credential Manager, never in
 a file. Model and base URL can point at any OpenAI-compatible `/chat/completions` server; plain `http://` is accepted
-only for `localhost` (for example Ollama at `http://localhost:11434/v1`). Esc, typing, a click elsewhere or switching
-apps cancels a rewrite at any step.
+only for `localhost` (for example Ollama at `http://localhost:11434/v1`). **Instructions** adds your own text to the
+prompt for both actions, for example a preferred tone. Esc, typing, a click elsewhere or switching apps cancels a
+rewrite at any step.
 
 When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
 in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
