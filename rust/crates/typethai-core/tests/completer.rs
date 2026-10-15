@@ -116,7 +116,7 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 }
 #[test] fn segment_splits_a_run_into_dictionary_words() {
     let dict = Dict::new(["ฉัน", "ชอบ", "ภาษา", "ไทย", "ภาษาไทย", "มาก"].map(String::from));
-    assert_eq!(dict.segment("ฉันชอบภาษาไทยxyzภาษ"), [("ฉัน", true), ("ชอบ", true), ("ภาษาไทย", true), ("xyzภาษ", false)]);
-    assert_eq!(dict.segment("ๆชอบมาก"), [("ๆ", false), ("ชอบ", true), ("มาก", true)]);
-    assert_eq!(dict.segment(""), []);
+    assert_eq!(dict.segment("ฉันชอบภาษาไทยxyzภาษ"), ["ฉัน", "ชอบ", "ภาษาไทย", "xyzภาษ"]);
+    assert_eq!(dict.segment("ๆชอบมาก"), ["ๆ", "ชอบ", "มาก"]);
+    assert_eq!(dict.segment(""), Vec::<&str>::new());
 }

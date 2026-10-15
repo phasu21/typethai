@@ -206,9 +206,12 @@ impl Engine {
         Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
-    pub fn load_completers(&mut self, m: &typethai_core::ModelFiles) {
+    pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
         self.thai_comp = Some(m.thai_completer());
         self.en_comp = (!m.english_freq.is_empty()).then(|| m.english_completer());
+        // taken, not cloned: loaded pairs take tens of MB
+        self.thai_bigrams = Some(std::mem::take(&mut m.th_bigrams)).filter(|b| !b.is_empty());
+        self.en_bigrams = Some(std::mem::take(&mut m.en_bigrams)).filter(|b| !b.is_empty());
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -482,7 +485,8 @@ impl Engine {
             let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             // the word before the tail in the run, else the one the line shows before the run
-            let prev = match self.det.th_dict.segment(head).last() { Some((w, word)) => word.then(|| w.to_string()), None => self.word_before(self.line.len()) };
+            let d = &self.det.th_dict;
+            let prev = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => self.word_before(self.line.len()) };
             let cx = Context { prev: prev.as_deref().filter(|p| lang_of(p) == InputLang::Thai), bigrams: self.thai_bigrams.as_ref(), memory };
             (head.to_string(), comp.complete(tail, k, cx))
         } else {
@@ -538,7 +542,8 @@ impl Engine {
     /// words. None is anything else (digits, symbols, Thai the dictionary does not cover); it ends a chain of words.
     fn screen_words(&self, text: &str) -> Vec<Option<String>> {
         if lang_of(text) == InputLang::Thai {
-            return self.det.th_dict.segment(text).into_iter().map(|(w, word)| (word && !w.chars().any(char::is_numeric)).then(|| w.to_string())).collect()
+            let d = &self.det.th_dict;
+            return d.segment(text).into_iter().map(|w| (d.has(w) && !w.chars().any(char::is_numeric)).then(|| w.to_string())).collect()
         }
         let core = text.trim_matches(|c: char| !c.is_alphanumeric());
         vec![(!core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic())).then(|| core.to_ascii_lowercase())]
@@ -1813,8 +1818,8 @@ mod tests {
     /// `cargo test --release -p typethai-desktop completion_cost -- --ignored --nocapture`: per-keystroke cost of the
     /// Typing-mode rows on the real model, and each prefix's top word and confidence.
     #[test] #[ignore] fn completion_cost() {
-        let (Some(m), Some(mut e)) = (model(), engine()) else { return };
-        e.opts.complete = CompleteMode::Typing; e.load_completers(&m); e.speller = crate::platform::spell::system();
+        let (Some(mut m), Some(mut e)) = (model(), engine()) else { return };
+        e.opts.complete = CompleteMode::Typing; e.load_completers(&mut m); e.speller = crate::platform::spell::system();
         let (th, en) = (m.thai_completer(), m.english_completer());
         for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
@@ -1856,12 +1861,12 @@ mod tests {
         let Some(mut m) = model() else { return };
         let Some(mut e) = engine() else { return };
         e.opts.complete = CompleteMode::Pause;
-        e.load_completers(&m);
+        e.load_completers(&mut m);
         typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
         e.reset(); typ(&mut e, "hel"); idle(&mut e, 600);
         if !m.english_freq.is_empty() { assert_eq!(labels(&e), ["help", "hello", "hell"]); }
-        m.english_freq.clear(); e.load_completers(&m);
+        m.english_freq.clear(); e.load_completers(&mut m);
         e.reset(); typ(&mut e, "hel"); assert_eq!(idle(&mut e, 600), vec![], "no English frequencies: no English completion");
         e.reset(); typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
         assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "Thai still completes");

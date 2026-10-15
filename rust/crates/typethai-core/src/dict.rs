@@ -25,30 +25,28 @@ impl Dict {
         }
         best[n] as f64 / n as f64
     }
-    /// `s` split into dictionary words: as much of it covered as possible, then as few words as possible. Each piece is
-    /// (text, is a word); the uncovered stretches between words are the other pieces.
-    pub fn segment<'s>(&self, s: &'s str) -> Vec<(&'s str, bool)> {
+    /// Max-coverage segmentation (mirrors `segment` in src/corrector.ts): a dictionary piece of length L scores L²,
+    /// an unknown char -1, and consecutive unknown chars come back as one piece.
+    pub fn segment<'a>(&self, s: &'a str) -> Vec<&'a str> {
+        const MAX_LEN: usize = 16;
         let at: Vec<usize> = s.char_indices().map(|(b, _)| b).chain([s.len()]).collect(); let n = at.len() - 1;
-        // best[i] = (chars covered, -words) over s[..i]; from[i] = where the last piece starts and whether it is a word
-        let mut best = vec![(0usize, 0isize); n + 1]; let mut from = vec![(0usize, false); n + 1];
+        let piece = |j: usize, i: usize| &s[at[j]..at[i]];
+        let (mut best, mut back) = (vec![i64::MIN; n + 1], vec![0usize; n + 1]); best[0] = 0;
         for i in 1..=n {
-            (best[i], from[i]) = (best[i - 1], (i - 1, false));
-            for l in 1..=self.max_len.min(i) {
-                let cand = (best[i - l].0 + l, best[i - l].1 - 1);
-                if cand > best[i] && self.words.contains(&s[at[i - l]..at[i]]) { (best[i], from[i]) = (cand, (i - l, true)); }
+            (best[i], back[i]) = (best[i - 1] - 1, i - 1);
+            for l in 1..=MAX_LEN.min(i) {
+                let v = best[i - l] + (l * l) as i64;
+                if v > best[i] && self.has(piece(i - l, i)) { (best[i], back[i]) = (v, i - l); }
             }
         }
-        let mut out: Vec<(&str, bool)> = vec![]; let mut i = n;
+        let (mut out, mut i, mut unk_end) = (Vec::new(), n, None);
         while i > 0 {
-            let (j, word) = from[i];
-            match out.last_mut() {
-                // one gap piece for a run of uncovered chars (pieces are collected back to front)
-                Some((g, false)) if !word => *g = &s[at[j]..at[i] + g.len()],
-                _ => out.push((&s[at[j]..at[i]], word)),
-            }
+            let j = back[i];
+            if i - j == 1 && !self.has(piece(j, i)) { unk_end.get_or_insert(i); }
+            else { if let Some(e) = unk_end.take() { out.push(piece(i, e)); } out.push(piece(j, i)); }
             i = j;
         }
-        out.reverse();
-        out
+        if let Some(e) = unk_end { out.push(piece(0, e)); }
+        out.reverse(); out
     }
 }

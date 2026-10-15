@@ -66,7 +66,7 @@ fn write_file(path: &Path, text: &str) {
 }
 impl App {
     pub fn load(cli: &Cli) -> Result<App, String> {
-        let m = ModelFiles::load(&cli.model).map_err(|e| format!("model {}: {e}", cli.model.display()))?;
+        let mut m = ModelFiles::load(&cli.model).map_err(|e| format!("model {}: {e}", cli.model.display()))?;
         let personal = match std::fs::read_to_string(&cli.state) {
             Ok(s) => PersonalModel::from_json(m.classifier.clone(), &s).unwrap_or_else(|e| { eprintln!("personal state unreadable ({e}); starting fresh"); PersonalModel::new(m.classifier.clone(), None, DEFAULT_PERSONAL) }),
             Err(_) => PersonalModel::new(m.classifier.clone(), None, DEFAULT_PERSONAL),
@@ -80,7 +80,7 @@ impl App {
         let words_path = cli.state.with_file_name("words.json");
         engine.words = Arc::new(load_words(&words_path));
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
-        engine.load_completers(&m);
+        engine.load_completers(&mut m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
         Ok(App { engine, state_path: cli.state.clone(), prefs_path, words_path, saver: Saver::spawn() })
     }
