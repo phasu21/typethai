@@ -1,5 +1,12 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.3.1**
+- **Noto font.** The bubble and Settings now use Noto Sans Thai with Noto Sans for Latin, bundled in the app, so Thai
+  looks the same on macOS and Windows.
+
+**Fixed in 0.3.1**
+- Windows: the bubble was cut off on the right and bottom, and the key hints sat against its edge.
+
 **New in 0.3.0**
 - **Smarter word suggestions.** Completions now look at the word before the one you are typing, so `I want to bu`
   offers *buy* first and `what time is it no` offers *now*. In held-out text, the right word is in the top 3 after two
