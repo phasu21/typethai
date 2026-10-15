@@ -30,5 +30,6 @@ HF=https://huggingface.co/datasets/wikimedia/wikipedia/resolve/b04c8d1ceb2f5cd45
 get "$HF/20231101.th/train-00002-of-00003.parquet" "$D/wiki/th.parquet"
 get "$HF/20231101.en/train-00040-of-00041.parquet" "$D/wiki/en.parquet"
 
+# scripts/bigrams/SHA256SUMS holds the files the shipped pairs were built from (downloaded 2026-10-15).
 (cd "$D" && shasum -a 256 scb/*.zip wisesight/*.txt tatoeba/*.bz2 wiki/*.parquet) > "$D/SHA256SUMS"
 cat "$D/SHA256SUMS"
