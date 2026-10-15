@@ -3,7 +3,8 @@
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use std::collections::BTreeSet;
-use typethai_core::{reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, TokenDecision};
+use std::time::{Duration, Instant};
+use typethai_core::{completer::{thai_tail, Completer, Completions}, reverse::Reverse, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -73,7 +74,9 @@ pub enum BubbleKind {
     ConvertPrev { k: usize },
     /// Guess (double Tab / hotkey): replace the last `k` committed words, and the buffer `typed` when it is Some, with
     /// `targets` (one per word, in order).
-    Guess { k: usize, typed: Option<String>, targets: Vec<String> } }
+    Guess { k: usize, typed: Option<String>, targets: Vec<String> },
+    /// Word completion: replace what the buffer `typed` put on screen with `insert` (a Thai run keeps its head).
+    Complete { typed: String, insert: String } }
 /// What the key handler should do with the original key event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome { pub swallow: bool, pub actions: Vec<Action> }
@@ -105,9 +108,15 @@ pub struct Options {
     /// A word left as Thai is offered together with the next word (in the live bubble, and again after Space)
     /// when that next word is confident and this word's probability with that right context is above `rev_prev`.
     pub rev_prev: f64,
+    /// Word completion: `Typing` shows it on a keystroke when the top word's share of the prefix's frequency is at
+    /// least `complete_conf`; `Pause` shows it, ungated, once no key came for `complete_idle`.
+    pub complete: CompleteMode, pub complete_conf: f64, pub complete_idle: Duration,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
-    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV } } }
+    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(500) } } }
+/// When word completions appear in the bubble.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
 /// Same band as the suggestion shown after Space (`suggest_band`), so a word that would be offered at the boundary
 /// is offered while it is still being typed.
 pub const LIVE_SHOW: f64 = 0.5;
@@ -148,11 +157,22 @@ pub struct Engine {
     pub never: BTreeSet<String>,
     /// English spelling suggestions for words left as typed; None disables them.
     pub speller: Option<Box<dyn Speller + Send>>,
+    /// Word completion sources; None disables that language.
+    pub thai_comp: Option<Completer>, pub en_comp: Option<Completer>,
+    /// The last Char / Backspace, until `on_idle` has handled the pause after it.
+    last_key: Option<Instant>,
+    /// Esc / Dismiss: no completions until the next word boundary.
+    comp_muted: bool,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, thai_comp: None, en_comp: None, last_key: None, comp_muted: false }
+    }
+    /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
+    pub fn load_completers(&mut self, m: &typethai_core::ModelFiles) {
+        self.thai_comp = Some(m.thai_completer());
+        self.en_comp = (!m.english_freq.is_empty()).then(|| m.english_completer());
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -200,6 +220,7 @@ impl Engine {
     /// Focus change, mouse click, secure field, layout change: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
         self.word.clear(); self.tab_pending = false; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
+        self.last_key = None; self.comp_muted = false;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
     fn decisions(&self, last: &str) -> Vec<TokenDecision> {
@@ -234,8 +255,11 @@ impl Engine {
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
     fn show(&mut self, items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
-        if items.is_empty() { self.phrase = 0; if !self.bubble.is_empty() { self.bubble.clear(); acts.push(Action::HideBubble) } }
-        else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); acts.push(Action::ShowBubble(items)) }
+        let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
+            else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); Action::ShowBubble(items) };
+        // one bubble update per key (the live row and the completions under it are worked out one after the other)
+        acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
+        acts.push(act);
     }
     fn feedback(&mut self, typed: &str, kind: Feedback) {
         let ds = self.decisions(typed); let i = ds.len() - 1; self.personal.feedback(&ds, i, kind); self.events_since_save += 1;
@@ -260,8 +284,9 @@ impl Engine {
                 // a new word starts: the bubble was about the previous word and can no longer be applied
                 let mut a = vec![]; if self.word.is_empty() { self.show(vec![], &mut a); self.live_streak = 0; }
                 else if matches!(self.bubble.first(), Some(BubbleItem { kind: BubbleKind::Guess { .. }, .. })) { self.show(vec![], &mut a); }
-                self.word.push(c);
+                self.word.push(c); self.last_key = Some(Instant::now());
                 self.live_update(&mut a);
+                self.update_completions(false, &mut a);
                 Outcome { swallow: false, actions: a }
             }
             Key::Tab => if self.bubble_visible() {
@@ -281,9 +306,9 @@ impl Engine {
                 let i = if k == Key::SelectNext { self.sel.next() } else { self.sel.prev() };
                 Outcome { swallow: true, actions: vec![Action::Select(i)] }
             } else { Outcome { swallow: false, actions: self.reset() } },
-            Key::Esc => if self.bubble_visible() { let mut a = vec![]; self.show(vec![], &mut a); Outcome { swallow: true, actions: a } }
+            Key::Esc => if self.bubble_visible() { let mut a = vec![]; self.dismiss(&mut a); Outcome { swallow: true, actions: a } }
                 else { Outcome { swallow: false, actions: self.reset() } },
-            Key::Backspace => { self.tab_pending = false; self.on_backspace() }
+            Key::Backspace => { self.tab_pending = false; self.last_key = Some(Instant::now()); self.on_backspace() }
             Key::WordDelete => self.on_word_delete(),
             // Cmd+Backspace deletes the whole line: nothing of it is left to offer
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
@@ -370,10 +395,67 @@ impl Engine {
             else if was_shown && self.live_confident() { self.live_streak = self.opts.live_stable; let prev = self.live_prev(); self.show_live(prev, acts) }
             else if was_shown { self.live_streak = 0; self.show(vec![], acts) }
             else { self.live_update(acts) }                                      // nothing shown: normal stability rules
+            self.update_completions(false, acts);
         } else if phrase > 0 && was_shown {
             // buffer gone: the words still left on the line (reverse phrase) stay offered
             self.offer_committed(phrase, acts);
         } else { self.show(vec![], acts) }
+    }
+    /// Esc / Dismiss: hide the bubble; completions stay away until the word ends.
+    fn dismiss(&mut self, acts: &mut Vec<Action>) { self.comp_muted = !self.word.is_empty(); self.show(vec![], acts) }
+    /// Pause mode: the first timer tick at least `complete_idle` after a key in a word offers its completions.
+    pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
+        let mut acts = vec![];
+        if self.paused || self.opts.complete != CompleteMode::Pause { return acts }
+        if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
+        self.last_key = None;
+        self.update_completions(true, &mut acts);
+        acts
+    }
+    /// Re-derive the completion rows under the live row (if it is up); stale ones go. `idle`: the pause has elapsed.
+    fn update_completions(&mut self, idle: bool, acts: &mut Vec<Action>) {
+        let due = match self.opts.complete { CompleteMode::Off => false, CompleteMode::Pause => idle, CompleteMode::Typing => !idle };
+        let rows = if due { self.completion_rows(!idle) } else { vec![] };
+        if rows.is_empty() && !self.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Complete { .. })) { return }
+        let live = self.bubble.first().filter(|b| matches!(&b.kind, BubbleKind::Live { typed, .. } if *typed == self.word)).cloned();
+        let items: Vec<BubbleItem> = live.into_iter().chain(rows).collect();
+        if items != self.bubble { self.show(items, acts) }
+    }
+    /// Completions of the buffer, at most 3 rows with the live row. Thai (a Thai layout run, or a wrong-layout word the
+    /// live row converts): the run's last word is completed and the rest kept, labelled with that word only. Otherwise
+    /// an English word. `typing`: the completed part needs 3 chars and `complete_conf` (after a pause: 2, ungated).
+    fn completion_rows(&self, typing: bool) -> Vec<BubbleItem> {
+        if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return vec![] }
+        let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.as_str()), _ => None });
+        // English typed on the Thai layout: the reverse live row is what was meant
+        if self.thai_active && live.is_some() { return vec![] }
+        let (min, k) = (if typing { 3 } else { 2 }, 3 - usize::from(live.is_some()));
+        let gate = |c: &Completions| !typing || c.confidence >= self.opts.complete_conf;
+        let (head, found) = if self.thai_active || live.is_some() {
+            let Some(comp) = &self.thai_comp else { return vec![] };
+            let run = en_to_th(&self.word);
+            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
+            let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
+            (head.to_string(), comp.complete(tail, k))
+        } else {
+            let w = self.word.as_str();
+            if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
+            let Some(comp) = &self.en_comp else { return vec![] };
+            let mut found = comp.complete(w, k);
+            if found.words.len() < k && gate(&found) { if let Some(sp) = &self.speller {
+                for g in sp.completions(w) {
+                    if found.words.len() >= k { break }
+                    // keep the typed prefix's case: the checker may capitalise
+                    let Some(rest) = g.get(w.len()..).filter(|r| !r.is_empty() && g[..w.len()].eq_ignore_ascii_case(w)) else { continue };
+                    let g = format!("{w}{rest}");
+                    if !found.words.iter().any(|f| f.eq_ignore_ascii_case(&g)) { found.words.push(g) }
+                }
+            } }
+            (String::new(), found)
+        };
+        if !gate(&found) { return vec![] }
+        found.words.into_iter().filter(|w| Some(format!("{head}{w}").as_str()) != live).take(k)
+            .map(|w| BubbleItem { kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{head}{w}") }, label: w }).collect()
     }
     /// Offer the last `n` committed words again (word buffer empty, caret right after them).
     fn offer_committed(&mut self, n: usize, acts: &mut Vec<Action>) {
@@ -434,7 +516,7 @@ impl Engine {
     }
     fn on_boundary(&mut self, b: Boundary) -> Outcome {
         self.tab_pending = false;
-        self.live_streak = 0;
+        self.live_streak = 0; self.comp_muted = false; self.last_key = None;
         let typed = std::mem::take(&mut self.word);
         let mut acts = vec![]; let mut swallow = false;
         if typed.is_empty() {
@@ -666,6 +748,11 @@ impl Engine {
                     BubbleKind::Convert { .. } => return self.on_hotkey(Hotkey::ForceConvert),
                     BubbleKind::ConvertPrev { k } => self.flip_prev(k, &mut acts),
                     BubbleKind::Guess { k, typed, targets } => self.apply_guess(k, typed, targets, &mut acts),
+                    BubbleKind::Complete { typed, insert } => {
+                        if self.word != typed { return Outcome::pass() }
+                        acts.push(Action::Replace { delete: self.screen_of(&typed).chars().count(), insert: insert.clone(), then: None });
+                        self.commit_glued(typed, insert, 0);
+                    }
                     BubbleKind::Typo { word } => if let Some((n, c)) = self.last_on_screen() {
                         let c = c.clone();
                         acts.push(Action::Replace { delete: n, insert: format!("{word}{}", c.after()), then: None });
@@ -674,7 +761,7 @@ impl Engine {
                 }
                 self.show(vec![], &mut acts);
             }
-            Hotkey::Dismiss => { self.show(vec![], &mut acts); return Outcome { swallow: false, actions: acts } }
+            Hotkey::Dismiss => { self.dismiss(&mut acts); return Outcome { swallow: false, actions: acts } }
             Hotkey::TogglePause => unreachable!(),
         }
         Outcome { swallow: true, actions: acts }
@@ -1247,5 +1334,131 @@ mod tests {
         e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
         typ(&mut e, "mu ");
         assert_eq!(labels(&e), ["ที", "my"]);
+    }
+    // ---------- word completion ----------
+    fn completers(e: &mut Engine, mode: CompleteMode) {
+        let c = |ws: &[(&str, f64)]| Completer::new(ws.iter().map(|(w, f)| (w.to_string(), *f)));
+        e.thai_comp = Some(c(&[("ภาษา", 10.0), ("ภาษี", 5.0), ("ภาษาไทย", 3.0)]));
+        e.en_comp = Some(c(&[("help", 30.0), ("hello", 10.0), ("helmet", 5.0)]));
+        e.opts.complete = mode;
+    }
+    fn keys(th: &str) -> String { typethai_core::reverse::th_text_to_keys(th).unwrap() }
+    fn idle(e: &mut Engine, ms: u64) -> Vec<Action> { let t = e.last_key.expect("a key is pending"); e.on_idle(t + Duration::from_millis(ms)) }
+    #[test] fn completes_a_wrong_layout_thai_prefix_while_typing() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        let mut log = vec![];
+        feed(&mut e, &mut log, &keys("ภาษ"));
+        assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
+        assert_eq!(log[2].1.actions.len(), 1, "one bubble update for the live row and its completions: {:?}", log[2].1.actions);
+        assert!(matches!(e.bubble[0].kind, BubbleKind::Live { .. }));
+        hot(&mut e, &mut log, Hotkey::Accept(1));
+        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 3, insert: "ภาษา".into(), then: None });
+        assert!(log.last().unwrap().1.actions.contains(&Action::SwitchInput(InputLang::Thai)));
+        assert_eq!(e.buffer(), ""); assert_eq!(screen(&log), "ภาษา");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), keys("ภาษ")); assert_eq!(e.buffer(), keys("ภาษ"));
+    }
+    #[test] fn completes_the_last_word_of_a_thai_run() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        let mut log: Vec<(Option<char>, Outcome)> = vec![];
+        e.set_thai_active(true);
+        for c in keys("ฉันชอบภาษ").chars() { log.push((en_to_th(&c.to_string()).chars().next(), e.on_key(Key::Char(c)))); }
+        assert_eq!(screen(&log), "ฉันชอบภาษ");
+        assert_eq!(labels(&e), ["ภาษา", "ภาษี", "ภาษาไทย"], "labelled with the completed word only");
+        assert_eq!(e.bubble[0].kind, BubbleKind::Complete { typed: keys("ฉันชอบภาษ"), insert: "ฉันชอบภาษา".into() });
+        log.push((None, e.on_key(Key::Tab)));
+        assert_eq!(log.last().unwrap().1.actions[0], Action::Replace { delete: 9, insert: "ฉันชอบภาษา".into(), then: None });
+        assert_eq!(screen(&log), "ฉันชอบภาษา");
+        // English typed on the Thai layout keeps only its reverse live row
+        e.reset(); e.opts.rev_live = 0.5; e.thai_comp = Some(Completer::new([("าืนไก".to_string(), 9.0)]));
+        typ_th(&mut e, "าืนไ");
+        assert_eq!(labels(&e), ["know"]);
+        e.reset(); e.opts.rev_live = 1.1; typ_th(&mut e, "าืนไ");
+        assert_eq!(labels(&e), ["าืนไก"], "the same run completes as Thai when it is not read as English");
+    }
+    #[test] fn completes_english_while_typing_above_the_confidence_gate() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "he"); assert!(!e.bubble_visible(), "2 letters are too few while typing");
+        typ(&mut e, "l"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        let mut log = vec![]; feed(&mut e, &mut log, "\t");
+        assert_eq!(log[0].1.actions, vec![Action::Replace { delete: 3, insert: "help".into(), then: None }, Action::HideBubble, Action::SwitchInput(InputLang::Latin)]);
+        e.reset(); e.opts.complete_conf = 0.99;
+        let o = typ(&mut e, "hel"); assert!(o.iter().all(|x| bubble_items(x).is_none())); assert!(!e.bubble_visible());
+    }
+    #[test] fn pause_mode_offers_completions_once_after_the_idle_time() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        let o = typ(&mut e, "hel"); assert!(o.iter().all(|x| x.actions.is_empty()));
+        assert_eq!(idle(&mut e, 100), vec![]);
+        let o = idle(&mut e, 600);
+        assert_eq!(o.len(), 1); assert_eq!(bubble_items(&Outcome { swallow: false, actions: o }).unwrap().iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["help", "hello", "helmet"]);
+        assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![], "shown once per pause");
+        // the next key drops the rows; the next pause brings the new ones
+        let o = e.on_key(Key::Char('m')); assert_eq!(o.actions, vec![Action::HideBubble]);
+        idle(&mut e, 600); assert_eq!(labels(&e), ["helmet"]);
+        e.on_key(Key::Backspace); assert!(!e.bubble_visible());
+        idle(&mut e, 600); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        // a boundary takes them away and offers nothing for the finished word
+        let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
+        assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    #[test] fn esc_mutes_completions_until_the_word_ends() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
+        let o = e.on_key(Key::Esc); assert!(o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]);
+        typ(&mut e, "m"); assert_eq!(idle(&mut e, 600), vec![]); assert!(!e.bubble_visible());
+        typ(&mut e, "x hel"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+    }
+    #[test] fn off_mode_never_completes() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Off);
+        typ(&mut e, "hel"); assert_eq!(idle(&mut e, 600), vec![]); assert!(!e.bubble_visible());
+        e.reset(); typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["ภาษ"], "only the live conversion");
+        completers(&mut e, CompleteMode::Typing); e.reset(); typ(&mut e, &keys("ภาษ"));
+        assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "same engine, completions on");
+    }
+    /// `cargo test --release -p typethai-desktop completion_cost -- --ignored --nocapture`: per-keystroke cost of the
+    /// Typing-mode rows on the real model, and each prefix's top word and confidence.
+    #[test] #[ignore] fn completion_cost() {
+        let (Some(m), Some(mut e)) = (model(), engine()) else { return };
+        e.opts.complete = CompleteMode::Typing; e.load_completers(&m); e.speller = crate::platform::spell::system();
+        let (th, en) = (m.thai_completer(), m.english_completer());
+        for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
+        let cases: [(&str, bool, String); 4] = [("en hel", false, "hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห"))];
+        for (name, thai, k) in cases {
+            e.reset(); e.set_thai_active(thai); typ(&mut e, &k);
+            let mut ns: Vec<u128> = (0..2000).map(|_| { let t = Instant::now(); std::hint::black_box(e.completion_rows(true)); t.elapsed().as_nanos() }).collect();
+            ns.sort_unstable();
+            println!("{name}: rows {:?} p50 {:.1} us p99 {:.1} us", labels(&e), ns[1000] as f64 / 1e3, ns[1980] as f64 / 1e3);
+        }
+        // whole keystrokes (live row included) over the 30-char run on the English layout, with and without completion
+        for mode in [CompleteMode::Off, CompleteMode::Typing] {
+            e.opts.complete = mode;
+            let mut ns: Vec<u128> = vec![];
+            for _ in 0..50 { e.reset(); for c in keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห").chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
+            ns.sort_unstable();
+            println!("on_key {mode:?}: p50 {:.1} us p99 {:.1} us (n={})", ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
+        }
+    }
+    #[test] fn model_completers_skip_english_without_its_frequencies() {
+        let Some(mut m) = model() else { return };
+        let Some(mut e) = engine() else { return };
+        e.opts.complete = CompleteMode::Pause;
+        e.load_completers(&m);
+        typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
+        e.reset(); typ(&mut e, "hel"); idle(&mut e, 600);
+        if !m.english_freq.is_empty() { assert_eq!(labels(&e), ["help", "hello", "hell"]); }
+        m.english_freq.clear(); e.load_completers(&m);
+        e.reset(); typ(&mut e, "hel"); assert_eq!(idle(&mut e, 600), vec![], "no English frequencies: no English completion");
+        e.reset(); typ(&mut e, &keys("ภาษ")); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"], "Thai still completes");
     }
 }
