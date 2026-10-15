@@ -2502,7 +2502,8 @@ mod tests {
         for p in ["hel", "wor", "tha", "pro", "com", "beca", "thi", "sta", "goo", "abo"] { let c = en.complete(p, 1, Context::default()); println!("en {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         for p in ["ภาษ", "สวั", "ขอบ", "ประ", "ความ", "โรงเ", "มหา", "คอม", "อร่", "ทำง"] { let c = th.complete(p, 1, Context::default()); println!("th {p}\t{:?}\t{:.2}", c.words, c.confidence) }
         let run = keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห");
-        let cases: [(&str, bool, String); 5] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai run 30", true, run.clone())];
+        let cases: [(&str, bool, String); 8] = [("en hel", false, "hel".into()), ("en the hel", false, "the hel".into()), ("en becau", false, "becau".into()), ("en a candel", false, "a candel".into()),
+            ("en the tje", false, "the tje".into()), ("wrong-layout ภาษ", false, keys("ภาษ")), ("thai slip สวัสก", true, keys("สวัสก")), ("thai run 30", true, run.clone())];
         let measure = |e: &mut Engine| {
             for (name, thai, k) in &cases {
                 e.reset(); e.set_thai_active(*thai); typ(e, k);

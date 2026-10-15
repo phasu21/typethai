@@ -64,11 +64,12 @@ impl Completer {
         let n = CANDIDATES.max(k);
         let mut reads = vec![Reading { span: self.span(&p), q: p.clone(), p: 1.0 }];
         if let Some(s) = &cx.slips { reads.extend(self.slipped(&p, s)) }
-        let mut spreads: Vec<Spread> = reads.into_iter().map(|r| self.spread(r, &p, n)).collect();
+        let mut spreads: Vec<Spread> = reads.into_iter().enumerate().map(|(i, r)| self.spread(r, &p, if i == 0 { n } else { SLIP_CANDIDATES.max(k) })).collect();
         if let (Some(prev), Some(b)) = (cx.prev, cx.bigrams) {
-            // best first, so the first matches are the ones that can rank
-            for (w, c) in b.followers(prev).take(FOLLOWER_SCAN) {
-                for sp in spreads.iter_mut().filter(|sp| sp.bi < CANDIDATES && w.starts_with(sp.read.q.as_str())) { sp.bi += 1; sp.add(self, BI, w, c, &p) }
+            // best first, so the first matches are the ones that can rank; a reading's words are one run of ids
+            let ids: Vec<std::ops::Range<u32>> = spreads.iter().map(|sp| b.starting(&sp.read.q)).collect();
+            for (id, w, c) in b.ids_of(b.find(prev)).take(FOLLOWER_SCAN) {
+                for (sp, r) in spreads.iter_mut().zip(&ids) { if sp.bi < CANDIDATES && r.contains(&id) { sp.bi += 1; sp.add(self, BI, w, c, &p, sp.bi) } }
             }
         }
         if let Some(m) = cx.memory {
@@ -76,8 +77,8 @@ impl Completer {
             let known = |w: &str| self.freq(w).is_some() || m.count(w) >= NEW_WORD_MIN;
             for sp in &mut spreads {
                 let q = sp.read.q.clone();
-                for (w, c) in m.with_prefix(&q) { if known(w) { sp.add(self, MINE, w, c, &p) } }
-                if let Some(prev) = cx.prev { for (w, c) in m.after(prev, &q) { if known(w) { sp.add(self, MINE_PAIR, w, c, &p) } } }
+                for (i, (w, c)) in m.with_prefix(&q).filter(|(w, _)| known(w)).enumerate() { sp.add(self, MINE, w, c, &p, i + 1) }
+                if let Some(prev) = cx.prev { for (i, (w, c)) in m.after(prev, &q).filter(|(w, _)| known(w)).enumerate() { sp.add(self, MINE_PAIR, w, c, &p, i + 1) } }
             }
         }
         // each reading's chance: its words' share of all the signals can say, times the chance of its slip
@@ -154,7 +155,7 @@ impl Completer {
     }
     /// The corpus words of a reading, the best `n` by frequency as candidates; `typed` itself is never one.
     fn spread(&self, read: Reading, typed: &str, n: usize) -> Spread<'_> {
-        let mut sp = Spread { total: [0.0; SIGNALS], cands: vec![], bi: 0, read };
+        let mut sp = Spread { total: [0.0; SIGNALS], cands: vec![], bi: 0, cap: n, read };
         for (w, f) in &self.words[sp.read.span.0..sp.read.span.1] {
             sp.total[UNI] += f;
             if w == typed { continue }
@@ -167,12 +168,14 @@ impl Completer {
 }
 /// A prefix the typed keys may have meant, the chance of the slip that typed it instead (1: as typed), and its words.
 struct Reading { q: String, p: f64, span: (usize, usize) }
-/// What one reading can become, per signal: the weight of all its words (the prefix itself included), and the best.
-struct Spread<'a> { read: Reading, total: [f64; SIGNALS], cands: Vec<Cand<'a>>, bi: usize }
+/// What one reading can become, per signal: the weight of all its words (the prefix itself included), and the best
+/// (at most `cap` from each signal).
+struct Spread<'a> { read: Reading, total: [f64; SIGNALS], cands: Vec<Cand<'a>>, bi: usize, cap: usize }
 impl<'a> Spread<'a> {
-    fn add(&mut self, c: &'a Completer, sig: usize, w: &'a str, n: f64, typed: &str) {
+    /// The `nth` word of a signal (1-based, best first) for this reading.
+    fn add(&mut self, c: &'a Completer, sig: usize, w: &'a str, n: f64, typed: &str, nth: usize) {
         self.total[sig] += n;
-        if w == typed { return }
+        if w == typed || nth > self.cap { return }
         match self.cands.iter_mut().find(|x| x.word == w) {
             Some(x) => x.n[sig] += n,
             None => { let mut v = [0.0; SIGNALS]; v[UNI] = c.freq(w).unwrap_or(0.0); v[sig] = n; self.cands.push(Cand { word: w, n: v }) }
@@ -267,6 +270,8 @@ pub const SLIP_MIN: usize = 3;
 /// Least share of a word only a slip reaches: below it the keys were most likely typed as meant, and the word would
 /// only take a row from the spell checker's completions.
 const SLIP_FLOOR: f64 = 0.01;
+/// Candidates a slipped reading takes from each signal: it holds a small share, so only its best words can rank.
+const SLIP_CANDIDATES: usize = 8;
 /// Slipped readings of the keys kept besides the keys as typed; the rest are too unlikely to reach the top rows.
 const READINGS: usize = 8;
 /// Extensions taken from each list (corpus words, bigram followers); a word below them cannot reach the top rows.
@@ -406,9 +411,16 @@ impl Bigrams {
         None
     }
     /// The followers of word `i`; none for `None`.
-    fn of(&self, i: Option<u32>) -> impl ExactSizeIterator<Item = (&str, f64)> {
+    fn of(&self, i: Option<u32>) -> impl ExactSizeIterator<Item = (&str, f64)> { self.ids_of(i).map(|(_, w, f)| (w, f)) }
+    /// The followers of word `i` with their ids.
+    fn ids_of(&self, i: Option<u32>) -> impl ExactSizeIterator<Item = (u32, &str, f64)> {
         let r = i.map_or(0..0, |i| self.start[i as usize] as usize..self.start[i as usize + 1] as usize);
-        self.pairs[r].iter().map(move |&(n, f)| (self.word(n), f as f64))
+        self.pairs[r].iter().map(move |&(n, f)| (n, self.word(n), f as f64))
+    }
+    /// The ids of the words that start with `prefix`: ids are in word order, so they are one run.
+    fn starting(&self, prefix: &str) -> std::ops::Range<u32> {
+        let first = |past: &dyn Fn(&str) -> bool| { let (mut lo, mut hi) = (0u32, self.ends.len() as u32); while lo < hi { let mid = (lo + hi) / 2; if past(self.word(mid)) { lo = mid + 1 } else { hi = mid } } lo };
+        first(&|w| w < prefix)..first(&|w| w < prefix || w.starts_with(prefix))
     }
     /// The words seen after `prev`, most frequent first.
     pub fn followers(&self, prev: &str) -> impl ExactSizeIterator<Item = (&str, f64)> { self.of(self.find(prev)) }
