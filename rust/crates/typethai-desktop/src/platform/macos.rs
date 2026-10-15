@@ -342,11 +342,15 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 None => { let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
-        CGEventType::KeyDown => {
+        CGEventType::KeyDown | CGEventType::KeyUp => {
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-            let Some(key) = translate(code, e.get_flags().bits()) else { return false };
+            let key = if matches!(ty, CGEventType::KeyUp) {
+                // the only release that matters: Tab, while it is held over the bubble
+                if code != 0x30 || !st.app.engine.is_bubble_key(&Key::TabUp) { return false }
+                Key::TabUp
+            } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if pid != st.last_pid { st.last_pid = pid; let a = st.app.engine.reset(); run_actions(st, a); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
@@ -419,7 +423,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
 fn capture_thread(app: App, tx: Sender<UiMsg>) {
     TX.with(|t| *t.borrow_mut() = Some(tx.clone()));
     let tap = CGEventTap::new(CGEventTapLocation::Session, CGEventTapPlacement::HeadInsertEventTap, CGEventTapOptions::Default,
-        vec![CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e));
+        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e));
     let tap = match tap { Ok(t) => t, Err(_) => {
         eprintln!("CGEventTapCreate failed: grant Accessibility (and Input Monitoring) to this binary/terminal, then relaunch.");
         let _ = tx.send(UiMsg::Stopped); return

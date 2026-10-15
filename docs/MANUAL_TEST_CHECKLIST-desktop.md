@@ -22,8 +22,17 @@
 - [ ] Light mode looks right (only dark mode was captured).
 - [ ] Placement is correct near the bottom of the screen with the real size (not captured).
 
+## Tab+digit (not run live by the agent; engine tests and --simulate only)
+- [ ] With 3 rows up, hold Tab and press 2: row 2 is applied, and the app receives neither the Tab nor the 2.
+- [ ] Hold Tab and press 1: same result as tapping Tab.
+- [ ] Hold Tab past the key-repeat delay, then release: the highlighted row is applied once and no tabs are typed.
+- [ ] With a 1-row bubble, hold Tab and press 3: nothing happens and the bubble stays; releasing Tab does nothing.
+- [ ] Roll Tab straight into Space or the next letter (press it before Tab is up): the row is applied first, then the key, in that order. After a Thai row the letter comes out as Thai.
+- [ ] With no bubble, hold Tab and press 2: a tab and then 2 are typed, as before.
+- [ ] Windows (Notepad): the same checks.
+
 ## v10 bubble keys / input source / live bubble (not run live by the agent)
-- [ ] With a bubble visible: Tab applies the highlighted row, and the app does NOT receive the Tab.
+- [ ] With a bubble visible: Tab applies the highlighted row when released, and the app does NOT receive the Tab.
 - [ ] With no bubble: Tab works normally (indent, focus change), and Shift+Up/Down still select text.
 - [ ] Shift+Up/Down move the highlight (wrapping) and the app receives nothing. Esc closes the bubble and isn't passed to the app; with no bubble, Esc reaches the app.
 - [ ] ⌃⌥1–3 still apply rows 1–3.
