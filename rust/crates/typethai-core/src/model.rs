@@ -67,13 +67,13 @@ fn bigram_map(b: &[u8]) -> Result<Bigrams, String> {
         let l = get_var(b, &mut p)? as usize;
         words.push(std::str::from_utf8(b.get(p..p + l).ok_or("trunc")?).map_err(|e| e.to_string())?); p += l;
     }
-    let word = |i: u64| words.get(i as usize).map(|w| w.to_string()).ok_or("bad word index");
     let mut pairs = Vec::new(); let mut prev = 0;
     for _ in 0..get_var(b, &mut p)? {
         prev += get_var(b, &mut p)?; let mut next = 0;
-        for _ in 0..get_var(b, &mut p)? { next += get_var(b, &mut p)?; pairs.push((word(prev)?, word(next)?, get_var(b, &mut p)? as f64)); }
+        for _ in 0..get_var(b, &mut p)? { next += get_var(b, &mut p)?; pairs.push((prev as usize, next as usize, get_var(b, &mut p)? as f64)); }
     }
-    Ok(Bigrams::new(pairs))
+    if pairs.iter().any(|&(a, b, _)| a.max(b) >= words.len()) { return Err("bad word index".into()) }
+    Ok(Bigrams::new(pairs.into_iter().map(|(a, b, c)| (words[a].to_string(), words[b].to_string(), c))))
 }
 /// A `prev\tnext\tcount` file as written by `tt-bigrams`.
 pub fn bigrams_tsv(path: &Path) -> Result<Bigrams, String> {
