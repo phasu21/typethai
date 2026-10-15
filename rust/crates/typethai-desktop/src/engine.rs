@@ -12,6 +12,8 @@ impl Boundary { pub fn text(self) -> &'static str { match self { Boundary::Space
 pub trait Speller {
     /// None when `word` is spelled right (or cannot be checked); else the guesses, best first.
     fn guesses(&self, word: &str) -> Option<Vec<String>>;
+    /// Words that start with `prefix`, best first (empty where the OS has no completion API).
+    fn completions(&self, _prefix: &str) -> Vec<String> { vec![] }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause }
