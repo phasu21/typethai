@@ -76,7 +76,7 @@ impl App {
         let mut engine = Engine::new(m.learn_detector(), personal, corrector, opts);
         let prefs_path = prefs::prefs_beside(&cli.state);
         let p = Prefs::load(&prefs_path);
-        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.learn_words, engine.rewrite) = (p.never, p.completion, p.complete_idle, p.learn_words, p.rewrite);
+        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.learn_words, engine.opts.accept, engine.rewrite) = (p.never, p.completion, p.complete_idle, p.learn_words, p.accept, p.rewrite);
         let words_path = cli.state.with_file_name("words.json");
         engine.words = Arc::new(load_words(&words_path));
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
@@ -93,7 +93,7 @@ impl App {
     /// Save, and return once the files are on disk (quitting).
     pub fn save_and_wait(&mut self) { self.save(); self.saver.flush(); }
     pub fn maybe_save(&mut self) { if self.engine.events_since_save >= 10 { self.save() } }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, learn_words: self.engine.opts.learn_words, rewrite: self.engine.rewrite.clone() }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, learn_words: self.engine.opts.learn_words, accept: self.engine.opts.accept, rewrite: self.engine.rewrite.clone() }.save(&self.prefs_path); }
 }
 /// Hotkeys are Ctrl+Alt (Windows) / Ctrl+Option (macOS) + key char.
 pub fn hotkey_for(c: char) -> Option<Hotkey> {
