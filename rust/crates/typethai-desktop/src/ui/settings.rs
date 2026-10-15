@@ -1,6 +1,7 @@
-//! Settings window: words that stay as typed, and the on-device learning list.
+//! Settings window: words that stay as typed, the on-device learning list, and AI rewrite.
 use crate::bridge;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
+use crate::rewrite;
 use crate::ui::thai_font;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -16,7 +17,14 @@ struct SettingsView {
     error: Option<String>,
     loaded: bool,
     confirm_reset: bool,
+    key: Entity<InputState>,
+    model: Entity<InputState>,
+    base_url: Entity<InputState>,
+    key_state: KeyState,
+    rewrite_error: Option<String>,
 }
+enum KeyState { Checking, Missing, Saved, Failed(String) }
+const KEY_STORE: &str = if cfg!(windows) { "Credential Manager" } else { "the Keychain" };
 
 #[derive(Clone, Copy)]
 struct Paint { bg: Hsla, fg: Hsla, muted: Hsla, border: Hsla, danger: Hsla }
@@ -33,7 +41,7 @@ pub fn apply_snapshot(slot: &mut Option<SettingsWin>, snap: SettingsSnap, cx: &m
     let alive = slot.as_ref().is_some_and(|win| win.handle.update(cx, |_, _, _| ()).is_ok());
     if !alive { *slot = None; return; }
     let Some(win) = slot.as_ref() else { return };
-    win.view.update(cx, |v, cx| v.show(snap, cx));
+    let _ = win.handle.update(cx, |_, window, cx| win.view.update(cx, |v, cx| v.show(snap, window, cx)));
 }
 
 fn open_settings(cx: &mut App) -> Option<SettingsWin> {
@@ -55,13 +63,24 @@ fn open_settings(cx: &mut App) -> Option<SettingsWin> {
 fn build_view(window: &mut Window, cx: &mut App) -> Entity<SettingsView> {
     let input = cx.new(|cx| InputState::new(window, cx).placeholder("ok"));
     let watch = input.clone();
-    let view = cx.new(|_| SettingsView { input, snap: SettingsSnap::default(), error: None, loaded: false, confirm_reset: false });
+    let d = rewrite::Config::default();
+    let key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("API key"));
+    let model = cx.new(|cx| InputState::new(window, cx).placeholder(d.model));
+    let base_url = cx.new(|cx| InputState::new(window, cx).placeholder(d.base_url));
+    let view = cx.new(|_| SettingsView { input, snap: SettingsSnap::default(), error: None, loaded: false, confirm_reset: false, key, model, base_url, key_state: KeyState::Checking, rewrite_error: None });
     view.update(cx, |_, cx| {
         cx.subscribe_in(&watch, window, |this, _, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { secondary: false, shift: false } = ev { this.add_word(window, cx); }
         }).detach();
     });
     watch.read(cx).focus_handle(cx).focus(window, cx);
+    view.update(cx, |_, cx| {
+        // the keyring may block on a Keychain prompt: never on the UI thread
+        cx.spawn(async move |this, cx| {
+            let has = cx.background_executor().spawn(async { rewrite::has_key() }).await;
+            let _ = this.update(cx, |v, cx| { v.key_state = if has { KeyState::Saved } else { KeyState::Missing }; cx.notify(); });
+        }).detach();
+    });
     view
 }
 
@@ -85,6 +104,12 @@ fn labeled_row(title: String, detail: Option<String>, paint: Paint, button: Butt
     }
     div().min_h(px(40.)).px(px(12.)).flex().flex_row().items_center().gap(px(8.)).child(text).child(button).into_any_element()
 }
+fn input_row(input: &Entity<InputState>, button: Button) -> impl IntoElement {
+    div().flex().flex_row().items_center().gap(px(8.)).child(div().flex_1().child(Input::new(input))).child(button)
+}
+fn field(title: &str, input: &Entity<InputState>) -> impl IntoElement {
+    div().flex().flex_col().gap(px(4.)).child(div().text_size(px(13.)).child(title.to_string())).child(Input::new(input))
+}
 fn fmt_count(n: f64) -> String {
     if (n - n.round()).abs() < 0.05 { format!("{}", n.round() as i64) } else { format!("{n:.1}") }
 }
@@ -93,9 +118,38 @@ fn count_text(row: &Learned) -> String {
 }
 
 impl SettingsView {
-    fn show(&mut self, snap: SettingsSnap, cx: &mut Context<Self>) {
+    fn show(&mut self, snap: SettingsSnap, window: &mut Window, cx: &mut Context<Self>) {
+        // fill the rewrite fields once, so later snapshots do not overwrite what is being typed
+        if !self.loaded { self.fill_rewrite(&snap.rewrite, window, cx); }
         self.loaded = true;
         self.snap = snap;
+        cx.notify();
+    }
+    fn fill_rewrite(&self, c: &rewrite::Config, window: &mut Window, cx: &mut Context<Self>) {
+        let (model, base_url) = (c.model.clone(), c.base_url.clone());
+        self.model.update(cx, |i, cx| i.set_value(model, window, cx));
+        self.base_url.update(cx, |i, cx| i.set_value(base_url, window, cx));
+    }
+    fn toggle_rewrite(&mut self, cx: &mut Context<Self>) {
+        bridge::push_settings(SettingsCmd::SetRewrite(rewrite::Config { enabled: !self.snap.rewrite.enabled, ..self.snap.rewrite.clone() }));
+        cx.notify();
+    }
+    fn save_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (base_url, model) = (self.base_url.read(cx).value().to_string(), self.model.read(cx).value().to_string());
+        match rewrite::Config::new(self.snap.rewrite.enabled, &base_url, &model) {
+            Ok(c) => { self.rewrite_error = None; self.fill_rewrite(&c, window, cx); bridge::push_settings(SettingsCmd::SetRewrite(c)); }
+            Err(e) => self.rewrite_error = Some(e),
+        }
+        cx.notify();
+    }
+    fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.key.read(cx).value().to_string();
+        self.key.update(cx, |i, cx| i.set_value("", window, cx));
+        self.key_state = KeyState::Checking;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_executor().spawn(async move { rewrite::save_key(&key).map(|()| !key.trim().is_empty()) }).await;
+            let _ = this.update(cx, |v, cx| { v.key_state = match r { Ok(true) => KeyState::Saved, Ok(false) => KeyState::Missing, Err(e) => KeyState::Failed(e) }; cx.notify(); });
+        }).detach();
         cx.notify();
     }
     fn add_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -167,11 +221,32 @@ impl SettingsView {
             .child(self.never_list(paint, cx))
     }
     fn add_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let input = self.input.clone();
-        div().flex().flex_row().items_center().gap(px(8.))
-            .child(div().flex_1().child(Input::new(&input)))
-            .child(Button::new("add-never").label("Add").primary()
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_word(window, cx))))
+        input_row(&self.input, Button::new("add-never").label("Add").primary()
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_word(window, cx))))
+    }
+    fn rewrite_section(&self, paint: Paint, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.snap.rewrite.enabled;
+        let hotkey = if cfg!(windows) { "Ctrl+Alt+R" } else { "Ctrl+Option+R" };
+        let key_note = match &self.key_state {
+            KeyState::Checking => "Checking for a saved key…".to_string(),
+            KeyState::Missing => "No key saved yet.".to_string(),
+            KeyState::Saved => format!("Key saved in {KEY_STORE}. Save an empty key to remove it."),
+            KeyState::Failed(e) => format!("Could not save the key: {e}"),
+        };
+        let toggle = Button::new("toggle-rewrite").label(if on { "Turn off" } else { "Turn on" }).ghost().small()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_rewrite(cx)));
+        div().flex().flex_col().gap(px(8.))
+            .child(heading("AI rewrite"))
+            .child(note(paint, &format!("Select text and press {hotkey} to fix typos or translate between Thai and English. The text is sent to the service below.")))
+            .child(group(vec![labeled_row("Rewrite selected text".into(), Some(if on { "On" } else { "Off" }.into()), paint, toggle)], paint))
+            .child(input_row(&self.key, Button::new("save-key").label("Save key")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save_key(window, cx)))))
+            .child(note(paint, &key_note))
+            .child(field("Model", &self.model))
+            .child(field("Base URL", &self.base_url))
+            .children(self.rewrite_error.clone().map(|err| div().text_size(px(12.)).text_color(paint.danger).child(err)))
+            .child(div().child(Button::new("save-rewrite").label("Save").primary()
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save_rewrite(window, cx)))))
     }
     fn learn_section(&self, paint: Paint, cx: &mut Context<Self>) -> impl IntoElement {
         let label = if self.confirm_reset { "Click again to reset" } else { "Reset learning" };
@@ -191,6 +266,7 @@ impl Render for SettingsView {
         div().size_full().flex().flex_col().bg(paint.bg).text_color(paint.fg).font(thai_font())
             .child(div().id("settings-scroll").size_full().overflow_y_scroll().p(px(20.)).flex().flex_col().gap(px(28.))
                 .child(self.never_section(paint, cx))
-                .child(self.learn_section(paint, cx)))
+                .child(self.learn_section(paint, cx))
+                .child(self.rewrite_section(paint, cx)))
     }
 }
