@@ -228,6 +228,7 @@ unsafe fn translate(vk: u32) -> Option<Key> {
     if ctrl && alt { if let Some(h) = win_vk_to_us(vk, false, false).and_then(hotkey_for) { return Some(Key::Hotkey(h)) } }
     if [VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU, VK_CAPITAL, VK_LWIN, VK_RWIN].contains(&v) { return None }
     if v == VK_BACK && ctrl && !alt { return Some(Key::WordDelete) }
+    if ctrl && !alt && !win && !shift { if let Some(d @ '1'..='3') = win_vk_to_us(vk, false, false) { return Some(Key::PickRow(d as usize - '1' as usize)) } }
     if ctrl || alt || win { return Some(Key::Nav) }
     Some(match v {
         VK_BACK => Key::Backspace, VK_SPACE => Key::Boundary(Boundary::Space), VK_RETURN => Key::Boundary(Boundary::Enter),

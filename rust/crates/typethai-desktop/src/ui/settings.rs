@@ -284,16 +284,19 @@ impl SettingsView {
             SettingField::dropdown(options,
                 move |cx| ACCEPT.iter().find(|(a, _)| *a == read.read(cx).snap.accept).map_or("", |(_, l)| l).into(),
                 move |label, cx| if let Some((a, _)) = ACCEPT.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_accept(*a, cx)) }) };
+        let pick = { let (read, write) = (view.clone(), view.clone());
+            SettingField::switch(move |cx| read.read(cx).snap.pick_ctrl, move |on, cx| write.update(cx, |v, cx| v.set_pick_ctrl(on, cx))) };
         let learn = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.learn_words, move |on, cx| write.update(cx, |v, cx| v.set_learn_words(on, cx))) };
         let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
             .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
         let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
         page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another. Space can also accept a word typed in the wrong layout.".into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key"], std::iter::empty()),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
+                Some(SettingItem::new("Pick with Ctrl+1–3", pick).description("While the bubble is up, Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion. Off, those keys reach the app as usual.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }
@@ -314,6 +317,12 @@ impl SettingsView {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.accept = accept;
         bridge::push_settings(SettingsCmd::SetAccept(accept));
+        cx.notify();
+    }
+    fn set_pick_ctrl(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.pick_ctrl = on;
+        bridge::push_settings(SettingsCmd::SetPickCtrl(on));
         cx.notify();
     }
     fn set_complete_idle(&mut self, ms: u64, cx: &mut Context<Self>) {

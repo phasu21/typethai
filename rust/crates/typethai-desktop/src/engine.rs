@@ -45,6 +45,9 @@ pub enum Key {
     SelectPrev, SelectNext,
     /// Esc: dismisses a visible bubble (swallowed), otherwise navigation.
     Esc,
+    /// Ctrl+1..3 (Control alone): applies that row while the bubble is up and `Options::pick_ctrl` is on, otherwise
+    /// navigation.
+    PickRow(usize),
 }
 /// Which kind of OS input source fits the text just inserted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,10 +162,12 @@ pub struct Options {
     /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
     pub learn_words: bool,
     pub accept: AcceptKeys,
+    /// Ctrl+1..3 picks a bubble row.
+    pub pick_ctrl: bool,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false } } }
 /// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
 /// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
@@ -297,7 +302,10 @@ impl Engine {
         (self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc))
             || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3')))
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
+            || (matches!(k, Key::PickRow(_)) && self.picks_rows())
     }
+    /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
+    fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
     /// Space applies the highlighted row: with `AcceptKeys::TabOrSpace`, and only when that row is a live conversion.
     fn space_accepts(&self) -> bool {
         self.opts.accept == AcceptKeys::TabOrSpace
@@ -368,6 +376,7 @@ impl Engine {
         if let Key::Hotkey(Hotkey::TogglePause) = k { self.paused = !self.paused; let a = self.reset(); return Outcome { swallow: true, actions: a } }
         if self.paused { return Outcome::pass() }
         if let Some(o) = self.tab_chord(&k) { return o }
+        let k = match k { Key::PickRow(i) if self.picks_rows() => return self.accept_held(i), Key::PickRow(_) => Key::Nav, k => k };
         if self.rewriting() && !self.rewrite_keeps(&k) { let mut a = self.reset(); let mut o = self.on_key_inner(k); a.append(&mut o.actions); o.actions = a; return o }
         match k {
             Key::Char(c) => {
@@ -402,7 +411,7 @@ impl Engine {
             Key::WordDelete => self.on_word_delete(),
             // Cmd+Backspace deletes the whole line: nothing of it is left to offer
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
-            Key::Nav => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
+            Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
@@ -461,12 +470,13 @@ impl Engine {
             SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
             SettingsCmd::SetAccept(a) => { let changed = self.opts.accept != a; self.opts.accept = a; changed }
+            SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -1772,6 +1782,33 @@ mod tests {
         assert_eq!(e.on_key(Key::Char('3')), SWALLOWED);
         assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the digit used up the Tab");
         assert_eq!(labels(&e), ["helmet"]); assert_eq!(e.buffer(), "helm");
+    }
+    #[test] fn ctrl_digit_picks_a_row_when_the_setting_is_on() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        assert!(e.apply_settings(SettingsCmd::SetPickCtrl(true)));
+        assert!(!e.apply_settings(SettingsCmd::SetPickCtrl(true)), "same value is not a change");
+        assert!(e.settings_snapshot().pick_ctrl);
+        typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        assert!(e.is_bubble_key(&Key::PickRow(1)));
+        assert_eq!(e.on_key(Key::PickRow(1)), applied(0, "lo", None, InputLang::Latin));
+        assert_eq!(e.buffer(), "");
+        typ(&mut e, " helm"); assert_eq!(labels(&e), ["helmet"]);
+        assert_eq!(e.on_key(Key::PickRow(2)), SWALLOWED, "past the last row: swallowed, nothing applied");
+        assert_eq!((labels(&e), e.buffer()), (vec!["helmet".to_string()], "helm"));
+    }
+    #[test] fn ctrl_digit_passes_through_when_off_or_without_a_bubble() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        assert!(!e.is_bubble_key(&Key::PickRow(0)));
+        assert_eq!(e.on_key(Key::PickRow(0)), Outcome { swallow: false, actions: vec![Action::HideBubble] }, "off: a shortcut for the app, like any Ctrl key");
+        assert_eq!(e.buffer(), "");
+        e.apply_settings(SettingsCmd::SetPickCtrl(true));
+        typ(&mut e, "hello"); assert!(!e.bubble_visible());
+        assert!(!e.is_bubble_key(&Key::PickRow(0)));
+        assert_eq!(e.on_key(Key::PickRow(0)), Outcome::pass(), "no bubble: the app gets Ctrl+1");
+        assert_eq!(e.buffer(), "");
     }
     #[test] fn digits_are_typed_while_tab_is_held_without_a_bubble() {
         let Some(mut e) = engine() else { return };

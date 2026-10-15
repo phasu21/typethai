@@ -4,11 +4,12 @@
 //! as Thai while Thai is active, as the US letter after a switch to ABC); the sim follows `SwitchInput`.
 //! Editing: `<BS>` Backspace, `<A-BS>` Option/Ctrl+Backspace (word), `<C-BS>` Cmd+Backspace (line).
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
-//! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`. `<Idle>`: a typing pause long enough for word
+//! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`, `<C-1>`..`<C-3>` (Ctrl+digit). `<Idle>`: a typing pause long enough for word
 //! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
 //! deletes a grapheme per Backspace, here and in the engine's count.
-//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row.
+//! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row,
+//! `{"pick_with_ctrl":true}` makes `<C-1>`..`<C-3>` pick a row.
 use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}};
 use std::io::BufRead;
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,12 +40,13 @@ pub fn run(mut app: App) {
                 println!("  [app: {id}, Backspace deletes a {:?}]", app.engine.delete_unit);
                 i += id.chars().count() + "<APP:>".len(); continue
             }
-            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
+            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
                 i += t.chars().count() - 1;
                 if t == "<TH>" || t == "<EN>" { app.engine.set_thai_active(t == "<TH>"); println!("  [input source: {}]", if t == "<TH>" { "Thai" } else { "ABC" }); i += 1; continue }
-                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None), _ => (Some(Key::Esc), None) }
+                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
+                    "<C-1>" | "<C-2>" | "<C-3>" => (Some(Key::PickRow(t.as_bytes()[3] as usize - b'1' as usize)), None), _ => (Some(Key::Esc), None) }
             } else if ch[i] == '^' && i + 1 < ch.len() { i += 1; (Some(Key::Hotkey(hotkey_for(ch[i]).expect("hotkey"))), None) }
                 else { match ch[i] { ' ' => (Some(Key::Boundary(Boundary::Space)), Some(' ')), '\t' => (Some(Key::Tab), Some('\t')), c => match typethai_core::reverse::th_text_to_keys(&c.to_string()).filter(|_| typethai_core::keymap::is_thai(c)) {
                     // a Thai char in the input = that physical key; the screen shows the Thai char only while Thai is

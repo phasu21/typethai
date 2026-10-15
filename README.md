@@ -78,6 +78,7 @@ Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab
 | **Shift+↑ / Shift+↓** | Move the selection |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
+| **Ctrl+1 / 2 / 3** (Pick with Ctrl+1–3 on) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
 | **⌃⌥Z** | Undo the last conversion |
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
@@ -86,7 +87,8 @@ Each bubble row shows the keys that apply it: `Tab` on the highlighted row, `Tab
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
-accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), list words that stay as you type
+accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), whether **Ctrl+1–3** picks a row
+(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works

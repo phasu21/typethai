@@ -328,7 +328,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         completion: crate::engine::CompleteMode::default(),
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS),
         learn_words: true,
-        accept: crate::engine::AcceptKeys::default(),
+        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false,
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
     }
