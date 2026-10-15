@@ -27,7 +27,8 @@ unless you press a key.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
   Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
-  default completions appear after a short pause in typing (a quarter of a second; choose 150 to 600 ms in Settings). **Settings… → Word suggestions** switches them to
+  default completions appear after a short pause in typing (a quarter of a second; choose 150 to 600 ms in Settings), and
+once they are up they follow the word as you keep typing. **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
   highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
   one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in

@@ -52,6 +52,8 @@ pub fn prepare(n: &Native) {
         }
     }
     w.setHidesOnDeactivate(false); w.setIgnoresMouseEvents(false); w.setHasShadow(true);
+    // gpui gives PopUp windows the utility-window animation, which fades every orderOut / orderFront
+    w.setAnimationBehavior(objc2_app_kit::NSWindowAnimationBehavior::None);
 }
 pub fn show(n: &Native, r: Rect) {
     let ph = primary_h();
@@ -65,7 +67,7 @@ pub fn hide(n: &Native) { n.win.orderOut(None); }
 
 /// Debug: native frame + content view size.
 pub fn describe(n: &Native) -> String {
-    let w = &n.win; format!("ns frame {:?} view {:?} scale {} winnum {}", w.frame(), n.view.frame(), w.backingScaleFactor(), w.windowNumber())
+    let w = &n.win; format!("ns frame {:?} view {:?} scale {} winnum {} animation {:?}", w.frame(), n.view.frame(), w.backingScaleFactor(), w.windowNumber(), w.animationBehavior())
 }
 /// Debug: capture just this window to a PNG with `screencapture -l` (no shadow).
 /// Also writes `<path stem>-onscreen.png`: the screen region around the window (+16 pt), showing corners and shadow
