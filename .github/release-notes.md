@@ -1,5 +1,13 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.2**
+- **Tab+R.** Hold Tab and press R for the ⌃⌥R options on the word you just typed, or on the bubble's word. ⌃⌥R stays
+  for selected text. Tab right after a word now goes through when you release it; typing on quickly still types it.
+
+**Fixed in 0.5.2**
+- Windows: update checks and AI rewrite failed on every HTTPS request. **Windows users on 0.5.0 or 0.5.1: install
+  0.5.2 by hand once** (download the setup below); later versions update themselves.
+
 **New in 0.5.1**
 - **นา offers ok.** `ok` typed on the Thai layout (นา) now offers *ok* at Space or Tab, even though นา is a Thai word.
   Words on the Don't translate list are offered back the same way.
