@@ -70,13 +70,16 @@ impl Selection {
     pub fn next(&mut self) -> usize { if self.len > 0 { self.idx = (self.idx + 1) % self.len } self.idx }
     pub fn prev(&mut self) -> usize { if self.len > 0 { self.idx = (self.idx + self.len - 1) % self.len } self.idx }
 }
-/// Tab held over the bubble. Tab alone applies the selected row when released; Tab+1..3 applies that row instead.
+/// Tab held over the bubble, or right after a typed word. Over the bubble Tab alone applies the selected row when
+/// released and Tab+1..3 applies that row instead. Tab+R (held `TAB_CHORD_MIN` first) opens the ⌃⌥R rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TabChord {
-    /// Tab is up, or went down with no bubble (a plain Tab).
+    /// Tab is up, or went down as a plain Tab (passed through).
     #[default] Up,
     /// Down over the bubble with nothing applied yet: the release applies the selected row.
     Armed,
+    /// Down right after a word, no bubble: held back in case R follows; the release sends the Tab.
+    Held,
     /// Still down after a digit picked a row: the release and auto-repeats do nothing.
     Spent,
 }
@@ -229,6 +232,8 @@ pub const STRICT_BAND: f64 = 0.9;
 pub const REV_AUTO: f64 = 0.98;
 /// Reverse live-bubble threshold.
 pub const REV_LIVE: f64 = 0.98;
+/// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
+pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -246,6 +251,8 @@ pub struct Engine {
     /// The last key was a Tab that inserted itself: a second Tab runs Guess.
     tab_pending: bool,
     tab: TabChord,
+    /// When Tab went down into `Armed` or `Held`.
+    tab_at: Option<Instant>,
     /// The bubble was opened by ⌃⌥R and offers something to apply: Enter applies the highlighted row, like Tab.
     fixing: bool,
     line: Vec<Committed>,
@@ -289,7 +296,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -349,7 +356,7 @@ impl Engine {
     /// row (a layout change clears the buffer first, so a stale row never pulls Space in).
     pub fn is_bubble_key(&self, k: &Key) -> bool {
         (self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc))
-            || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3')))
+            || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3' | 'r' | 'R')))
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
             || (matches!(k, Key::PickRow(_)) && self.picks_rows())
             || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
@@ -465,16 +472,7 @@ impl Engine {
                 self.update_completions(false, &up, &mut a);
                 Outcome { swallow: false, actions: a }
             }
-            Key::Tab => if let Some(item) = self.tab_pending.then(|| self.guess()).flatten() {
-                // second Tab in a row: show the proposal (a third Tab applies it); with nothing to propose it is a tab
-                self.tab_pending = false;
-                let mut a = vec![]; self.show(vec![item], &mut a);
-                Outcome { swallow: true, actions: a }
-            } else {
-                let o = self.on_boundary(Boundary::Tab);
-                self.tab_pending = true;
-                o
-            },
+            Key::Tab => self.plain_tab(),
             Key::TabUp => Outcome::pass(),
             Key::SelectPrev | Key::SelectNext => if self.bubble_visible() {
                 let i = if k == Key::SelectNext { self.sel.next() } else { self.sel.prev() };
@@ -500,9 +498,18 @@ impl Engine {
     fn tab_chord(&mut self, k: &Key) -> Option<Outcome> {
         let swallowed = Outcome { swallow: true, actions: vec![] };
         Some(match (self.tab, k) {
-            (TabChord::Up, Key::Tab) if self.bubble_visible() => { self.tab = TabChord::Armed; self.tab_pending = false; swallowed }
+            (TabChord::Up, Key::Tab) if self.bubble_visible() => { self.tab = TabChord::Armed; self.tab_at = Some(Instant::now()); self.tab_pending = false; swallowed }
+            (TabChord::Up, Key::Tab) if self.holds_tab() => { self.tab = TabChord::Held; self.tab_at = Some(Instant::now()); swallowed }
             (TabChord::Up, _) => return None,
             (_, Key::Tab) => swallowed,
+            (TabChord::Armed | TabChord::Held, Key::Char('r' | 'R')) if self.tab_at.is_some_and(|t| t.elapsed() >= TAB_CHORD_MIN) => {
+                // still Spent afterwards (starting a rewrite lets Tab go): repeats and the release type nothing
+                self.tab = TabChord::Spent; let mut o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; o.swallow = true; o
+            }
+            (TabChord::Held, Key::TabUp) => { self.tab = TabChord::Up; self.release_tab() }
+            // typed on before Tab came up: the Tab goes first, then the key
+            (TabChord::Held, Key::Char(_) | Key::Boundary(_)) => { self.tab = TabChord::Up; self.release_tab_before(k.clone()) }
+            (TabChord::Held, _) => { self.tab = TabChord::Up; let mut o = self.release_tab(); let p = self.on_key_inner(k.clone()); o.actions.extend(p.actions); o.swallow = p.swallow; o }
             (TabChord::Armed, Key::TabUp) => { self.tab = TabChord::Up; self.accept_held(self.sel.idx) }
             (TabChord::Spent, Key::TabUp) => { self.tab = TabChord::Up; swallowed }
             // a digit is never typed while Tab is down; past the last row it does nothing
@@ -513,6 +520,40 @@ impl Engine {
             // caret moves and deletions drop the held Tab: the bubble no longer matches the text
             _ => { self.tab = TabChord::Up; return None }
         })
+    }
+    /// Tab right after a typed word, with no bubble: held back so Tab+R can open the ⌃⌥R rows. A second Tab in a row
+    /// (Guess) is not held.
+    fn holds_tab(&self) -> bool {
+        !self.tab_pending && (!self.word.is_empty() || self.line.last().is_some_and(|c| self.line.len() > self.line_start && c.extra.is_empty()))
+    }
+    /// Tab as it always was: a boundary for the word, and a second Tab in a row runs Guess.
+    fn plain_tab(&mut self) -> Outcome {
+        if let Some(item) = self.tab_pending.then(|| self.guess()).flatten() {
+            // second Tab in a row: show the proposal (a third Tab applies it); with nothing to propose it is a tab
+            self.tab_pending = false;
+            let mut a = vec![]; self.show(vec![item], &mut a);
+            return Outcome { swallow: true, actions: a }
+        }
+        let o = self.on_boundary(Boundary::Tab);
+        self.tab_pending = true;
+        o
+    }
+    /// A held Tab came up without R: handle it as a plain Tab, and type it if it would have passed through.
+    fn release_tab(&mut self) -> Outcome {
+        let mut o = self.plain_tab();
+        if !o.swallow { o.actions.push(Action::Replace { delete: 0, insert: String::new(), then: Some(Boundary::Tab) }); o.swallow = true; }
+        o
+    }
+    /// `k` came while Tab was held: type the Tab, then `k` (injected too, so it cannot land before the Tab).
+    fn release_tab_before(&mut self, k: Key) -> Outcome {
+        let mut o = self.release_tab();
+        let p = self.on_key_inner(k.clone());
+        o.actions.extend(p.actions);
+        if !p.swallow {
+            match k { Key::Char(c) => o.actions.push(Action::Replace { delete: 0, insert: self.screen_of(&c.to_string()), then: None }),
+                Key::Boundary(b) => o.actions.push(Action::Replace { delete: 0, insert: String::new(), then: Some(b) }), _ => unreachable!() }
+        }
+        o
     }
     fn accept_held(&mut self, i: usize) -> Outcome { let mut o = self.on_hotkey(Hotkey::Accept(i)); o.swallow = true; o }
     /// A key typed before the held Tab came up (fast typing rolls Tab into the next key): the Tab counts as released
@@ -1341,8 +1382,8 @@ mod tests {
         typ(&mut e, "hello");
         for k in [Key::SelectPrev, Key::SelectNext, Key::Esc] { let o = e.on_key(k); assert!(!o.swallow); }
         assert_eq!(e.buffer(), ""); // shift+arrows / esc reset the word like other navigation
-        // Tab without a bubble is a normal (passed-through) boundary
-        typ(&mut e, "hello"); let o = tab(&mut e); assert!(!o.swallow); assert!(!e.bubble_visible());
+        // Tab without a bubble is a normal boundary, held until released (Tab+R) and then typed
+        typ(&mut e, "hello"); let o = tab(&mut e); assert!(types_only_a_tab(&o), "{:?}", o.actions); assert!(!e.bubble_visible());
     }
     #[test] fn legacy_tab_converts_as_boundary_when_no_bubble() {
         let Some(mut e) = engine() else { return };
@@ -1370,7 +1411,7 @@ mod tests {
         assert!(o.actions.contains(&Action::HideBubble)); assert!(o.actions.contains(&Action::SwitchInput(InputLang::Latin)));
         assert!(!e.bubble_visible());
         // with the bubble gone, Tab is an ordinary key again
-        let o = tab(&mut e); assert!(!o.swallow);
+        let o = tab(&mut e); assert!(types_only_a_tab(&o), "{:?}", o.actions);
     }
     #[test] fn legacy_esc_dismisses_and_typing_hides() {
         let Some(mut e) = engine() else { return };
@@ -1540,7 +1581,7 @@ mod tests {
         typ(&mut e, "ello l;ylfu "); assert!(e.bubble_visible());
         e.on_key(Key::Nav); assert!(!e.bubble_visible());
         // Tab with no bubble is a plain Tab
-        typ(&mut e, "hello"); let o = tab(&mut e); assert!(!o.swallow); assert!(o.actions.iter().all(|a| !matches!(a, Action::Replace { .. })));
+        typ(&mut e, "hello"); let o = tab(&mut e); assert!(types_only_a_tab(&o), "{:?}", o.actions);
     }
     #[test] fn hotkey_applies_after_boundary() {
         let Some(mut e) = engine() else { return };
@@ -1809,7 +1850,7 @@ mod tests {
         e.on_key(Key::Char('x'));
         assert!(!e.bubble_visible(), "a typed key makes the proposal stale");
         let o = tab(&mut e);
-        assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. })));
+        assert!(types_only_a_tab(&o), "{:?}", o.actions);
     }
     #[test] fn guess_after_live_accept_measures_from_the_converted_word() {
         let Some(mut e) = engine_typo() else { return };
@@ -2186,6 +2227,46 @@ mod tests {
         assert_eq!(e.on_key(Key::Char('2')), Outcome::pass(), "a digit after the release is typed");
         assert_eq!(e.buffer(), "hello2", "glued to the applied word, as after any applied completion");
     }
+    /// The outcome types a Tab and changes nothing else on screen.
+    fn types_only_a_tab(o: &Outcome) -> bool { o.swallow && o.actions.iter().filter(|a| matches!(a, Action::Replace { .. })).eq([&TYPE_TAB]) }
+    fn hold_tab(e: &mut Engine) -> Outcome { let o = e.on_key(Key::Tab); e.tab_at = e.tab_at.map(|t| t - TAB_CHORD_MIN); o }
+    fn captures(o: &Outcome) -> bool { o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))) }
+    const TYPE_TAB: Action = Action::Replace { delete: 0, insert: String::new(), then: Some(Boundary::Tab) };
+    #[test] fn tab_after_a_word_is_held_and_typed_on_release() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        typ(&mut e, "hello"); assert!(!e.bubble_visible());
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "held back in case R follows");
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat while held");
+        let o = e.on_key(Key::TabUp); assert!(o.swallow); assert!(o.actions.contains(&TYPE_TAB), "the release types the Tab: {:?}", o.actions);
+        // nothing typed yet on the line: a plain Tab passes straight through
+        e.reset(); assert_eq!(e.on_key(Key::Tab), Outcome::pass());
+    }
+    #[test] fn tab_r_opens_the_rewrite_rows() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        typ(&mut e, "hello");
+        hold_tab(&mut e);
+        let o = e.on_key(Key::Char('r')); assert!(o.swallow); assert!(captures(&o), "Tab+R starts ⌃⌥R: {:?}", o.actions);
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat after R types nothing");
+        assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the release types no Tab");
+        // over the bubble too, instead of applying a row
+        e.reset(); e.opts.live = true; typ(&mut e, "l;ylfu"); assert!(e.bubble_visible());
+        hold_tab(&mut e);
+        let o = e.on_key(Key::Char('R')); assert!(captures(&o)); assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. })), "no row applied");
+    }
+    #[test] fn tab_rolled_into_r_types_both() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        typ(&mut e, "hello");
+        e.on_key(Key::Tab);
+        let o = e.on_key(Key::Char('r'));
+        assert!(o.swallow); assert!(!captures(&o), "too quick for a chord");
+        let replaces: Vec<&Action> = o.actions.iter().filter(|a| matches!(a, Action::Replace { .. })).collect();
+        assert_eq!(replaces, [&TYPE_TAB, &Action::Replace { delete: 0, insert: "r".into(), then: None }], "Tab first, then r");
+        assert_eq!(e.buffer(), "r");
+        assert_eq!(e.on_key(Key::TabUp), Outcome::pass(), "the late release is not routed");
+    }
     #[test] fn tab_with_one_is_tab_alone() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Typing);
@@ -2203,8 +2284,8 @@ mod tests {
         typ(&mut e, "hel"); e.on_key(Key::SelectNext);
         for _ in 0..4 { assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat neither applies nor types a tab"); }
         assert_eq!(e.on_key(Key::TabUp), applied(0, "lo", None, InputLang::Latin));
-        assert_eq!(e.on_key(Key::Tab), Outcome::pass(), "with the bubble gone, Tab is a tab again");
-        assert_eq!(e.on_key(Key::TabUp), Outcome::pass());
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "with the bubble gone, Tab is a tab again (held for Tab+R)");
+        assert!(types_only_a_tab(&e.on_key(Key::TabUp)));
     }
     #[test] fn tab_held_with_a_digit_past_the_last_row_does_nothing() {
         let Some(mut e) = engine() else { return };
@@ -2245,8 +2326,9 @@ mod tests {
     #[test] fn digits_are_typed_while_tab_is_held_without_a_bubble() {
         let Some(mut e) = engine() else { return };
         typ(&mut e, "hello"); assert!(!e.bubble_visible());
-        assert!(!e.on_key(Key::Tab).swallow, "a plain tab");
-        assert_eq!(e.on_key(Key::Char('2')), Outcome::pass());
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "a plain tab, held for Tab+R");
+        let o = e.on_key(Key::Char('2'));
+        assert_eq!(o.actions, [TYPE_TAB, Action::Replace { delete: 0, insert: "2".into(), then: None }], "the Tab, then the digit");
         assert_eq!(e.on_key(Key::TabUp), Outcome::pass());
         assert_eq!(e.buffer(), "2");
     }
