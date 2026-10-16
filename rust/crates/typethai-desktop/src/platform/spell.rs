@@ -16,21 +16,25 @@ mod mac {
     /// Uses the shared checker from the capture thread; only the checkSpelling / guesses / completions calls are made.
     pub struct Mac;
     impl Speller for Mac {
-        fn guesses(&self, word: &str) -> Option<Vec<String>> {
+        fn guesses(&self, before: &str, word: &str) -> Option<Vec<String>> {
             objc2::rc::autoreleasepool(|_| {
                 let sc = NSSpellChecker::sharedSpellChecker();
-                let (s, lang) = (NSString::from_str(word), NSString::from_str("en"));
-                let r = unsafe { sc.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount(&s, 0, Some(&lang), false, 0, std::ptr::null_mut()) };
+                let (w, lang) = (NSString::from_str(word), NSString::from_str("en"));
+                // the word is checked alone: started mid-line (macOS 26) the check passes over a misspelled last word
+                let r = unsafe { sc.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount(&w, 0, Some(&lang), false, 0, std::ptr::null_mut()) };
                 if r.location == NSNotFound as usize || r.length == 0 { return None }
+                // the guesses are ranked with the line in front
+                let s = NSString::from_str(&format!("{before}{word}"));
+                let r = NSRange::new(before.encode_utf16().count() + r.location, r.length);
                 let g = sc.guessesForWordRange_inString_language_inSpellDocumentWithTag(r, &s, Some(&lang), 0)?;
                 Some(g.iter().map(|x| x.to_string()).collect())
             })
         }
-        fn completions(&self, prefix: &str) -> Vec<String> {
+        fn completions(&self, before: &str, prefix: &str) -> Vec<String> {
             objc2::rc::autoreleasepool(|_| {
                 let sc = NSSpellChecker::sharedSpellChecker();
-                let (s, lang) = (NSString::from_str(prefix), NSString::from_str("en"));
-                let r = NSRange::new(0, s.length());
+                let (s, lang) = (NSString::from_str(&format!("{before}{prefix}")), NSString::from_str("en"));
+                let r = NSRange::new(before.encode_utf16().count(), prefix.encode_utf16().count());
                 sc.completionsForPartialWordRange_inString_language_inSpellDocumentWithTag(r, &s, Some(&lang), 0)
                     .map(|g| g.iter().map(|x| x.to_string()).collect()).unwrap_or_default()
             })
@@ -79,7 +83,8 @@ mod win {
         Some(out)
     }
     impl Speller for Win {
-        fn guesses(&self, word: &str) -> Option<Vec<String>> {
+        // ISpellChecker reads one word at a time: the line in front is not used
+        fn guesses(&self, _before: &str, word: &str) -> Option<Vec<String>> {
             let (reply, rx) = mpsc::channel();
             self.tx.send((word.to_string(), reply)).ok()?;
             rx.recv_timeout(Duration::from_millis(80)).ok().flatten()
