@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app; mod backspace; mod bridge; mod engine; mod keys; mod placement; mod prefs; mod rewrite;
-mod inputsrc; mod evallive; mod evaltypo; mod platform;
+mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
@@ -56,7 +56,7 @@ fn main() {
     if let Some(dir) = &cli.eval_typo { evaltypo::run(&cli, dir); return }
     if let Some(dir) = &cli.eval_live { if cli.eval_reverse { evallive::run_reverse(&cli, dir, &cli.eval_split) } else { evallive::run(&cli, dir, &cli.eval_split) } return }
     let app = match app::App::load(&cli) { Ok(a) => a, Err(e) => { eprintln!("typethai: {e}"); std::process::exit(1) } };
-    if cli.simulate { platform::sim::run(app) } else { platform::run(app) }
+    if cli.simulate { platform::sim::run(app) } else { update::spawn(app.engine.check_updates); platform::run(app) }
 }
 /// A `--demo-bubble --items` row: its label, and the reason a trailing `!th`, `!en` or `!typo` names.
 fn demo_opt(s: &str) -> bridge::Opt {

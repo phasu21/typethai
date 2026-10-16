@@ -250,6 +250,8 @@ pub static INPUT_THAI: AtomicBool = AtomicBool::new(false);
 pub static REQ_SWITCH_INPUT: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
 /// `--settings`: open the Settings window once the UI is up.
 pub static REQ_OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
+/// The Settings window's update button: handled by the UI loop like the tray's update item.
+pub static REQ_UPDATE_CLICK: AtomicBool = AtomicBool::new(false);
 /// Settings window wants a fresh snapshot. Commands, if any, are applied first.
 pub static REQ_SETTINGS: AtomicBool = AtomicBool::new(false);
 static SETTINGS_CMDS: Mutex<Vec<SettingsCmd>> = Mutex::new(Vec::new());

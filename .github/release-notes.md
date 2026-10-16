@@ -60,14 +60,16 @@
   hidden behind the notch.
 
 **Downloads**
-- `typeThai-*-macos-aarch64.zip`: Apple silicon
-- `typeThai-*-macos-x86_64.zip`: Intel Macs
-- `typeThai-*-windows-x86_64.zip`: Windows (**untested beta**)
-- `typethai.ttm`: the model on its own (already bundled in each package). It now carries word pair counts for
-  context-aware completion. CC BY-SA 4.0, see DATA_LICENSES.md
+- `typeThai-*-macos-universal.dmg`: macOS, Apple silicon and Intel. Open it and drag typeThai to Applications
+- `typeThai-*-windows-x86_64-setup.exe`: Windows installer (**untested beta**), per-user, optional start at sign-in
+- `typeThai-*-windows-x86_64.zip`: the same Windows build without an installer
+- `*.sig`, `typeThai-*-macos-universal.zip`: used by the in-app updater
+- `typethai.ttm`: the model on its own (already bundled in each package). CC BY-SA 4.0, see DATA_LICENSES.md
 
-**macOS:** the app isn't notarized. Right-click → Open, or run `xattr -dr com.apple.quarantine typeThai.app`. Then grant
-Accessibility and relaunch. Add the Thai (Kedmanee) input source to get automatic layout switching.
+**macOS:** the app is signed with typeThai's own certificate but isn't notarized. The first time, right-click → Open,
+or run `xattr -dr com.apple.quarantine /Applications/typeThai.app`. Then grant Accessibility and relaunch. Coming from
+0.4.0 or earlier: remove the old typeThai from Accessibility and add it again, once. Add the Thai (Kedmanee) input
+source to get automatic layout switching.
 **Windows:** SmartScreen will warn (More info → Run anyway).
 
 **How it works:** nothing changes until you press **Tab**. Shift+↑/↓ select a row, Esc dismisses, ⌃⌥1–3 apply a row,

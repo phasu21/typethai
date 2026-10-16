@@ -1,4 +1,4 @@
-//! Tray icon with Pause/Resume, Settings, and Quit (tray-icon crate; needs the platform's main-thread event loop running).
+//! Tray icon with Pause/Resume, the update item, Settings, and Quit (tray-icon crate; needs the platform's main-thread event loop running).
 use tray_icon::{menu::{Menu, MenuEvent, MenuItem}, Icon, TrayIcon, TrayIconBuilder};
 pub enum TrayCmd { TogglePause, Quit, CheckUpdate, Settings }
 pub struct Tray { pub icon: TrayIcon, pause: MenuItem, update: MenuItem, settings: MenuItem, quit: MenuItem }
@@ -29,6 +29,8 @@ impl Tray {
         self.pause.set_text(if p { "Resume typeThai" } else { "Pause typeThai" }); let _ = self.icon.set_icon(Some(icon(p)));
         let _ = self.icon.set_tooltip(Some(if p { "typeThai (paused)" } else { "typeThai" }));
     }
+    /// The update item follows the updater: "Check for updates", "Restart to update to …", and so on.
+    pub fn set_update(&self, s: &crate::update::Status) { let (text, enabled) = s.menu(); self.update.set_text(text); self.update.set_enabled(enabled); }
     /// Non-blocking poll of menu clicks.
     pub fn poll(&self) -> Option<TrayCmd> {
         while let Ok(e) = MenuEvent::receiver().try_recv() {

@@ -1,14 +1,14 @@
-//! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, and AI rewrite,
-//! one sidebar page each.
+//! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, AI rewrite and
+//! updates, one sidebar page each.
 use crate::bridge::{self, BubbleLayout};
 use crate::engine::{AcceptKeys, CompleteMode, COMPLETE_IDLE_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
-use crate::rewrite;
+use crate::{rewrite, update};
 use crate::ui::thai_font;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::setting::{RenderOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, IconName, Sizable};
 use gpui_kit::*;
 use typethai_core::personal::Learned;
 
@@ -52,6 +52,10 @@ pub fn apply_snapshot(slot: &mut Option<SettingsWin>, snap: SettingsSnap, cx: &m
     if !alive { *slot = None; return; }
     let Some(win) = slot.as_ref() else { return };
     let _ = win.handle.update(cx, |_, window, cx| win.view.update(cx, |v, cx| v.show(snap, window, cx)));
+}
+/// Redraw an open window: the updates page shows the updater's status.
+pub fn refresh(slot: &Option<SettingsWin>, cx: &mut App) {
+    if let Some(win) = slot { let _ = win.handle.update(cx, |_, _, cx| win.view.update(cx, |_, cx| cx.notify())); }
 }
 /// `--demo-settings`: the window on `page`, filled with `snap`, never reading the keychain.
 pub fn open_demo(page: usize, snap: SettingsSnap, cx: &mut App) -> Option<SettingsWin> {
@@ -151,7 +155,7 @@ fn draft_field(view: &Entity<SettingsView>, get: fn(&SettingsView) -> SharedStri
     SettingField::input(move |cx| get(read.read(cx)), move |s, cx| write.update(cx, |v, _| set(v, s)))
 }
 /// Search matches item titles, descriptions and keywords, not page titles: every item on a page carries the page's keywords.
-fn page(title: &str, icon: IconName, description: String, keywords: Vec<SharedString>, items: Vec<SettingItem>) -> SettingPage {
+fn page(title: &str, icon: impl Into<Icon>, description: String, keywords: Vec<SharedString>, items: Vec<SettingItem>) -> SettingPage {
     SettingPage::new(title.to_string()).icon(icon).description(description)
         .group(SettingGroup::new().items(items.into_iter().map(|item| item.keywords(keywords.clone()))))
 }
@@ -307,6 +311,23 @@ impl SettingsView {
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }
+    fn updates_page(&self, view: &Entity<Self>) -> SettingPage {
+        let auto = { let (read, write) = (view.clone(), view.clone());
+            SettingField::switch(move |cx| read.read(cx).snap.check_updates, move |on, cx| write.update(cx, |v, cx| v.set_check_updates(on, cx))) };
+        // the same action as the tray item: check, restart into a downloaded update, or open the release page
+        let now = custom_field(view, |_, _, _, _| { let (label, enabled) = update::status().menu();
+            Button::new("update-now").label(label).disabled(!enabled).on_click(|_, _, _| bridge::REQ_UPDATE_CLICK.store(true, std::sync::atomic::Ordering::SeqCst)).into_any_element() });
+        page("Updates", Icon::new(gpui_kit::assets::IconName::Download), format!("You have typeThai {}. Updates come from the typeThai releases on GitHub, are checked against typeThai's signing key, and install only when you choose Restart to update.", update::CURRENT),
+            keywords(&["updates", "update", "version", "release", "upgrade", "github", "download", "restart"], std::iter::empty()),
+            vec![SettingItem::new("Check automatically", auto).description("Look for a new version at launch and every 6 hours, and download it in the background. Only GitHub is contacted."),
+                SettingItem::new("Update", now)])
+    }
+    fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.check_updates = on;
+        bridge::push_settings(SettingsCmd::SetCheckUpdates(on));
+        cx.notify();
+    }
     fn set_learn_words(&mut self, on: bool, cx: &mut Context<Self>) {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.learn_words = on;
@@ -380,7 +401,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let pages = [self.completion_page(&view), self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view)];
+        let pages = [self.completion_page(&view), self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view), self.updates_page(&view)];
         let t = cx.theme();
         div().size_full().bg(t.background).text_color(t.foreground).font(thai_font())
             .child(Settings::new("settings").sidebar_width(px(200.)).sidebar_size_range(px(160.)..px(280.))
