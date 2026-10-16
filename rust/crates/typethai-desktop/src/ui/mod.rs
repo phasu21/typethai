@@ -7,6 +7,7 @@
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
 use crate::bridge::{self, BubbleLayout, Geom, Layout, Opt, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::engine::Reason;
+use crate::update;
 use crate::placement::{self, Anchor, Monitor, Opts, Placement, Rect};
 use gpui_kit::component::{button::Button, theme::Theme, ActiveTheme, Icon, Selectable as _, Sizable as _};
 use gpui_kit::*;
@@ -133,8 +134,8 @@ fn measure(window: &Window, items: &[Opt]) -> Vec<f64> {
             + bridge::MEASURE_SLACK
     }).collect()
 }
-// the typo badge's icon, which the component icons lack
-gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck]);
+// the typo badge's icon and the Settings updates page's, which the component icons lack
+gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download]);
 /// The component icons, the typo badge's icon and the flags on conversion badges (flag-icons, MIT: `flags/LICENSE`).
 struct AppAssets;
 impl AssetSource for AppAssets {
@@ -272,6 +273,7 @@ pub fn run(rx: Receiver<UiMsg>) {
         cx.spawn(async move |cx| {
             let mut quit_at: Option<Instant> = None;
             let mut settings_win: Option<settings::SettingsWin> = None;
+            let mut update_gen = 0;
             loop {
                 let mut stop = false;
                 cx.update(|cx| {
@@ -286,13 +288,25 @@ pub fn run(rx: Receiver<UiMsg>) {
                     } }
                     ui.reconcile(cx);
                     if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
-                    match tray.as_ref().and_then(|t| t.poll()) {
+                    let tray_cmd = tray.as_ref().and_then(|t| t.poll());
+                    let tray_cmd = if bridge::take(&bridge::REQ_UPDATE_CLICK) { Some(super::platform::tray::TrayCmd::CheckUpdate) } else { tray_cmd };
+                    match tray_cmd {
         Some(super::platform::tray::TrayCmd::TogglePause) => bridge::REQ_TOGGLE_PAUSE.store(true, std::sync::atomic::Ordering::SeqCst),
-        Some(super::platform::tray::TrayCmd::CheckUpdate) => { std::thread::spawn(|| { crate::platform::check_for_updates(); }); }
+        Some(super::platform::tray::TrayCmd::CheckUpdate) => match update::click() {
+            update::Click::Check => update::check_now(),
+            update::Click::Open(page) => update::open_url(&page),
+            update::Click::Restart(staged) => match update::restart_into(&staged) {
+                // quit as on Quit (state saved); the helper waits for this process to exit
+                Ok(()) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
+                Err(e) => { eprintln!("typeThai: cannot install the update: {e}"); update::open_url(update::RELEASES_PAGE) }
+            },
+        },
         Some(super::platform::tray::TrayCmd::Settings) => settings::open_or_focus(&mut settings_win, cx),
         Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
         None => {}
     }
+                    let g = update::generation();
+                    if g != update_gen { update_gen = g; if let Some(t) = &tray { t.set_update(&update::status()) } settings::refresh(&settings_win, cx) }
                     #[cfg(target_os = "macos")] super::platform::macos::sync_input_source();
                     if stop || quit_at.is_some_and(|t| Instant::now() > t) { cx.quit(); }
                 });
@@ -459,6 +473,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
+        check_updates: true,
     }
 }
 

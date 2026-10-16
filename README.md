@@ -55,26 +55,39 @@ once they are up they follow the word as you keep typing. **Settings… → Word
 
 Get the latest build from [Releases](https://github.com/phasu21/typethai/releases).
 
-### macOS (Apple silicon: `aarch64`, Intel: `x86_64`)
+### macOS (Apple silicon and Intel)
 
-1. Download `typeThai-<version>-macos-<arch>.zip` and unzip it. Move `typeThai.app` wherever you like.
-2. The app is **not notarized**, only ad-hoc signed. The first time, **right-click → Open → Open**. Or, in Terminal:
-   `xattr -dr com.apple.quarantine /path/to/typeThai.app`
+1. Download `typeThai-<version>-macos-universal.dmg`, open it and drag **typeThai** onto **Applications**.
+2. The app is signed with typeThai's own certificate but **not notarized** by Apple. The first time, **right-click →
+   Open → Open**. Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/typeThai.app`
 3. Grant **Accessibility** when asked, in System Settings → Privacy & Security → Accessibility. Add typeThai there if
    it isn't listed, then **relaunch**. typeThai needs this to see keystrokes, read the caret position and insert
    text. Some macOS versions also ask for **Input Monitoring**.
 4. For input-source switching, add the **Thai (Kedmanee)** input source in System Settings → Keyboard → Input
    Sources. Without it, conversion still works, but the layout won't switch for you.
 
-Each new version is a new ad-hoc signature, so macOS may ask for Accessibility again after an update. If it stops
-reacting, remove the old entry and re-add the app.
+Coming from 0.4.0 or earlier (ad-hoc signed)? macOS sees the signed app as a new one: remove the old typeThai entry
+from Accessibility and add the app again, once. Later updates keep the permission.
 
 ### Windows (x86_64, **beta / untested**)
 
-1. Download `typeThai-<version>-windows-x86_64.zip` and unzip it. Keep `typethai-desktop.exe` and `typethai.ttm` in
-   the same folder.
-2. The exe is unsigned, so SmartScreen will warn: **More info → Run anyway**.
+1. Download `typeThai-<version>-windows-x86_64-setup.exe` and run it. It installs for your user only (no admin
+   prompt), adds a Start menu entry and can start typeThai when you sign in. Uninstall from Settings → Apps.
+   Prefer no installer? Unzip `typeThai-<version>-windows-x86_64.zip` instead and keep `typethai-desktop.exe` and
+   `typethai.ttm` in the same folder.
+2. The installer and exe are unsigned, so SmartScreen will warn: **More info → Run anyway**.
 3. Add the Thai Kedmanee keyboard layout for switching (Settings → Time & language → Language & region).
+
+### Updates
+
+typeThai looks for a new release on GitHub at launch and every 6 hours, downloads it in the background and checks it
+against typeThai's signing key. The tray menu then shows **Restart to update to …**: nothing changes until you pick
+it. typeThai quits, the new version replaces it, and it starts again. **Check for updates** in the tray, or Settings →
+Updates, checks right away; the automatic check can be turned off there.
+
+Updating in place works for the app in `/Applications` (or any folder you can write to) and for the Windows
+installer. A copy that can't replace itself (the Windows zip, a build from source) shows **Get typeThai …** instead,
+which opens the release page.
 
 ## Using it
 
@@ -139,6 +152,8 @@ in between) to run the guess-convert on the current or last word instead of usin
   layout and spelling rows are worked out on your computer. The selected text is sent to
   the service set in Settings (OpenRouter by default, with its data collection opt-out set). Nothing is sent without a
   key, and the feature can be turned off in Settings.
+- **Update checks** ask GitHub for the latest typeThai release (the GitHub API and its download servers), at launch
+  and every 6 hours. Nothing about you or your typing is sent. Turn it off in Settings → Updates.
 - To work, typeThai reads your keystrokes system-wide. It keeps only the current word and line in memory, and drops
   them when you move the caret or switch apps. Password fields are skipped.
 - The personal model is stored on your machine:
@@ -184,7 +199,16 @@ gh release download model-v3 -R phasu21/typethai -p typethai.ttm -D target/relea
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
-macOS app bundle: `scripts/package-macos.sh <target-triple> <version> path/to/typethai.ttm`.
+macOS universal app, DMG and updater zip: `scripts/package-macos.sh <version> path/to/typethai.ttm` (needs the
+`aarch64-apple-darwin` and `x86_64-apple-darwin` Rust targets; set `MACOS_SIGN_P12` and `MACOS_SIGN_P12_PASSWORD` to
+sign with the release certificate, otherwise it is ad-hoc signed). Windows installer: `packaging/typethai.iss` (Inno
+Setup 6, see its header for the `iscc` arguments).
+
+Releases: pushing a `v*` tag runs `.github/workflows/release.yml`, which needs three repository secrets:
+`MACOS_SIGN_P12` (the code-signing certificate as a base64 `.p12`), `MACOS_SIGN_P12_PASSWORD`, and
+`UPDATE_SIGNING_KEY` (the ed25519 private key, PEM, whose public half is `PUBLIC_KEY` in
+`rust/crates/typethai-desktop/src/update.rs`). Losing either key means installed copies stop accepting updates (the
+update key) or ask for Accessibility again (the certificate), so keep a backup outside GitHub.
 
 Run from a checkout on macOS: `scripts/typethai.sh` builds the release binary, stops any running typeThai (including
 the installed app) and starts it in the background (`stop`, `status`, `log`, `fg` also work). Link it onto your PATH to

@@ -131,11 +131,15 @@ fn parse(status: u16, body: &str) -> Result<String, Failure> {
         c => Err(Failure::Status(c, v.as_ref().and_then(|v| v["error"]["message"].as_str()).map(String::from))),
     }
 }
-/// Blocking POST, run on its own short-lived thread.
-fn call(run: &Run, key: &secret::ApiKey) -> Result<String, Failure> {
+/// An HTTP client that answers every status (no error for 4xx/5xx). Windows uses SChannel and the OS certificate store.
+pub fn http_agent(timeout: Duration) -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
     let tls = if cfg!(windows) { TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier) } else { TlsConfig::builder() };
-    let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).tls_config(tls.build()).build());
+    ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).tls_config(tls.build()).build())
+}
+/// Blocking POST, run on its own short-lived thread.
+fn call(run: &Run, key: &secret::ApiKey) -> Result<String, Failure> {
+    let agent = http_agent(TIMEOUT);
     let fail = |e: ureq::Error| if matches!(e, ureq::Error::Timeout(_)) { Failure::Timeout } else { Failure::Network };
     let mut res = agent.post(&endpoint(&run.cfg)).header("Authorization", &key.bearer()).header("Content-Type", "application/json").send(&body(run)).map_err(fail)?;
     let text = res.body_mut().read_to_string().map_err(fail)?;

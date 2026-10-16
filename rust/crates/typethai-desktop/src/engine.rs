@@ -264,6 +264,8 @@ pub struct Engine {
     pub speller: Option<Box<dyn Speller + Send>>,
     /// prefs.json "rewrite". The API key is not here; only the rewrite worker reads it.
     pub rewrite: rewrite::Config,
+    /// prefs.json "check_updates": look for a new release at launch and every few hours. Read by `update`.
+    pub check_updates: bool,
     /// The selection read in flight. Only Some while the bubble is empty (the one rewrite phase with no rows).
     capturing: Option<ReqId>,
     last_req: ReqId,
@@ -284,7 +286,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -547,10 +549,11 @@ impl Engine {
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
+            SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone() }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
