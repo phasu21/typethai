@@ -1,4 +1,5 @@
-//! The OS English spell checker behind `engine::Speller`: NSSpellChecker on macOS, ISpellChecker on Windows.
+//! The OS English spell checker behind `engine::Speller`: NSSpellChecker on macOS; on Windows ISpellChecker for the
+//! guesses and the text prediction (`Windows.Data.Text`) for the completions.
 use crate::engine::Speller;
 
 /// The system spell checker, or None where there is none (or it has no English).
@@ -46,8 +47,17 @@ mod mac {
 mod win {
     use crate::engine::Speller;
     use std::{sync::mpsc, time::Duration};
-    use windows::{core::HSTRING, Win32::{Globalization::*, System::Com::*}};
-    type Req = (String, mpsc::Sender<Option<Vec<String>>>);
+    use windows::{core::HSTRING, Data::Text::{TextPredictionGenerator, TextPredictionOptions}, Win32::{Globalization::*, System::Com::*}};
+    use windows_collections::IIterable;
+    enum Req {
+        Guess(String, mpsc::Sender<Option<Vec<String>>>),
+        /// The words in front and the prefix.
+        Complete(Vec<String>, String, mpsc::Sender<Vec<String>>),
+    }
+    /// How many words in front the prediction is given.
+    const PREDICT_CONTEXT: usize = 4;
+    /// How long a pause waits for a prediction (~5-10 ms once warm) before the rows go up without it.
+    const PREDICT_WAIT: Duration = Duration::from_millis(50);
     /// COM stays on its own MTA worker (like the UIA worker): the keyboard hook thread only waits a moment for it.
     pub struct Win { tx: mpsc::Sender<Req> }
     impl Win {
@@ -62,7 +72,13 @@ mod win {
                     .and_then(|f| f.CreateSpellChecker(&lang).ok());
                 let _ = ok_tx.send(checker.is_some());
                 let Some(checker) = checker else { return };
-                for (word, reply) in rx { let _ = reply.send(check(&checker, &word)); }
+                // the first prediction takes ~20-90 ms: made now, not at the first pause
+                let predictor = TextPredictionGenerator::Create(&lang).ok();
+                if let Some(g) = &predictor { let _ = predict(g, &[], "a"); }
+                for req in rx { match req {
+                    Req::Guess(word, reply) => { let _ = reply.send(check(&checker, &word)); }
+                    Req::Complete(prev, prefix, reply) => { let _ = reply.send(predictor.as_ref().and_then(|g| predict(g, &prev, &prefix).ok()).unwrap_or_default()); }
+                } }
             }).ok()?;
             ok_rx.recv().ok()?.then_some(Win { tx })
         }
@@ -82,12 +98,27 @@ mod win {
         }
         Some(out)
     }
+    /// The words Windows' text prediction expects `prefix` to become after `prev`, best first. Predictions only: its
+    /// corrections ignore the words in front, and mixed in they bring touch-keyboard misses (`hel` -> `gel`, `he m`).
+    /// It answers only in a desktop session (in session 0 the call fails).
+    fn predict(g: &TextPredictionGenerator, prev: &[String], prefix: &str) -> windows::core::Result<Vec<String>> {
+        let prev: IIterable<HSTRING> = prev.iter().map(HSTRING::from).collect::<Vec<_>>().into();
+        let list = g.GetCandidatesWithParametersAsync(&HSTRING::from(prefix), 4, TextPredictionOptions::Predictions, &prev)?.join()?;
+        (0..list.Size()?).map(|i| list.GetAt(i).map(|s| s.to_string())).collect()
+    }
     impl Speller for Win {
         // ISpellChecker reads one word at a time: the line in front is not used
         fn guesses(&self, _before: &str, word: &str) -> Option<Vec<String>> {
             let (reply, rx) = mpsc::channel();
-            self.tx.send((word.to_string(), reply)).ok()?;
+            self.tx.send(Req::Guess(word.to_string(), reply)).ok()?;
             rx.recv_timeout(Duration::from_millis(80)).ok().flatten()
+        }
+        fn completions(&self, before: &str, prefix: &str) -> Vec<String> {
+            let words: Vec<&str> = before.split_whitespace().collect();
+            let prev = words[words.len().saturating_sub(PREDICT_CONTEXT)..].iter().map(|w| w.to_string()).collect();
+            let (reply, rx) = mpsc::channel();
+            if self.tx.send(Req::Complete(prev, prefix.to_string(), reply)).is_err() { return vec![] }
+            rx.recv_timeout(PREDICT_WAIT).unwrap_or_default()
         }
     }
 }
