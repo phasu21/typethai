@@ -13,7 +13,19 @@ env:
   MODEL_SHA256: 1cb60240059d93166923105a93c44764e4841c7928625c1abb18387485b64e0c
   GH_TOKEN: ${{ github.token }}
 jobs:
+  # scripts/release-local.sh publishes a finished release (signed updater packages included) and only then creates the
+  # tag: the builds below are skipped for it.
+  check:
+    runs-on: ubuntu-latest
+    outputs: { built: "${{ steps.c.outputs.built }}" }
+    steps:
+      - id: c
+        run: |
+          n=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name | select(endswith(".sig"))] | length' 2>/dev/null || echo 0)
+          if [ "${n:-0}" -ge 2 ]; then echo "built=true" >> "$GITHUB_OUTPUT"; echo "release already built locally: skipping"; else echo "built=false" >> "$GITHUB_OUTPUT"; fi
   test:
+    needs: check
+    if: needs.check.outputs.built != 'true'
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: rust } }
     steps:
