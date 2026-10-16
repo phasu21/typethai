@@ -1,5 +1,9 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.3**
+- An update downloaded but not yet installed no longer hides newer ones: if a later version comes out first, the tray
+  offers that one instead.
+
 **New in 0.5.2**
 - **Tab+R.** Hold Tab and press R for the ⌃⌥R options on the word you just typed, or on the bubble's word. ⌃⌥R stays
   for selected text. Tab right after a word now goes through when you release it; typing on quickly still types it.
