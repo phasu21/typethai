@@ -13,12 +13,22 @@ use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Cont
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
 impl Boundary { pub fn text(self) -> &'static str { match self { Boundary::Space => " ", Boundary::Enter => "\n", Boundary::Tab => "\t" } } }
-/// English spell checker (the OS one; see `platform::spell`).
+/// English spell checker (the OS one; see `platform::spell`). `before` is the text on the line in front of the word
+/// (it ends where the word starts): macOS ranks its guesses and completions by it.
 pub trait Speller {
     /// None when `word` is spelled right (or cannot be checked); else the guesses, best first.
-    fn guesses(&self, word: &str) -> Option<Vec<String>>;
+    fn guesses(&self, before: &str, word: &str) -> Option<Vec<String>>;
     /// Words that start with `prefix`, best first (empty where the OS has no completion API).
-    fn completions(&self, _prefix: &str) -> Vec<String> { vec![] }
+    fn completions(&self, _before: &str, _prefix: &str) -> Vec<String> { vec![] }
+}
+/// How much of the line in front of a word the spell checker is given, in bytes.
+const SPELL_CONTEXT: usize = 200;
+/// The end of `text` the spell checker reads as a word's context: its last line, at most `SPELL_CONTEXT` bytes.
+fn spell_context(text: &str) -> &str {
+    let line = &text[text.rfind('\n').map_or(0, |i| i + 1)..];
+    let mut at = line.len().saturating_sub(SPELL_CONTEXT);
+    while !line.is_char_boundary(at) { at += 1 }
+    &line[at..]
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause,
@@ -290,13 +300,15 @@ pub struct Engine {
     last_key: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
     comp_muted: bool,
+    /// The row the spell checker put first at the last pause (what it inserts): a key keeps it first while it still fits.
+    spell_lead: Option<String>,
     /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
     pub delete_unit: DeleteUnit,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -395,14 +407,15 @@ impl Engine {
     }
     /// English spelling suggestions for a finished word (`ths` -> this) the spell checker flags: its guesses and, with
     /// slips, the words one slip away, ranked by the completion model after `prev`. Punctuation around the word is kept.
-    pub(crate) fn en_items(&self, typed: &str, prev: Option<&str>) -> Vec<BubbleItem> {
+    /// `before`: the text in front of `typed` on the line.
+    pub(crate) fn en_items(&self, before: &str, typed: &str, prev: Option<&str>) -> Vec<BubbleItem> {
         let Some(sp) = &self.speller else { return vec![] };
         if !self.opts.typo_suggestions { return vec![] }
         let core = typed.trim_matches(|c: char| !c.is_ascii_alphabetic());
         if core.len() < 2 || !core.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
         let at = typed.find(core).unwrap_or(0);
         let (pre, post) = (&typed[..at], &typed[at + core.len()..]);
-        let Some(guesses) = sp.guesses(core) else { return vec![] };
+        let Some(guesses) = sp.guesses(&format!("{before}{pre}"), core) else { return vec![] };
         let fixes = match (self.opts.slips, &self.en_comp) {
             (Some(_), Some(comp)) => comp.correct(core, 3, self.context(prev, InputLang::Latin), &guesses),
             _ => guesses.into_iter().filter(|g| g != core).take(3).collect(),
@@ -694,7 +707,8 @@ impl Engine {
             (CompleteMode::Pause, true) => Some(Ask::Pause),
             _ => None,
         };
-        let rows = ask.map_or_else(Vec::new, |ask| self.completion_rows(ask, if ask == Ask::Refresh { up } else { &[] }));
+        let (rows, lead) = ask.map_or_else(|| (vec![], None), |ask| self.completion_rows(ask, if ask == Ask::Refresh { up } else { &[] }));
+        if ask == Some(Ask::Pause) { self.spell_lead = lead }
         if rows.is_empty() && !self.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Complete { .. })) { return }
         let live = self.bubble.first().filter(|b| matches!(&b.kind, BubbleKind::Live { typed, .. } if *typed == self.word)).cloned();
         let items: Vec<BubbleItem> = live.into_iter().chain(rows).collect();
@@ -703,19 +717,21 @@ impl Engine {
     /// Completions of the buffer, at most 3 rows with the live row. Thai (a Thai layout run, or a wrong-layout word the
     /// live row converts): the run's last word is completed and the rest kept, labelled with that word only. Otherwise
     /// an English word. `ask` sets the length, the gate and the spell checker; rows in `carry` that still extend the
-    /// buffer fill what is left.
-    fn completion_rows(&self, ask: Ask, carry: &[BubbleItem]) -> Vec<BubbleItem> {
-        if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return vec![] }
+    /// buffer fill what is left, except the spell checker's lead row (`spell_lead`), which stays first. Also returns the
+    /// row the spell checker put first, if it did.
+    fn completion_rows(&self, ask: Ask, carry: &[BubbleItem]) -> (Vec<BubbleItem>, Option<String>) {
+        if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return (vec![], None) }
         let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.as_str()), _ => None });
         // English typed on the Thai layout: the reverse live row is what was meant
-        if self.thai_active && live.is_some() { return vec![] }
+        if self.thai_active && live.is_some() { return (vec![], None) }
         let (min, k) = (ask.min_len(), 3 - usize::from(live.is_some()));
         let gate = |c: &Completions| !ask.gated() || c.confidence >= self.opts.complete_conf;
         // `reading`: the buffer as the rows read it, `head` its part kept in front of each completed word
+        let mut lead = None;
         let (head, reading, found) = if self.thai_active || live.is_some() {
-            let Some(comp) = &self.thai_comp else { return vec![] };
+            let Some(comp) = &self.thai_comp else { return (vec![], None) };
             let run = en_to_th(&self.word);
-            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= min) else { return vec![] };
+            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= min) else { return (vec![], None) };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             // the word before the tail in the run, else the one the line shows before the run
             let d = &self.det.th_dict;
@@ -723,33 +739,40 @@ impl Engine {
             (head.to_string(), run.clone(), comp.complete(tail, k, self.context(prev.as_deref(), InputLang::Thai)))
         } else {
             let w = self.word.as_str();
-            if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return vec![] }
-            let Some(comp) = &self.en_comp else { return vec![] };
+            if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return (vec![], None) }
+            let Some(comp) = &self.en_comp else { return (vec![], None) };
             let prev = self.word_before(self.line.len());
             let mut found = comp.complete(w, k, self.context(prev.as_deref(), InputLang::Latin));
-            if ask.spells() && found.words.len() < k { if let Some(sp) = &self.speller {
-                for g in sp.completions(w) {
+            if ask.spells() { if let Some(sp) = &self.speller {
+                // keep the typed prefix's case: the checker may capitalise
+                let mut theirs = sp.completions(&self.text_before(self.line.len()), w).into_iter()
+                    .filter_map(|g| g.get(w.len()..).filter(|r| !r.is_empty() && g[..w.len()].eq_ignore_ascii_case(w)).map(|rest| format!("{w}{rest}")));
+                // the checker ranks by the line and the words the user taught the system: its best leads, the model's
+                // words follow, and its others fill what is left
+                if let Some(first) = theirs.next() {
+                    found.words.retain(|f| !f.eq_ignore_ascii_case(&first));
+                    found.words.insert(0, first.clone()); found.words.truncate(k); lead = Some(first);
+                }
+                for g in theirs {
                     if found.words.len() >= k { break }
-                    // keep the typed prefix's case: the checker may capitalise
-                    let Some(rest) = g.get(w.len()..).filter(|r| !r.is_empty() && g[..w.len()].eq_ignore_ascii_case(w)) else { continue };
-                    let g = format!("{w}{rest}");
                     if !found.words.iter().any(|f| f.eq_ignore_ascii_case(&g)) { found.words.push(g) }
                 }
             } }
             (String::new(), w.to_string(), found)
         };
-        if !gate(&found) { return vec![] }
-        let carried = carry.iter().filter_map(|b| match &b.kind {
+        if !gate(&found) { return (vec![], None) }
+        let carried: Vec<(String, String)> = carry.iter().filter_map(|b| match &b.kind {
             BubbleKind::Complete { insert, .. } if insert.len() > reading.len() && insert.starts_with(&reading) => Some((b.label.clone(), insert.clone())),
             _ => None,
-        });
+        }).collect();
+        let kept_lead = carried.iter().find(|(_, i)| self.spell_lead.as_ref() == Some(i)).cloned();
         let mut rows: Vec<BubbleItem> = vec![];
-        for (label, insert) in found.words.into_iter().map(|w| (w.clone(), format!("{head}{w}"))).chain(carried) {
+        for (label, insert) in kept_lead.into_iter().chain(found.words.into_iter().map(|w| (w.clone(), format!("{head}{w}")))).chain(carried) {
             if rows.len() == k { break }
             if Some(insert.as_str()) == live || rows.iter().any(|r| matches!(&r.kind, BubbleKind::Complete { insert: i, .. } if *i == insert)) { continue }
             rows.push(BubbleItem { kind: BubbleKind::Complete { typed: self.word.clone(), insert }, label });
         }
-        rows
+        (rows, lead)
     }
     /// Offer the last `n` committed words again (word buffer empty, caret right after them).
     fn offer_committed(&mut self, n: usize, acts: &mut Vec<Action>) {
@@ -788,6 +811,11 @@ impl Engine {
         }
         let core = text.trim_matches(|c: char| !c.is_alphanumeric());
         vec![(!core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic())).then(|| core.to_ascii_lowercase())]
+    }
+    /// What the line shows in front of `line[j]` (the buffer, with `j` = `line.len()`), as the spell checker's context.
+    fn text_before(&self, j: usize) -> String {
+        let shown: String = self.line[self.line_start.min(j)..j].iter().map(|c| format!("{}{}", c.shown(), c.after())).collect();
+        spell_context(&shown).to_string()
     }
     /// The last word `line[j - 1]` shows, unless a line break follows it.
     fn word_before(&self, j: usize) -> Option<String> {
@@ -898,7 +926,7 @@ impl Engine {
             // default: the boundary passes through untouched; the bubble offers the conversion (Tab / hotkey applies)
             let mut items = vec![BubbleItem { label: thai.clone(), kind: BubbleKind::Convert { typed: typed.clone(), thai: thai.clone() } }];
             // the best English spelling stays in reach right under the Thai reading
-            let en = self.en_items(&typed, prev.as_deref());
+            let en = self.en_items(&self.text_before(self.line.len()), &typed, prev.as_deref());
             items.extend(en.first().cloned());
             for t in self.typo_items(&thai, prev.as_deref()) { if t.label != thai { items.push(t) } }
             items.extend(en.into_iter().skip(1));
@@ -906,7 +934,7 @@ impl Engine {
             self.show(items, &mut acts); self.phrase = 1;
         } else {
             // left as English: offer spelling corrections
-            let en = self.en_items(&typed, prev.as_deref());
+            let en = self.en_items(&self.text_before(self.line.len()), &typed, prev.as_deref());
             self.show(en, &mut acts); self.phrase = 0;
         }
         self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
@@ -1164,18 +1192,19 @@ impl Engine {
     /// ⌃⌥R with nothing selected: the rows for the word before the caret, the buffer or else the last word on the
     /// line. None when there is no such word.
     fn word_options(&self) -> Option<Vec<BubbleItem>> {
-        if !self.word.is_empty() { return Some(self.word_rows(&self.word, self.thai_active, self.word_before(self.line.len()))) }
+        let at = self.line.len();
+        if !self.word.is_empty() { return Some(self.word_rows(&self.text_before(at), &self.word, self.thai_active, self.word_before(at))) }
         let c = self.line.last().filter(|_| self.line.len() > self.line_start)?;
         // a converted word's other layout is its undo
         if c.converted.is_some() { return Some(vec![BubbleItem { label: c.orig.clone(), kind: BubbleKind::UndoConversion }]) }
-        Some(self.word_rows(&c.typed, c.rev, self.word_before(self.line.len() - 1)))
+        Some(self.word_rows(&self.text_before(at - 1), &c.typed, c.rev, self.word_before(at - 1)))
     }
     /// The conversion of `typed` (keys typed in the `rev` direction) when it looks meant, and the spelling fixes of the
     /// word as it is and as converted, in the order the boundary bubble uses. A reverse conversion clears a high bar,
     /// so the Thai on screen is not offered fixed next to it; a forward one keeps the English spelling in reach.
-    fn word_rows(&self, typed: &str, rev: bool, prev: Option<String>) -> Vec<BubbleItem> {
+    fn word_rows(&self, before: &str, typed: &str, rev: bool, prev: Option<String>) -> Vec<BubbleItem> {
         let (screen, target) = if rev { (en_to_th(typed), typed.to_string()) } else { (typed.to_string(), en_to_th(typed)) };
-        let fixes = |text: &str, thai: bool| if thai { self.typo_items(text, prev.as_deref()) } else { self.en_items(text, prev.as_deref()) };
+        let fixes = |text: &str, thai: bool| if thai { self.typo_items(text, prev.as_deref()) } else { self.en_items(before, text, prev.as_deref()) };
         let converts = if rev { self.rev_wanted(typed) || { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
         let here = if rev && converts { vec![] } else { fixes(&screen, rev) };
         if !converts { return here.into_iter().take(3).collect() }
@@ -1238,7 +1267,7 @@ impl Engine {
         let to = spans.iter().zip(flips).map(|(&(a, b), f)| { let w = &text[a..b];
             if matches!(f, Some((_, true))) { None }
             else if lang_of(w) == InputLang::Thai { self.fix_thai(w) }
-            else if Instant::now() < deadline { self.en_items(w, None).into_iter().next().map(|i| i.label) }
+            else if Instant::now() < deadline { self.en_items(spell_context(&text[..a]), w, None).into_iter().next().map(|i| i.label) }
             else { None } }).collect();
         splice(text, spans, to)
     }
@@ -1872,7 +1901,7 @@ mod tests {
     /// A speller that knows a few misspellings.
     struct FakeSpeller;
     impl Speller for FakeSpeller {
-        fn guesses(&self, word: &str) -> Option<Vec<String>> {
+        fn guesses(&self, _: &str, word: &str) -> Option<Vec<String>> {
             let g: &[&str] = match word { "ths" => &["this", "the"], "thsi" => &["this"], "mu" => &["my"], _ => return None };
             Some(g.iter().map(|s| s.to_string()).collect())
         }
@@ -2492,15 +2521,15 @@ mod tests {
     /// Counts the spell checker's completion calls.
     struct CountingSpeller(Arc<std::sync::atomic::AtomicUsize>);
     impl Speller for CountingSpeller {
-        fn guesses(&self, _: &str) -> Option<Vec<String>> { None }
-        fn completions(&self, p: &str) -> Vec<String> { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); if p.starts_with("hel") { vec!["helium".into()] } else { vec![] } }
+        fn guesses(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn completions(&self, _: &str, p: &str) -> Vec<String> { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); if p.starts_with("hel") { vec!["helium".into()] } else { vec![] } }
     }
     #[test] fn a_key_keeps_spell_checker_rows_that_still_fit_without_calling_it() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Pause);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         e.en_comp = Some(Completer::new([("help".to_string(), 30.0)])); e.speller = Some(Box::new(CountingSpeller(calls.clone())));
-        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["help", "helium"]);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["helium", "help"]);
         let before = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(e.on_key(Key::Char('i')).actions, vec![Action::ShowBubble(vec![BubbleItem { label: "helium".into(), kind: BubbleKind::Complete { typed: "heli".into(), insert: "helium".into() } }])]);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before, "no spell checker on a key");
@@ -2538,7 +2567,7 @@ mod tests {
         tab(&mut e); typ_th(&mut e, "ไทย"); assert_eq!(e.buffer(), keys("ภาษาไทย"));
     }
     struct FixingSpeller;
-    impl Speller for FixingSpeller { fn guesses(&self, w: &str) -> Option<Vec<String>> { matches!(w, "ths" | "thiss").then(|| vec!["this".into()]) } }
+    impl Speller for FixingSpeller { fn guesses(&self, _: &str, w: &str) -> Option<Vec<String>> { matches!(w, "ths" | "thiss").then(|| vec!["this".into()]) } }
     #[test] fn a_typo_row_retypes_only_what_differs() {
         let Some(mut e) = engine_typo() else { return };
         e.opts.auto_convert = true;
@@ -2599,8 +2628,8 @@ mod tests {
     }
     struct CompletingSpeller;
     impl Speller for CompletingSpeller {
-        fn guesses(&self, _: &str) -> Option<Vec<String>> { None }
-        fn completions(&self, p: &str) -> Vec<String> { if p == "hel" { vec!["helium".into()] } else { vec![] } }
+        fn guesses(&self, _: &str, _: &str) -> Option<Vec<String>> { None }
+        fn completions(&self, _: &str, p: &str) -> Vec<String> { if p == "hel" { vec!["helium".into()] } else { vec![] } }
     }
     #[test] fn the_spell_checker_tops_up_only_after_a_pause() {
         let Some(mut e) = engine() else { return };
@@ -2608,7 +2637,34 @@ mod tests {
         e.en_comp = Some(Completer::new([("help".to_string(), 30.0)])); e.speller = Some(Box::new(CompletingSpeller));
         typ(&mut e, "hel"); assert_eq!(labels(&e), ["help"], "no spell checker on a keystroke");
         e.reset(); e.opts.complete = CompleteMode::Pause;
-        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["help", "helium"]);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["helium", "help"], "its best word leads");
+    }
+    /// Completes `hel` to `helpless` and fixes `ths`, and keeps the line it was given in front of each word.
+    struct ContextSpeller(Arc<std::sync::Mutex<Vec<String>>>);
+    impl Speller for ContextSpeller {
+        fn guesses(&self, before: &str, w: &str) -> Option<Vec<String>> { self.0.lock().unwrap().push(before.into()); (w == "ths").then(|| vec!["this".into()]) }
+        fn completions(&self, before: &str, p: &str) -> Vec<String> { self.0.lock().unwrap().push(before.into()); if p == "hel" { vec!["helpless".into(), "helper".into()] } else { vec![] } }
+    }
+    #[test] fn the_spell_checker_reads_the_line_in_front_of_the_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause); e.opts.live = false;
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        e.speller = Some(Box::new(ContextSpeller(seen.clone())));
+        typ(&mut e, "can you hel"); idle(&mut e, 600);
+        assert_eq!(seen.lock().unwrap().last().unwrap(), "can you ");
+        e.on_key(Key::Boundary(Boundary::Space)); typ(&mut e, "ths ");
+        assert_eq!(seen.lock().unwrap().last().unwrap(), "can you hel ", "a finished word's guesses");
+        e.on_key(Key::Boundary(Boundary::Enter)); typ(&mut e, "hel"); idle(&mut e, 600);
+        assert_eq!(seen.lock().unwrap().last().unwrap(), "", "a new line starts over");
+    }
+    #[test] fn a_key_keeps_the_spell_checkers_row_first() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.en_comp = Some(Completer::new([("help".to_string(), 30.0), ("helper".to_string(), 20.0), ("helpful".to_string(), 10.0)]));
+        e.speller = Some(Box::new(ContextSpeller(Arc::default())));
+        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["helpless", "help", "helper"]);
+        typ(&mut e, "p"); assert_eq!(labels(&e), ["helpless", "helper", "helpful"], "the model's rows follow the new prefix");
+        typ(&mut e, "l"); assert_eq!(labels(&e), ["helpless"]);
     }
     #[test] fn esc_mutes_completions_until_the_word_ends() {
         let Some(mut e) = engine() else { return };
@@ -2749,7 +2805,7 @@ mod tests {
             println!("selection {name} {} chars: {} rows in {:.1} ms", text.chars().count(), rows.len(), t.elapsed().as_secs_f64() * 1e3);
         }
         for w in ["teh", "the", "brwon", "quick"] {
-            let t = Instant::now(); let g = e.speller.as_ref().and_then(|s| s.guesses(w)).map_or(0, |g| g.len());
+            let t = Instant::now(); let g = e.speller.as_ref().and_then(|s| s.guesses("", w)).map_or(0, |g| g.len());
             println!("spell checker guesses({w}): {g} in {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
         }
         e.corrector = None;
@@ -2771,7 +2827,7 @@ mod tests {
     }
     /// Flags `candel` with the guesses the macOS checker gives, in its order.
     struct CandelSpeller;
-    impl Speller for CandelSpeller { fn guesses(&self, w: &str) -> Option<Vec<String>> { (w == "candel").then(|| ["cancel", "candle", "Handel"].map(String::from).to_vec()) } }
+    impl Speller for CandelSpeller { fn guesses(&self, _: &str, w: &str) -> Option<Vec<String>> { (w == "candel").then(|| ["cancel", "candle", "Handel"].map(String::from).to_vec()) } }
     #[test] fn a_slipped_key_still_reaches_the_word_meant() {
         let (Some(mut m), Some(mut e)) = (model(), engine_typo()) else { return };
         e.opts.complete = CompleteMode::Pause; e.load_completers(&mut m); e.speller = Some(Box::new(CandelSpeller));

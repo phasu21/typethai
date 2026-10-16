@@ -99,13 +99,13 @@ fn completions(e: &Engine, prev: &str, typed: &str, lang: Lang) -> (Vec<String>,
 }
 fn finished(e: &Engine, prev: &str, typed: &str, lang: Lang) -> Vec<String> {
     match lang {
-        Lang::En => e.en_items(typed, Some(prev)).into_iter().map(|b| b.label).collect(),
+        Lang::En => e.en_items(&format!("{prev} "), typed, Some(prev)).into_iter().map(|b| b.label).collect(),
         Lang::Th => e.typo_items(typed, Some(prev)).into_iter().map(|b| b.label).collect(),
     }
 }
 fn finished_before(e: &Engine, prev: &str, typed: &str, lang: Lang) -> Vec<String> {
     match lang {
-        Lang::En => e.speller.as_ref().and_then(|s| s.guesses(typed)).unwrap_or_default().into_iter().filter(|g| g != typed).take(3).collect(),
+        Lang::En => e.speller.as_ref().and_then(|s| s.guesses(&format!("{prev} "), typed)).unwrap_or_default().into_iter().filter(|g| g != typed).take(3).collect(),
         Lang::Th => finished(e, prev, typed, lang),
     }
 }
