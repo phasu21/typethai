@@ -30,14 +30,16 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/crates/typethai-desktop/Cargo
 git fetch -q origin
 [ -n "$(git branch -r --contains HEAD)" ] || die "HEAD is not on GitHub: push it first (the PC builds it from there)"
 sha=$(git rev-parse HEAD)
-if gh release view "$tag" -R "$repo" --json isDraft -q .isDraft 2>/dev/null | grep -q false; then die "$tag is already published"; fi
+if [ $publish = 1 ] && gh release view "$tag" -R "$repo" --json isDraft -q .isDraft 2>/dev/null | grep -q false; then die "$tag is already published"; fi
 for f in codesign.p12 codesign.p12.password update-ed25519.pem; do [ -f "$keys/$f" ] || die "missing $keys/$f"; done
 pub=$(openssl pkey -in "$keys/update-ed25519.pem" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
 grep -q "const PUBLIC_KEY: &str = \"$pub\"" rust/crates/typethai-desktop/src/update.rs || die "the update key does not match PUBLIC_KEY in update.rs"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$win" "echo ok" >/dev/null || die "cannot reach $win over SSH"
 
 # The Windows side runs as one PowerShell script (-EncodedCommand avoids cmd.exe quoting).
-winps() { ssh -o BatchMode=yes "$win" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference='SilentlyContinue'; \$ErrorActionPreference='Stop'; $1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')"; }
+# Native commands are checked through $LASTEXITCODE: with ErrorActionPreference=Stop, Windows PowerShell treats any
+# stderr line (cargo's progress) as a failure.
+winps() { ssh -o BatchMode=yes "$win" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference='SilentlyContinue'; $1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')"; }
 
 # ---------- model (a pinned asset, as in the release workflow) ----------
 model_tag=$(sed -n 's/^ *MODEL_TAG: *//p' .github/workflows/release.yml); model_sha=$(sed -n 's/^ *MODEL_SHA256: *//p' .github/workflows/release.yml)
@@ -53,21 +55,21 @@ rm -rf "$out"; mkdir -p "$out"
 step "Windows build on $win (log: $out/windows.log)"
 (
   set -e
-  winps '$d = "C:\tmp\typethai-build"; if (-not (Test-Path "$d\.git")) { git clone -q https://github.com/'"$repo"' $d }'
+  winps '$d = "C:\tmp\typethai-build"; if (-not (Test-Path "$d\.git")) { git clone -q https://github.com/'"$repo"' $d; if ($LASTEXITCODE) { exit 1 } }'
   scp -q -o BatchMode=yes "$model" "$win:C:/tmp/typethai-build/typethai.ttm"
   winps '
     $d = "C:\tmp\typethai-build"; $tag = "'"$tag"'"
     git -C $d fetch -q origin; git -C $d checkout -q -f '"$sha"'; if ($LASTEXITCODE) { throw "checkout failed" }
-    Set-Location "$d\rust"; cargo build --release -p typethai-desktop 2>&1 | ForEach-Object { "$_" }; if ($LASTEXITCODE) { throw "cargo build failed" }
+    Set-Location "$d\rust"; cmd /c "cargo build --release -p typethai-desktop 2>&1"; if ($LASTEXITCODE) { throw "cargo build failed" }
     $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $iscc) { throw "Inno Setup 6 is not installed (winget install JRSoftware.InnoSetup)" }
     $dist = "$d\dist"; Remove-Item $dist -Recurse -Force -ErrorAction SilentlyContinue
-    $pkg = "$dist\typeThai-$tag-windows-x86_64"; New-Item -ItemType Directory -Force $pkg | Out-Null
-    Copy-Item "$d\rust\target\release\typethai-desktop.exe", "$d\LICENSE", "$d\DATA_LICENSES.md", "$d\README.md" $pkg
-    Copy-Item "$d\typethai.ttm" "$pkg\typethai.ttm"
-    Compress-Archive -Path $pkg -DestinationPath "$pkg.zip"
+    $pkg = "$dist\typeThai-$tag-windows-x86_64"; New-Item -ItemType Directory -Force $pkg -ErrorAction Stop | Out-Null
+    Copy-Item "$d\rust\target\release\typethai-desktop.exe", "$d\LICENSE", "$d\DATA_LICENSES.md", "$d\README.md" $pkg -ErrorAction Stop
+    Copy-Item "$d\typethai.ttm" "$pkg\typethai.ttm" -ErrorAction Stop
+    Compress-Archive -Path $pkg -DestinationPath "$pkg.zip" -ErrorAction Stop
     & $iscc /Q "/DAppVersion=$($tag.TrimStart("v"))" "/DTag=$tag" "/DSrc=$pkg" "/O$dist" "$d\packaging\typethai.iss"; if ($LASTEXITCODE) { throw "iscc failed" }
-    Get-ChildItem $dist -File | ForEach-Object { "built $($_.Name)" }'
+    Get-ChildItem $dist -File | ForEach-Object { "built $($_.Name)" }' || exit 1
   for f in "typeThai-$tag-windows-x86_64.zip" "typeThai-$tag-windows-x86_64-setup.exe"; do
     scp -q -o BatchMode=yes "$win:C:/tmp/typethai-build/dist/$f" "$out/"
   done
@@ -77,9 +79,9 @@ winjob=$!
 # ---------- macOS, here ----------
 if [ $tests = 1 ]; then
   step "tests"
-  (cd rust && TYPETHAI_MODEL="$model" cargo test -q --release -p typethai-core -p typethai-desktop 2>&1 | grep -E "^test result|FAILED|panicked" ) || die "tests failed"
-  out_sim=$(cd rust && printf 'l;ylfu <Tab>\n' | cargo run -q --release -p typethai-desktop -- --simulate --model "$model" | tail -1)
-  [ "$out_sim" = "สวัสดี " ] || die "simulate check failed: got '$out_sim'"
+  # debug build: it shares the cache of everyday `cargo test`; the release binary is checked from the DMG below
+  (cd rust && TYPETHAI_MODEL="$model" cargo test -q -p typethai-core -p typethai-desktop > "$out/tests.log" 2>&1) || { grep -E "FAILED|panicked" "$out/tests.log" >&2; die "tests failed (log: $out/tests.log)"; }
+  grep -E "^test result: ok. [1-9]" "$out/tests.log" | sed 's/; 0 measured.*//'
 fi
 step "macOS universal build"
 export MACOSX_DEPLOYMENT_TARGET=12.0
