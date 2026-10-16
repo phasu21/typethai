@@ -270,6 +270,7 @@ pub fn run(rx: Receiver<UiMsg>) {
         setup(cx);
         let mut ui = open_bubble(cx);
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
+        #[cfg(windows)] if tray.is_some() { super::platform::tray::promote_on_taskbar() }
         cx.spawn(async move |cx| {
             let mut quit_at: Option<Instant> = None;
             let mut settings_win: Option<settings::SettingsWin> = None;

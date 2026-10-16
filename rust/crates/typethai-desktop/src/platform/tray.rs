@@ -42,3 +42,53 @@ impl Tray {
         None
     }
 }
+
+/// Windows 11 puts a new tray icon in the hidden-icons area, and with that area's menu turned off the icon cannot be
+/// found at all. Once Explorer has recorded typeThai's icon (`HKCU\Control Panel\NotifyIconSettings\<id>`, matched by
+/// executable path), show it on the taskbar, unless the user has already chosen (`IsPromoted` is set).
+#[cfg(windows)]
+pub fn promote_on_taskbar() {
+    std::thread::spawn(|| {
+        let Some(exe) = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_lowercase()) else { return };
+        // Explorer writes the entry shortly after the icon is added
+        for _ in 0..30 {
+            if let Some(done) = unsafe { promote(&exe) } { if done { return } }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+/// Some(true) when typeThai's entry was found (and promoted unless already decided), None when it is not there yet.
+#[cfg(windows)]
+unsafe fn promote(exe: &str) -> Option<bool> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::System::Registry::*;
+    let mut root = HKEY::default();
+    if RegOpenKeyExW(HKEY_CURRENT_USER, w!("Control Panel\\NotifyIconSettings"), Some(0), KEY_READ, &mut root).is_err() { return None }
+    let mut found = None;
+    let mut name = [0u16; 256];
+    for i in 0.. {
+        let mut len = name.len() as u32;
+        if RegEnumKeyExW(root, i, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None).is_err() { break }
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(root, PCWSTR(name.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut key).is_err() { continue }
+        let path = read_string(key, w!("ExecutablePath"));
+        if path.is_some_and(|p| p.to_lowercase() == exe) {
+            let decided = RegQueryValueExW(key, w!("IsPromoted"), None, None, None, None).is_ok();
+            if !decided { let _ = RegSetValueExW(key, w!("IsPromoted"), Some(0), REG_DWORD, Some(&1u32.to_le_bytes())); }
+            found = Some(true);
+        }
+        let _ = RegCloseKey(key);
+        if found.is_some() { break }
+    }
+    let _ = RegCloseKey(root);
+    found
+}
+#[cfg(windows)]
+unsafe fn read_string(key: windows::Win32::System::Registry::HKEY, value: windows::core::PCWSTR) -> Option<String> {
+    use windows::Win32::System::Registry::*;
+    let mut buf = [0u16; 1024]; let mut size = (buf.len() * 2) as u32; let mut kind = REG_VALUE_TYPE::default();
+    RegQueryValueExW(key, value, None, Some(&mut kind), Some(buf.as_mut_ptr() as *mut u8), Some(&mut size)).ok().ok()?;
+    if kind != REG_SZ { return None }
+    let n = (size as usize / 2).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n]).trim_end_matches('\0').to_string())
+}
