@@ -11,3 +11,4 @@ data/parity/
 *-results.json
 *-results.txt
 shots/
+dist/
