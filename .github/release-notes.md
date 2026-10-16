@@ -1,5 +1,15 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.1**
+- **นา offers ok.** `ok` typed on the Thai layout (นา) now offers *ok* at Space or Tab, even though นา is a Thai word.
+  Words on the Don't translate list are offered back the same way.
+- **Enter closes the bubble.** Enter ends the line and dismisses what was offered, like Esc. A ⌃⌥R fix still applies
+  with Enter.
+
+**Fixed in 0.5.1**
+- Windows: the tray icon is shown on the taskbar the first time typeThai starts. Windows 11 used to keep it in the
+  hidden icons, where it could not be found when that menu is turned off.
+
 **New in 0.5.0**
 - **Updates itself.** typeThai checks GitHub for a new release at launch and every 6 hours, downloads it in the
   background and checks its signature. The tray menu then shows **Restart to update to …**: nothing changes until you
