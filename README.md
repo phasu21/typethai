@@ -16,7 +16,7 @@ unless you press a key.
   Multi-word phrases work too (`i dont know`).
 - **You decide when to convert.** Space, Enter and punctuation always pass through unchanged. The bubble offers the
   conversion for the word you are typing or the one you just finished. **Tab** applies it, and **⌃⌥Z** undoes it.
-- **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose an option, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
+- **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose an option, **Esc** or **Enter** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
 - **Mid-word suggestions.** The bubble appears while you are still typing, from the third character, once the word
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.

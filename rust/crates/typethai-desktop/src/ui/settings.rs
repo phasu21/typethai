@@ -261,7 +261,7 @@ impl SettingsView {
                 .child(Button::new("add-never").label("Add").primary().on_click(click(view, |v, window, cx| v.add_word(window, cx)))))
             .children(error_text(paint, &v.error)).into_any_element());
         page("Don't translate", IconName::Ban,
-            "These words stay as you type them. ok will not be offered as นา. You can type ok or นา.".into(),
+            "These words stay as you type them: ok typed on the English layout is not offered as นา. On the Thai layout they are offered back as English, so นา offers ok.".into(),
             keywords(&["don't translate", "translate", "word", "add", "remove", "ok", "นา"], self.snap.never.iter()),
             vec![SettingItem::new("Add a word", add), element(view, |v, view, _, paint| v.never_list(view, paint))])
     }

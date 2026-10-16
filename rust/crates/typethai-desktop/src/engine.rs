@@ -231,6 +231,9 @@ pub const REV_AUTO: f64 = 0.98;
 pub const REV_LIVE: f64 = 0.98;
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
+/// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
+/// (`ok` -> นา). Words on the don't-translate list are offered the same way.
+pub const REV_ALWAYS: [&str; 1] = ["ok"];
 
 pub struct Engine {
     /// Reverse-direction model; None disables it (the engine then ignores keys while Thai is active).
@@ -488,6 +491,7 @@ impl Engine {
             Key::Boundary(Boundary::Enter) if self.fixing && self.bubble_visible() => {
                 let mut o = self.on_hotkey(Hotkey::Accept(self.sel.idx)); o.swallow = true; o
             }
+            Key::Boundary(Boundary::Enter) => self.on_enter(),
             Key::Boundary(b) => self.on_boundary(b),
             Key::Hotkey(h) => self.on_hotkey(h),
         }
@@ -534,6 +538,12 @@ impl Engine {
     pub fn blocked(&self, word: &str) -> bool {
         let k = word.to_lowercase();
         !k.is_empty() && self.never.contains(&k)
+    }
+    /// Keys typed on the Thai layout that are always offered as the English they spell: `REV_ALWAYS`, and the
+    /// don't-translate list (a word kept as English one way is the English meant the other way).
+    fn rev_wanted(&self, typed: &str) -> bool {
+        let k = typed.to_lowercase();
+        REV_ALWAYS.contains(&k.as_str()) || self.blocked(&k)
     }
     pub fn apply_settings(&mut self, cmd: SettingsCmd) -> bool {
         match cmd {
@@ -803,6 +813,16 @@ impl Engine {
         if shown && left > 0 { self.offer_committed(left, &mut a) } else { self.show(vec![], &mut a) }
         Outcome { swallow: false, actions: a }
     }
+    /// Enter ends the line and closes the bubble, as Esc would: what was offered is dismissed, not carried to the next
+    /// line. The word is still committed (undo and ⌃⌥R can reach it).
+    fn on_enter(&mut self) -> Outcome {
+        let was = self.bubble_visible();
+        let mut o = self.on_boundary(Boundary::Enter);
+        o.actions.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::Select(_)));
+        if !self.bubble.is_empty() { self.bubble.clear(); self.live = false; self.phrase = 0; }
+        if was && !o.actions.contains(&Action::HideBubble) { o.actions.push(Action::HideBubble) }
+        o
+    }
     fn on_boundary(&mut self, b: Boundary) -> Outcome {
         self.tab_pending = false;
         self.live_streak = 0; self.comp_muted = false; self.last_key = None;
@@ -856,8 +876,8 @@ impl Engine {
     fn on_boundary_rev(&mut self, typed: String, b: Boundary) -> Outcome {
         let mut acts = vec![]; let mut swallow = false; let mut converted = None;
         let thai = en_to_th(&typed);
-        if self.blocked(&typed) {
-            self.show(vec![], &mut acts);
+        if self.rev_wanted(&typed) {
+            self.show(vec![BubbleItem { label: typed.clone(), kind: BubbleKind::ConvertPrev { k: 0 } }], &mut acts); self.phrase = 1;
             self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
@@ -1115,7 +1135,7 @@ impl Engine {
     fn word_rows(&self, typed: &str, rev: bool, prev: Option<String>) -> Vec<BubbleItem> {
         let (screen, target) = if rev { (en_to_th(typed), typed.to_string()) } else { (typed.to_string(), en_to_th(typed)) };
         let fixes = |text: &str, thai: bool| if thai { self.typo_items(text, prev.as_deref()) } else { self.en_items(text, prev.as_deref()) };
-        let converts = if rev { !self.blocked(typed) && { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
+        let converts = if rev { self.rev_wanted(typed) || { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
         let here = if rev && converts { vec![] } else { fixes(&screen, rev) };
         if !converts { return here.into_iter().take(3).collect() }
         let mut rows = vec![BubbleItem { label: target.clone(), kind: BubbleKind::Convert { typed: typed.to_string(), thai: target.clone() } }];
@@ -1491,12 +1511,14 @@ mod tests {
         assert!(o.iter().all(|x| !x.swallow && !x.actions.iter().any(|a| matches!(a, Action::Replace { .. }))), "space passes through");
         let items = bubble_items(o.last().unwrap()).expect("bubble offers the conversion");
         assert_eq!(items[0].label, "สวัสดี"); assert!(matches!(items[0].kind, BubbleKind::Convert { .. }));
-        // Enter also passes through, and the bubble for the finished word stays
-        e.reset(); let o = typ(&mut e, "l;ylfu\n"); assert!(!o.last().unwrap().swallow); assert!(e.bubble_visible());
-        let o = tab(&mut e); assert!(o.swallow);
-        assert_eq!(o.actions[0], Action::Replace { delete: 7, insert: "สวัสดี\n".into(), then: None });
+        // Enter also passes through, and closes the bubble: what was offered is dismissed
+        e.reset(); let o = typ(&mut e, "l;ylfu\n"); assert!(!o.last().unwrap().swallow); assert!(!e.bubble_visible());
+        assert!(o.iter().all(|x| bubble_items(x).is_none()), "no bubble flashes up at Enter");
+        // a bubble already up is hidden
+        e.reset(); typ(&mut e, "l;ylfu "); assert!(e.bubble_visible());
+        let o = e.on_key(Key::Boundary(Boundary::Enter)); assert!(!o.swallow); assert!(o.actions.contains(&Action::HideBubble)); assert!(!e.bubble_visible());
         // reverse mode too
-        e.reset(); let mut o = typ_th(&mut e, "กนืะ าืนไ"); o.push(e.on_key(Key::Boundary(Boundary::Enter))); assert!(replaced(&o).is_empty()); assert!(e.bubble_visible()); assert!(o.iter().all(|x| !x.swallow));
+        e.reset(); let mut o = typ_th(&mut e, "กนืะ าืนไ"); o.push(e.on_key(Key::Boundary(Boundary::Enter))); assert!(replaced(&o).is_empty()); assert!(!e.bubble_visible()); assert!(o.iter().all(|x| !x.swallow));
     }
     #[test] fn tab_after_space_converts_previous_word() {
         let Some(mut e) = engine() else { return };
@@ -1530,19 +1552,19 @@ mod tests {
     #[test] fn reverse_i_dont_know_with_tab() {
         let Some(mut e) = engine() else { return };
         e.opts.live = false;
-        // 'i dont know' typed on the Thai layout, then Enter (passes through); the bubble offers the whole phrase
+        // 'i dont know' typed on the Thai layout, then Space (passes through); the bubble offers the whole phrase
         let keys = typethai_core::reverse::th_text_to_keys("ร กนืะ าืนไ").unwrap();
         e.set_thai_active(true);
         let mut log: Vec<(Option<char>, Outcome)> = vec![];
         for c in keys.chars() { let shown = if c == ' ' { ' ' } else { en_to_th(&c.to_string()).chars().next().unwrap() }; log.push((Some(shown), e.on_key(key_of(c)))); }
-        log.push((Some('\n'), e.on_key(Key::Boundary(Boundary::Enter))));
-        assert_eq!(screen(&log), "ร กนืะ าืนไ\n", "nothing replaced automatically");
+        log.push((Some(' '), e.on_key(Key::Boundary(Boundary::Space))));
+        assert_eq!(screen(&log), "ร กนืะ าืนไ ", "nothing replaced automatically");
         let items = e.bubble.clone(); assert_eq!(items.len(), 1); assert_eq!(items[0].label, "i dont know");
         log.push((Some('\t'), tab(&mut e)));
-        assert_eq!(screen(&log), "i dont know\n");
+        assert_eq!(screen(&log), "i dont know ");
         assert!(log.last().unwrap().1.actions.contains(&Action::SwitchInput(InputLang::Latin)));
         // undo restores all three words
-        log.push((None, e.on_key(Key::Hotkey(Hotkey::Undo)))); assert_eq!(screen(&log), "ร กนืะ าืนไ\n");
+        log.push((None, e.on_key(Key::Hotkey(Hotkey::Undo)))); assert_eq!(screen(&log), "ร กนืะ าืนไ ");
     }
     #[test] fn reverse_real_thai_gets_no_bubble() {
         let Some(mut e) = engine() else { return };
@@ -1551,6 +1573,22 @@ mod tests {
             e.reset(); let mut o = typ_th(&mut e, th); o.push(e.on_key(Key::Boundary(Boundary::Enter)));
             assert!(o.iter().all(|x| bubble_items(x).is_none()), "{th}");
         }
+    }
+    #[test] fn na_offers_ok_on_the_thai_layout() {
+        let Some(mut e) = engine() else { return };
+        for never in [false, true] {
+            e.reset(); e.never.clear(); if never { e.never.insert("ok".into()); }
+            let o = typ_th(&mut e, "นา ");
+            let items = o.iter().find_map(bubble_items).unwrap_or_else(|| panic!("นา offers ok (never: {never})"));
+            assert_eq!(items[0].label, "ok");
+            let applied = [e.on_key(Key::Tab), e.on_key(Key::TabUp)];
+            assert_eq!(replaced(&applied), ["ok "], "Tab applies ok (never: {never})");
+        }
+        e.reset(); e.never.clear();
+        assert!(typ_th(&mut e, "ทำนา ").iter().all(|x| bubble_items(x).is_none()), "นา inside a Thai word stays");
+        // Tab right after the keys, before Space, offers it too
+        e.reset(); typ_th(&mut e, "นา"); e.on_key(Key::Tab); e.on_key(Key::TabUp);
+        assert_eq!(label0(&e).as_deref(), Some("ok"));
     }
     // ---------- Backspace / word delete / line delete keep (or close) the bubble ----------
     fn run(e: &mut Engine, log: &mut Vec<(Option<char>, Outcome)>, keys: &[Key]) {
@@ -1663,7 +1701,6 @@ mod tests {
         assert!(word_offered(&mut e, false), "ok is offered as นา before it is blocked");
         e.never.insert("ok".into());
         assert!(!word_offered(&mut e, false), "forward ok stays as typed");
-        assert!(!word_offered(&mut e, true), "reverse ok stays as typed");
         e.reset();
         e.set_thai_active(false);
         typ(&mut e, "l;ylfu");
