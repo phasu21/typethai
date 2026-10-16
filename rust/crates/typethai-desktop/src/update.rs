@@ -87,20 +87,24 @@ pub fn click() -> Click {
 pub fn check_now() { if let Some(tx) = WAKE.get() { let _ = tx.lock().unwrap().send(()); } }
 
 fn check(manual: bool) {
-    if matches!(status(), Status::Ready { .. } | Status::Downloading(_)) { return }
-    if manual { set(Status::Checking) }
+    let before = status();
+    if matches!(before, Status::Downloading(_)) { return }
+    // an update already staged keeps its tray item; a newer release found meanwhile replaces it
+    let staged = if let Status::Ready { version, .. } = &before { Some(version.clone()) } else { None };
+    if manual && staged.is_none() { set(Status::Checking) }
     match find() {
+        Ok(Some(next)) if staged.as_ref() == Some(&next.version) => {}
         Ok(Some(next)) => {
-            let fallback = Status::Available { version: next.version.clone(), page: next.page.clone() };
+            let fallback = if staged.is_some() { before } else { Status::Available { version: next.version.clone(), page: next.page.clone() } };
             if install_target().is_none() { set(fallback); return }
             set(Status::Downloading(next.version.clone()));
             match download(&next).and_then(|bytes| stage(&next.version, &bytes)) {
-                Ok(staged) => set(Status::Ready { version: next.version, staged }),
+                Ok(staged) => { prune(&next.version); set(Status::Ready { version: next.version, staged }) }
                 Err(e) => { eprintln!("typeThai: update {} not installed: {e}", next.version); set(fallback) }
             }
         }
-        Ok(None) => set(if manual { Status::UpToDate } else { Status::Idle }),
-        Err(e) => { eprintln!("typeThai: update check failed: {e}"); set(if manual { Status::Failed } else { Status::Idle }) }
+        Ok(None) => if staged.is_none() { set(if manual { Status::UpToDate } else { Status::Idle }) },
+        Err(e) => { eprintln!("typeThai: update check failed: {e}"); if staged.is_none() { set(if manual { Status::Failed } else { Status::Idle }) } }
     }
 }
 
@@ -168,15 +172,22 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
-/// Where downloads are unpacked: a folder per version, emptied first.
+fn stage_base() -> PathBuf {
+    #[cfg(target_os = "macos")] { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Library/Caches/typethai/update") }
+    #[cfg(windows)] { std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("typethai\\update") }
+    #[cfg(not(any(windows, target_os = "macos")))] { std::env::temp_dir().join("typethai-update") }
+}
+/// Where downloads are unpacked: a folder per version, emptied first. Other versions stay until this one is staged.
 fn stage_dir(version: &str) -> Result<PathBuf, String> {
-    #[cfg(target_os = "macos")] let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Library/Caches/typethai/update");
-    #[cfg(windows)] let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("typethai\\update");
-    #[cfg(not(any(windows, target_os = "macos")))] let base = std::env::temp_dir().join("typethai-update");
-    let _ = std::fs::remove_dir_all(&base);
-    let dir = base.join(version);
+    let dir = stage_base().join(version);
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
+}
+/// Remove every staged version but `keep`.
+fn prune(keep: &str) {
+    let Ok(entries) = std::fs::read_dir(stage_base()) else { return };
+    for e in entries.flatten() { if e.file_name() != keep { let _ = std::fs::remove_dir_all(e.path()); } }
 }
 
 /// Unzip the app and check it is typeThai `version` with an intact signature. Returns the staged `typeThai.app`.
