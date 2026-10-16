@@ -1,5 +1,11 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.4**
+- **English suggestions read the sentence.** Word completions now take their first row from the system's own
+  prediction, which looks at the words before: `I wear a hel` offers *helmet*, `can you hel` offers *help*. macOS uses
+  its spell checker, which also knows the words you have taught it; Windows uses its text prediction. typeThai's own
+  words fill the rows below. English typo fixes on macOS also read the sentence (`I like teh` offers *the*, *tea*).
+
 **Fixed in 0.5.3**
 - An update downloaded but not yet installed no longer hides newer ones: if a later version comes out first, the tray
   offers that one instead.
