@@ -1,5 +1,16 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.0**
+- **Updates itself.** typeThai checks GitHub for a new release at launch and every 6 hours, downloads it in the
+  background and checks its signature. The tray menu then shows **Restart to update to …**: nothing changes until you
+  pick it. Check right away from the tray or Settings → Updates, where the automatic check can also be turned off.
+  Only GitHub is contacted.
+- **Proper installers.** macOS: one DMG for Apple silicon and Intel, drag typeThai to Applications. Windows: a setup
+  that installs for your user only (no admin prompt) and can start typeThai when you sign in.
+- **Signed with typeThai's own certificate** (macOS), so updates keep the Accessibility permission. Coming from 0.4.0
+  or earlier, macOS asks for it once more: remove the old typeThai from Privacy & Security → Accessibility and add
+  `/Applications/typeThai.app` again.
+
 **New in 0.4.0**
 - **New bubble.** Suggestions now appear as a row of buttons. Each one shows why it is offered: a 🇹🇭 / 🇺🇸 flag
   when the word was typed in the wrong layout, a red spelling mark for a typo fix. Click an option to apply it. The
