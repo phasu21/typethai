@@ -4,16 +4,17 @@
 # the updater packages are signed and everything is published as one GitHub release. The tag is created only when the
 # finished release is published, and the release workflow sees the uploaded files and skips its builds.
 #
-# usage: scripts/release-local.sh vX.Y.Z [--skip-tests] [--no-publish]
+# usage: scripts/release-local.sh vX.Y.Z [--skip-tests] [--no-publish | --publish-only]
 #   Commit the version bump and the release notes and push them first: the PC builds that exact commit from GitHub.
-#   --no-publish leaves the signed files in dist/vX.Y.Z without touching GitHub.
+#   --no-publish leaves the signed files in dist/vX.Y.Z without touching GitHub; --publish-only publishes those files
+#   (after checking their signatures) without building again.
 # Needs: the aarch64-apple-darwin and x86_64-apple-darwin Rust targets, openssl with ed25519, gh (logged in), the
 # release keys in ~/.config/typethai-release ($TYPETHAI_RELEASE_KEYS), and SSH to a Windows PC ($TYPETHAI_WIN_HOST,
 # default vfx-alkane-1) with git, Rust and Inno Setup 6.
 set -euo pipefail
-tag=${1:?usage: scripts/release-local.sh vX.Y.Z [--skip-tests] [--no-publish]}; shift
-tests=1; publish=1
-for a in "$@"; do case $a in --skip-tests) tests=0;; --no-publish) publish=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
+tag=${1:?usage: scripts/release-local.sh vX.Y.Z [--skip-tests] [--no-publish | --publish-only]}; shift
+tests=1; publish=1; build=1
+for a in "$@"; do case $a in --skip-tests) tests=0;; --no-publish) publish=0;; --publish-only) build=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
 root=$(cd "$(dirname "$0")/.." && pwd); cd "$root"
 win=${TYPETHAI_WIN_HOST:-vfx-alkane-1}
 keys=${TYPETHAI_RELEASE_KEYS:-$HOME/.config/typethai-release}
@@ -34,13 +35,14 @@ if [ $publish = 1 ] && gh release view "$tag" -R "$repo" --json isDraft -q .isDr
 for f in codesign.p12 codesign.p12.password update-ed25519.pem; do [ -f "$keys/$f" ] || die "missing $keys/$f"; done
 pub=$(openssl pkey -in "$keys/update-ed25519.pem" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
 grep -q "const PUBLIC_KEY: &str = \"$pub\"" rust/crates/typethai-desktop/src/update.rs || die "the update key does not match PUBLIC_KEY in update.rs"
-ssh -o BatchMode=yes -o ConnectTimeout=10 "$win" "echo ok" >/dev/null || die "cannot reach $win over SSH"
+[ $build = 0 ] || ssh -o BatchMode=yes -o ConnectTimeout=10 "$win" "echo ok" >/dev/null || die "cannot reach $win over SSH"
 
 # The Windows side runs as one PowerShell script (-EncodedCommand avoids cmd.exe quoting).
 # Native commands are checked through $LASTEXITCODE: with ErrorActionPreference=Stop, Windows PowerShell treats any
 # stderr line (cargo's progress) as a failure.
 winps() { ssh -o BatchMode=yes "$win" "powershell -NoProfile -NonInteractive -EncodedCommand $(printf '%s' "\$ProgressPreference='SilentlyContinue'; $1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')"; }
 
+if [ $build = 1 ]; then
 # ---------- model (a pinned asset, as in the release workflow) ----------
 model_tag=$(sed -n 's/^ *MODEL_TAG: *//p' .github/workflows/release.yml); model_sha=$(sed -n 's/^ *MODEL_SHA256: *//p' .github/workflows/release.yml)
 model="$root/dist/model/$model_tag/typethai.ttm"
@@ -108,14 +110,24 @@ for f in "$out/typeThai-$tag-macos-universal.zip" "$out/typeThai-$tag-windows-x8
 done
 cp "$model" "$out/typethai.ttm"
 ls -la "$out" | grep -v windows.log
+else
+  step "checking the files built in $out"
+  pubpem=$(mktemp); sigbin=$(mktemp); openssl pkey -in "$keys/update-ed25519.pem" -pubout -out "$pubpem"
+  for f in "$out/typeThai-$tag-macos-universal.zip" "$out/typeThai-$tag-windows-x86_64-setup.exe"; do
+    [ -s "$f" ] && [ -s "$f.sig" ] || die "missing $f or its .sig: build first"
+    xxd -r -p "$f.sig" > "$sigbin"; openssl pkeyutl -verify -pubin -inkey "$pubpem" -rawin -in "$f" -sigfile "$sigbin" >/dev/null || die "bad signature on $f"
+  done
+  rm -f "$pubpem" "$sigbin"
+  for f in "typeThai-$tag-macos-universal.dmg" "typeThai-$tag-windows-x86_64.zip" typethai.ttm; do [ -s "$out/$f" ] || die "missing $out/$f"; done
+fi
 
 [ $publish = 1 ] || { step "built in $out (not published)"; exit 0; }
 
 # ---------- publish ----------
 # A draft has no tag yet; publishing it creates the tag, and the release workflow then finds the files and skips.
 step "publishing $tag"
-pre=(); case $tag in *-*) pre=(--prerelease);; esac
-gh release view "$tag" -R "$repo" >/dev/null 2>&1 || gh release create "$tag" -R "$repo" --draft "${pre[@]}" --target "$sha" --title "typeThai $tag" --notes-file .github/release-notes.md
+pre=""; case $tag in *-*) pre=--prerelease;; esac
+gh release view "$tag" -R "$repo" >/dev/null 2>&1 || gh release create "$tag" -R "$repo" --draft $pre --target "$sha" --title "typeThai $tag" --notes-file .github/release-notes.md
 gh release upload "$tag" -R "$repo" --clobber "$out"/*.dmg "$out"/*.zip "$out"/*-setup.exe "$out"/*.sig "$out/typethai.ttm"
 gh release edit "$tag" -R "$repo" --draft=false
 git fetch -q origin --tags
