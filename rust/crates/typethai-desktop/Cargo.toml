@@ -18,12 +18,14 @@ gpui-kit = "0.7.3"
 raw-window-handle = "0.6"
 keyring = "4"
 
-# Windows uses SChannel: ring's C build needs the Windows SDK, and SChannel trusts the OS certificate store.
+# Windows uses SChannel: ring's C build needs the Windows SDK, and SChannel trusts the OS certificate store
+# (RootCerts::PlatformVerifier). The "native-tls" feature, not "native-tls-no-default": ureq only builds its native-tls
+# connector with the former, and without it every HTTPS request panics.
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
-ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 windows = { version = "0.62", features = [
   "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_System_Com",

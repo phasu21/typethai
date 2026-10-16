@@ -110,6 +110,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
+| **Tab+R** | Hold Tab and press R: the ⌃⌥R options for the word you just typed (or the bubble's word). Typing on from Tab quickly types the Tab as usual; Tab after a word is sent when you release it |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
