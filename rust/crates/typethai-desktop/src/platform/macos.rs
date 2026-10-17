@@ -65,7 +65,11 @@ struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *cons
     gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>>,
     /// When the next look at focus is due, and whether a keystroke armed it (a click, an app switch or a key may have
     /// moved focus, and the handler that saw the trigger cannot wait for AX).
-    badge_due: Option<(std::time::Instant, bool)> }
+    badge_due: Option<(std::time::Instant, bool)>,
+    /// The event tap, kept for as long as this thread runs; None while macOS refuses to make one (no Accessibility).
+    tap: Option<CGEventTap<'static>>,
+    /// When the tap was last tried while it was refused (once a second at most).
+    tap_try: Option<std::time::Instant> }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static TX: RefCell<Option<Sender<UiMsg>>> = const { RefCell::new(None) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -555,6 +559,11 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
+        // refused earlier: try once a second, so a grant takes effect without a relaunch
+        if st.tap_port.is_null() && st.tap_try.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_millis(1000)) {
+            st.tap_try = Some(now);
+            if arm_tap(st) { eprintln!("typeThai: event tap created"); send(UiMsg::Permission(false)) }
+        }
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         if st.gate.refresh_due(now, false) { field_refresh(st); }
         if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
@@ -574,31 +583,75 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
 }
 
 /// Capture thread: owns the Engine, the CGEventTap and its own CFRunLoop; talks to the gpui UI only via `tx`/statics.
+/// `TYPETHAI_FAKE_UNTRUSTED=1`: behave as if macOS refused the tap, so the permission path can be walked by hand.
+fn no_permission() -> bool { std::env::var_os("TYPETHAI_FAKE_UNTRUSTED").is_some() }
+
+/// Make the event tap on this thread and arm it. False while macOS refuses one (no Accessibility for this build, or a
+/// record saved by an older copy answering for us): the app then keeps running without it, says so, and retries, so
+/// granting the permission takes effect without a relaunch.
+fn arm_tap(st: &mut State) -> bool {
+    st.tap = None; st.tap_port = std::ptr::null();
+    if no_permission() { return false }
+    let tap = match CGEventTap::new(CGEventTapLocation::Session, CGEventTapPlacement::HeadInsertEventTap, CGEventTapOptions::Default,
+        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e)) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    st.tap_port = tap.mach_port().as_concrete_TypeRef() as *const c_void;
+    let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
+    CFRunLoop::get_current().add_source(&src, unsafe { kCFRunLoopCommonModes });
+    tap.enable();
+    st.tap = Some(tap);
+    true
+}
+
+/// The bundle id macOS judges this process by. None for an unbundled build (a dev binary started from a terminal): its
+/// permissions are the app's that started it, so it can neither read nor repair its own record.
+fn bundle_id() -> Option<String> { std::env::var("__CFBundleIdentifier").ok().filter(|s| !s.is_empty()) }
+
+/// Forget this app's own Accessibility record, once per version, and ask for it again. A record saved by an older copy
+/// (signed ad-hoc, or by the pre-0.5 certificate) keeps answering for the build in front of the user: the switch looks
+/// on and nothing works, and every launch asks again. Only this app's identifier is touched, and only when the app is
+/// the installed bundle (`tccutil` would otherwise clear the installed copy's record for a dev build's sake, which is
+/// also why the marker lives beside the state file).
+fn repair_permission_once(state: &std::path::Path, id: &str, version: &str) {
+    let marker = state.with_file_name("permission-repair");
+    if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == version) { return }
+    eprintln!("typeThai: no event tap; clearing {id}'s own Accessibility record so it can be granted again");
+    let _ = std::process::Command::new("/usr/bin/tccutil").args(["reset", "Accessibility", id]).status();
+    if let Some(dir) = marker.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::fs::write(&marker, version);
+}
+
 fn capture_thread(app: App, tx: Sender<UiMsg>) {
     TX.with(|t| *t.borrow_mut() = Some(tx.clone()));
-    let tap = CGEventTap::new(CGEventTapLocation::Session, CGEventTapPlacement::HeadInsertEventTap, CGEventTapOptions::Default,
-        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e));
-    let tap = match tap { Ok(t) => t, Err(_) => {
-        eprintln!("CGEventTapCreate failed: grant Accessibility (and Input Monitoring) to this binary/terminal, then relaunch.");
-        let _ = tx.send(UiMsg::Stopped); return
-    } };
-    let port = tap.mach_port().as_concrete_TypeRef() as *const c_void;
-    let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
-    let rl = CFRunLoop::get_current();
-    rl.add_source(&src, unsafe { kCFRunLoopCommonModes }); tap.enable();
-    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: std::ptr::null(), tap: None, tap_try: None, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
+    let armed = with(|st| arm_tap(st)).unwrap_or(false);
+    if !armed {
+        eprintln!("typeThai: no event tap yet; running without it and trying again once Accessibility is granted");
+        let _ = tx.send(UiMsg::Permission(true));
+    }
     let timer = CFRunLoopTimer::new(core_foundation::date::CFDate::now().abs_time() + 0.2, 0.025, 0, 0, timer_cb, std::ptr::null_mut());
-    rl.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
+    CFRunLoop::get_current().add_timer(&timer, unsafe { kCFRunLoopCommonModes });
     CFRunLoop::run_current();
-    drop(tap);
+}
+
+/// Ask macOS for Accessibility, showing its prompt once per process.
+pub fn request_permission() {
+    unsafe {
+        let opts = CFDictionary::from_CFType_pairs(&[(CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt), CFBoolean::true_value().as_CFType())]);
+        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef());
+    }
+    let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility").status();
 }
 
 pub fn run(app: App) {
-    unsafe {
-        let opts = CFDictionary::from_CFType_pairs(&[(CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt), CFBoolean::true_value().as_CFType())]);
-        if !AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef()) {
-            eprintln!("typeThai needs Accessibility permission: System Settings > Privacy & Security > Accessibility. Grant it and relaunch.");
-        }
+    if unsafe { !AXIsProcessTrusted() } && !no_permission() {
+        // a record that does not match this build is the reported "the switch is on and nothing works": clear our own
+        // once per version, then ask again. The capture thread keeps retrying, so no relaunch is needed afterwards.
+        if let Some(id) = bundle_id() { repair_permission_once(&app.state_path, &id, env!("CARGO_PKG_VERSION")) }
+        request_permission();
+        eprintln!("typeThai needs Accessibility permission: System Settings > Privacy & Security > Accessibility.");
     }
     sync_input_source();
     let (tx, rx) = std::sync::mpsc::channel();

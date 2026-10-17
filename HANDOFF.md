@@ -143,6 +143,17 @@ completion frequencies).
 - The model answers from its own thread, so `offer_next_words` runs twice: below the pause guard (the pairs, once per
   pause, as before) and above it for a tick where `pred_next_answer` has landed since (`last_key` is already `None`).
 
+## Permission self-repair (0.5.12)
+
+- The tap is made by `arm_tap` (at capture-thread start, and again from the timer once a second while `State.tap_port`
+  is null), so a grant takes effect without a relaunch. A refused tap no longer sends `UiMsg::Stopped`: the app stays
+  up, sends `UiMsg::Permission(true)`, and the tray says `Grant Accessibility…` (`Accessibility: on` once granted).
+- `repair_permission_once` — only when `__CFBundleIdentifier` is set, i.e. the installed bundle — runs
+  `tccutil reset Accessibility <own bundle id>` once per version (marker beside the state file). A record saved by an
+  older copy (ad-hoc, or the pre-0.5 certificate) otherwise keeps answering for the build in front of the user, which
+  is the reported "the switch is on, nothing works, and every launch asks again".
+- `TYPETHAI_FAKE_UNTRUSTED=1` walks the no-permission path by hand (like `TYPETHAI_DEBUG`).
+
 ## Input-language preview while a field is untouched
 
 - The badge (🇹🇭 ไทย / 🇺🇸 EN over the caret) now also shows when focus lands in a text field nothing has been typed in

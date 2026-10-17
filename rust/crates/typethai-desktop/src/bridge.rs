@@ -31,6 +31,8 @@ pub enum UiMsg {
     MoveBadge(Anchor),
     /// A click on the badge (Windows, where it is not click-through): take it down.
     HideBadge,
+    /// macOS refused the event tap (`true`: no Accessibility for this build, and the capture thread keeps retrying).
+    Permission(bool),
     /// Tab held towards opening the ⌃⌥R rows (None: released, or they opened). `anchor`: where the caret is when no
     /// bubble is up (the indicator goes in the badge window); over the bubble it fills the highlighted option's Tab key.
     Hold { hold: Option<crate::engine::Hold>, anchor: Option<Anchor> },

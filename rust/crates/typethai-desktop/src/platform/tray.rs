@@ -1,7 +1,12 @@
 //! Tray icon with Pause/Resume, the update item, Settings, and Quit (tray-icon crate; needs the platform's main-thread event loop running).
 use tray_icon::{menu::{Menu, MenuEvent, MenuItem}, Icon, TrayIcon, TrayIconBuilder};
-pub enum TrayCmd { TogglePause, Quit, CheckUpdate, Settings }
-pub struct Tray { pub icon: TrayIcon, pause: MenuItem, update: MenuItem, settings: MenuItem, quit: MenuItem }
+pub enum TrayCmd { TogglePause, Quit, CheckUpdate, Settings, Permission }
+/// The permission item's two states. macOS needs Accessibility; other platforms have nothing to grant.
+#[cfg(target_os = "macos")] const PERMISSION_NEEDED: &str = "Grant Accessibility…";
+#[cfg(target_os = "macos")] const PERMISSION_OK: &str = "Accessibility: on";
+#[cfg(not(target_os = "macos"))] const PERMISSION_NEEDED: &str = "Permissions";
+#[cfg(not(target_os = "macos"))] const PERMISSION_OK: &str = "Permissions";
+pub struct Tray { pub icon: TrayIcon, pause: MenuItem, update: MenuItem, settings: MenuItem, permission: MenuItem, quit: MenuItem }
 fn icon(paused: bool) -> Icon {
     let (w, h) = (32u32, 32u32); let mut px = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h { for x in 0..w {
@@ -16,18 +21,25 @@ impl Tray {
         let pause = MenuItem::new("Pause typeThai", true, None);
         let update = MenuItem::new("Check for updates", true, None);
         let settings = MenuItem::new("Settings…", true, None);
+        let permission = MenuItem::new(PERMISSION_OK, true, None);
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
         menu.append(&pause).map_err(|e| e.to_string())?;
         menu.append(&update).map_err(|e| e.to_string())?;
         menu.append(&settings).map_err(|e| e.to_string())?;
+        menu.append(&permission).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
         let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("typeThai").with_icon(icon(false)).build().map_err(|e| e.to_string())?;
-        Ok(Tray { icon, pause, update, settings, quit })
+        Ok(Tray { icon, pause, update, settings, permission, quit })
     }
     pub fn set_paused(&self, p: bool) {
         self.pause.set_text(if p { "Resume typeThai" } else { "Pause typeThai" }); let _ = self.icon.set_icon(Some(icon(p)));
         let _ = self.icon.set_tooltip(Some(if p { "typeThai (paused)" } else { "typeThai" }));
+    }
+    /// The permission item: macOS refused the event tap, so nothing is captured until it is granted.
+    pub fn set_permission(&self, needed: bool) {
+        self.permission.set_text(if needed { PERMISSION_NEEDED } else { PERMISSION_OK });
+        let _ = self.icon.set_tooltip(Some(if needed { "typeThai — Accessibility permission needed" } else { "typeThai" }));
     }
     /// The update item follows the updater: "Check for updates", "Restart to update to …", and so on.
     pub fn set_update(&self, s: &crate::update::Status) { let (text, enabled) = s.menu(); self.update.set_text(text); self.update.set_enabled(enabled); }
@@ -37,6 +49,7 @@ impl Tray {
             if e.id == *self.pause.id() { return Some(TrayCmd::TogglePause) }
             if e.id == *self.update.id() { return Some(TrayCmd::CheckUpdate) }
             if e.id == *self.settings.id() { return Some(TrayCmd::Settings) }
+            if e.id == *self.permission.id() { return Some(TrayCmd::Permission) }
             if e.id == *self.quit.id() { return Some(TrayCmd::Quit) }
         }
         None

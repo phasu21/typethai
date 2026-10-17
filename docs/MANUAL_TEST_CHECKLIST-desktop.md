@@ -119,6 +119,12 @@
 - [ ] Settings → Word suggestions → Bubble layout: Vertical gives the old rows on the next bubble and survives a restart (`prefs.json` has `"bubble_layout": "vertical"`); an older prefs.json opens as Horizontal.
 - [ ] Windows (Notepad, 100% and 150% scaling): the strip window is exactly the panel, nothing is clipped, and clicks hit the right button.
 
+## Accessibility permission self-repair (agent-verified with TYPETHAI_FAKE_UNTRUSTED; the live revoke is not run)
+- [x] `TYPETHAI_FAKE_UNTRUSTED=1 typethai-desktop --model …`: the app stays up and logs `no event tap yet` (a refused tap used to quit the app), and the tray shows *Grant Accessibility…*.
+- [ ] Installed app, fresh machine: the record is cleared once per version (`permission-repair` beside `prefs.json`), the prompt appears, and granting it starts correction without relaunching.
+- [ ] Permission revoked while running: the tap keeps working for that session (macOS does not kill it), and the next launch repairs and re-prompts once.
+- [ ] Tray reads `Accessibility: on` once granted, with the tooltip no longer saying the permission is needed.
+
 ## Input-language preview on focus (agent-verified with --demo-badge --pin; the live look at focus is not run)
 - [x] `--demo-badge --pin --secs 2` keeps the pill up for the whole 2 s (`still up … true`), where `--demo-badge --secs 2` hides it after `SHOW_FOR` (1.2 s).
 - [x] `--simulate`: `ab<Focus>x<Idle>y<Idle><Blur>` prints `Badge(true)` on `<Focus>`, `Badge(false)` on the key, `Badge(true)` after the pause; inside a bubble the pause shows completions instead and no `Badge`.

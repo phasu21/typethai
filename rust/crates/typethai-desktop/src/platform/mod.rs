@@ -5,6 +5,12 @@ pub mod field;
 #[cfg(target_os = "macos")] pub mod macos;
 #[cfg(any(windows, target_os = "macos"))] pub mod tray;
 
+/// Ask the OS for the permission typeThai needs to see keys (macOS: Accessibility, with its pane and prompt; Windows
+/// needs none). Also reachable from the tray, when a first attempt was refused.
+pub fn request_permission() {
+    #[cfg(target_os = "macos")] { macos::request_permission() }
+}
+
 pub fn run(app: crate::app::App) {
     #[cfg(windows)] { windows::run(app) }
     #[cfg(target_os = "macos")] { macos::run(app) }

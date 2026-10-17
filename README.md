@@ -83,13 +83,16 @@ Get the latest build from [Releases](https://github.com/phasu21/typethai/release
 2. The app is signed with typeThai's own certificate but **not notarized** by Apple. The first time, **right-click →
    Open → Open**. Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/typeThai.app`
 3. Grant **Accessibility** when asked, in System Settings → Privacy & Security → Accessibility. Add typeThai there if
-   it isn't listed, then **relaunch**. typeThai needs this to see keystrokes, read the caret position and insert
-   text. Some macOS versions also ask for **Input Monitoring**.
+   it isn't listed. typeThai needs this to see keystrokes, read the caret position and insert text. Some macOS versions
+   also ask for **Input Monitoring**. From 0.5.12 it picks the permission up as soon as you grant it — no relaunch, and
+   the tray shows *Grant Accessibility…* until then.
 4. For input-source switching, add the **Thai (Kedmanee)** input source in System Settings → Keyboard → Input
    Sources. Without it, conversion still works, but the layout won't switch for you.
 
-Coming from 0.4.0 or earlier (ad-hoc signed)? macOS sees the signed app as a new one: remove the old typeThai entry
-from Accessibility and add the app again, once. Later updates keep the permission.
+Coming from 0.4.0 or earlier (ad-hoc signed)? macOS sees the signed app as a new one, and an old entry's record can
+keep answering for it: the switch looks on, nothing works, and every launch asks again. From 0.5.12 typeThai clears its
+own Accessibility record once per version and asks once more, so this needs no hand-holding; on older versions remove
+the old typeThai entry from Accessibility and add the app again, once. Later updates keep the permission.
 
 ### Windows (x86_64, **beta / untested**)
 

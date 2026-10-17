@@ -1,5 +1,11 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.12**
+- **The Accessibility permission repairs itself.** If typeThai starts without it, it no longer quits: it keeps running
+  (the tray shows *Grant Accessibility…*), clears its own Accessibility record once per version so an older copy's
+  record can no longer answer for this build, asks again, and starts working the moment you grant it — no relaunch.
+  That is the case where the switch looks on in System Settings and nothing works, and every launch asks again.
+
 **New in 0.5.11**
 - **Mistyped English on the Thai layout is offered as what you meant.** With Thai active, English typed with a slip is
   offered back as the corrected word, not the raw keys: the row now carries the spelling the spell checker (macOS) or

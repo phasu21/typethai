@@ -443,6 +443,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Paused(p) => { if p { badge.clicked(cx) } if let Some(t) = &tray { t.set_paused(p) } },
                         UiMsg::Stopped => stop = true,
                         UiMsg::Settings(snap) => { if !snap.input_badge { badge.unpin(cx) } settings::apply_snapshot(&mut settings_win, snap, cx) },
+                        UiMsg::Permission(needed) => if let Some(t) = &tray { t.set_permission(needed) },
                     } }
                     ui.reconcile(cx); badge.tick(cx);
                     let sh = bridge::SHIFT_HELD.load(std::sync::atomic::Ordering::SeqCst);
@@ -463,6 +464,7 @@ pub fn run(rx: Receiver<UiMsg>) {
             },
         },
         Some(super::platform::tray::TrayCmd::Settings) => settings::open_or_focus(&mut settings_win, cx),
+        Some(super::platform::tray::TrayCmd::Permission) => super::platform::request_permission(),
         Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
         None => {}
     }
