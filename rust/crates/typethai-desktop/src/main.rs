@@ -12,7 +12,7 @@ fn main() {
         // --items "a|b|c" (custom rows instead of the samples; repeat it to update the bubble in place; a row ending in
         // !th, !en or !typo is offered for that reason), --vertical (ask for rows, not a strip), --light,
         // --backdrop light|dark (a window of text behind the bubble)
-        let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
+        let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() {
             if a == "--secs" { secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(3.0); continue }
@@ -21,12 +21,13 @@ fn main() {
             if a == "--items" { items.extend(it.next().map(|s| s.split('|').map(demo_opt).collect())); continue }
             if a == "--backdrop" { backdrop = match it.next().map(String::as_str) { Some("light") => Some(true), Some("dark") => Some(false), b => { eprintln!("--backdrop: expected light or dark, got {b:?}"); std::process::exit(2) } }; continue }
             if a == "--vertical" { layout = bridge::BubbleLayout::Vertical; continue }
+            if a == "--focused" { focused = true; continue }
             if a == "--light" { light = true; continue }
             let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-bubble: expected x,y but got {a:?}"); std::process::exit(2) }
         }
-        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, layout, light, backdrop); return }
-        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, layout, light, backdrop); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
     }
     // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light]: only the Settings window, with sample
     // words and no key capture, prefs or keychain

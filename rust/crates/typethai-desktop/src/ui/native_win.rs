@@ -5,6 +5,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -17,6 +18,13 @@ unsafe extern "system" fn enum_cb(h: HMONITOR, _: HDC, _: *mut RECT, lp: LPARAM)
         out.push(Monitor { frame: r(mi.rcMonitor), visible: r(mi.rcWork), size_scale: dx as f64 / 96.0, pixel: 1.0 });
     }
     true.into()
+}
+/// The user's accent colour (Settings > Personalization > Colors), as sRGB 0..1: DWM keeps it as 0xAABBGGRR.
+pub fn accent() -> Option<(f32, f32, f32)> {
+    let (mut v, mut n) = (0u32, std::mem::size_of::<u32>() as u32);
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, windows::core::w!("Software\\Microsoft\\Windows\\DWM"), windows::core::w!("AccentColor"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut _), Some(&mut n)).ok().ok()?; }
+    let ch = |s: u32| ((v >> s) & 0xFF) as f32 / 255.0;
+    Some((ch(0), ch(8), ch(16)))
 }
 pub fn monitors() -> Vec<Monitor> {
     let mut v: Vec<Monitor> = Vec::new();

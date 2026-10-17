@@ -1,10 +1,11 @@
 //! Windows backend: WH_KEYBOARD_LL / WH_MOUSE_LL hooks, SendInput (unicode) injection, a non-activating topmost bubble,
 //! caret lookup (GetGUIThreadInfo -> UI Automation TextPattern2 -> focused element rect -> mouse), secure-field skip
 //! (ES_PASSWORD / UIA IsPassword), switch to Thai/US layout after applying, tray icon.
-use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Arrow, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use super::field::{self, Field};
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -23,29 +24,41 @@ const MAGIC: usize = 0x5454_4841;
 const ES_PASSWORD_STYLE: i32 = 0x0020;
 const THAI_KLID: usize = 0x041E;
 
-struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>> }
+struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
+    gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static BUSY: Cell<bool> = const { Cell::new(false) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
 // ---------- UI Automation worker (MTA thread, so UIA calls never run on the hook thread) ----------
-enum UiaQuery { IsPassword, Caret, Field }
-enum UiaResp { Bool(bool), Rect(Option<RECT>) }
+enum UiaQuery { Focus, Caret, Field }
+enum UiaResp { Focus(bool, Field), Rect(Option<RECT>) }
 fn uia_worker() -> mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)> {
     let (tx, rx) = mpsc::channel::<(UiaQuery, mpsc::Sender<UiaResp>)>();
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
         let auto: Option<IUIAutomation> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
+        let req = auto.as_ref().and_then(|a| a.CreateCacheRequest().ok());
+        if let Some(r) = &req { for p in FOCUS_PROPS { let _ = r.AddProperty(p); } }
         for (q, reply) in rx {
-            let el = auto.as_ref().and_then(|a| a.GetFocusedElement().ok());
+            let el = || auto.as_ref().and_then(|a| a.GetFocusedElement().ok());
             let r = match q {
-                UiaQuery::IsPassword => UiaResp::Bool(el.as_ref().and_then(|e| e.CurrentIsPassword().ok()).map(|b| b.as_bool()).unwrap_or(false)),
-                UiaQuery::Caret => UiaResp::Rect(el.as_ref().and_then(|e| uia_caret(e))),
-                UiaQuery::Field => UiaResp::Rect(el.as_ref().and_then(|e| e.CurrentBoundingRectangle().ok())),
+                UiaQuery::Focus => { let (pw, f) = uia_focus(auto.as_ref(), req.as_ref()); UiaResp::Focus(pw, f) }
+                UiaQuery::Caret => UiaResp::Rect(el().and_then(|e| uia_caret(&e))),
+                UiaQuery::Field => UiaResp::Rect(el().and_then(|e| e.CurrentBoundingRectangle().ok())),
             };
             let _ = reply.send(r);
         }
     });
     tx
+}
+const FOCUS_PROPS: [UIA_PROPERTY_ID; 5] = [UIA_IsPasswordPropertyId, UIA_ControlTypePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId, UIA_ValueIsReadOnlyPropertyId];
+/// Focused element: (password, text-field verdict), in one cross-process round trip (cache request).
+unsafe fn uia_focus(a: Option<&IUIAutomation>, req: Option<&IUIAutomationCacheRequest>) -> (bool, Field) {
+    let Some(e) = a.zip(req).and_then(|(a, r)| a.GetFocusedElementBuildCache(r).ok()) else { return (false, Field::Unknown) };
+    // a property the element lacks comes back as the "not supported" sentinel, which is no bool
+    let b = |p| e.GetCachedPropertyValue(p).ok().and_then(|v| bool::try_from(&v).ok()).unwrap_or(false);
+    let ct = e.CachedControlType().map(|c| c.0).unwrap_or(0);
+    (b(UIA_IsPasswordPropertyId), field::uia(ct, b(UIA_IsTextPatternAvailablePropertyId), b(UIA_IsValuePatternAvailablePropertyId), b(UIA_ValueIsReadOnlyPropertyId)))
 }
 unsafe fn uia_caret(e: &IUIAutomationElement) -> Option<RECT> {
     let tp: IUIAutomationTextPattern2 = e.GetCurrentPatternAs(UIA_TextPattern2Id).ok()?;
@@ -77,7 +90,28 @@ unsafe fn password_edit(focus: HWND) -> bool {
     let mut cls = [0u16; 64]; let n = GetClassNameW(focus, &mut cls) as usize;
     String::from_utf16_lossy(&cls[..n]).to_ascii_lowercase().contains("edit") && GetWindowLongW(focus, GWL_STYLE) & ES_PASSWORD_STYLE != 0
 }
-unsafe fn is_secure(st: &State, focus: HWND) -> bool { password_edit(focus) || matches!(uia_ask(st, UiaQuery::IsPassword), Some(UiaResp::Bool(true))) }
+/// (password field, text-field verdict) now, 60 ms cap; no reply is "not a password, unknown".
+unsafe fn focus_check(st: &State, focus: HWND) -> (bool, Field) {
+    let (pw, f) = match uia_ask(st, UiaQuery::Focus) { Some(UiaResp::Focus(pw, f)) => (pw, f), _ => (false, Field::Unknown) };
+    (pw || password_edit(focus), f)
+}
+/// Closed gate: re-check off-thread; the next key picks the reply up (`field_collect`).
+fn field_refresh(st: &mut State) {
+    let (tx, rx) = mpsc::channel();
+    if st.uia.as_ref().is_some_and(|u| u.send((UiaQuery::Focus, tx)).is_ok()) { st.field_rx = Some(rx) } else { st.gate.answer(None, Instant::now()) }
+}
+fn field_collect(st: &mut State) {
+    let Some(rx) = st.field_rx.take() else { return };
+    let f = match rx.recv_timeout(Duration::from_millis(60)) { Ok(UiaResp::Focus(_, f)) => Some(f), _ => None };
+    st.gate.answer(f, Instant::now());
+}
+unsafe fn class_of(h: HWND) -> String { let mut c = [0u16; 64]; let n = GetClassNameW(h, &mut c) as usize; String::from_utf16_lossy(&c[..n]) }
+/// Foreground window covers its whole monitor without being maximized (borderless / exclusive fullscreen: games).
+unsafe fn fullscreen(fg: HWND) -> bool {
+    let (mut r, mut mi) = (RECT::default(), MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() });
+    if IsZoomed(fg).as_bool() || GetWindowRect(fg, &mut r).is_err() || !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() { return false }
+    let m = mi.rcMonitor; r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+}
 fn rect(r: RECT) -> Rect { Rect::new(r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64) }
 /// Caret rect (GetGUIThreadInfo, else UIA TextPattern2), focused element frame (UIA, else the focus HWND) and the
 /// mouse, in physical screen pixels (gpui makes the process per-monitor DPI aware).
@@ -147,6 +181,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
         Action::SwitchInput(l) => switch_input(GetForegroundWindow(), l),
         Action::Select(i) => { let _ = st.tx.send(UiMsg::Select(i)); }
+        Action::Focus(f) => { let _ = st.tx.send(UiMsg::Focus(f)); }
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
         Action::Rewrite(job) => st.worker.submit(job),
@@ -235,6 +270,8 @@ unsafe fn translate(vk: u32) -> Option<Key> {
         VK_TAB => if shift { Key::Nav } else { Key::Tab }, // Shift+Tab (reverse focus) stays plain navigation
         VK_ESCAPE => Key::Esc,
         VK_UP if shift => Key::SelectPrev, VK_DOWN if shift => Key::SelectNext,
+        VK_UP => Key::Arrow(Arrow::Up), VK_DOWN => Key::Arrow(Arrow::Down),
+        VK_LEFT if !shift => Key::Arrow(Arrow::Left), VK_RIGHT if !shift => Key::Arrow(Arrow::Right),
         _ => match win_vk_to_us(vk, shift, caps) { Some(c) => Key::Char(c), None => Key::Nav },
     })
 }
@@ -295,16 +332,24 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
         if vk != VK_TAB.0 as u32 || !st.app.engine.is_bubble_key(&Key::TabUp) { return false }
         Key::TabUp
     } else { let Some(key) = translate(vk) else { return false }; key };
-    let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
-    if fg != st.last_fg { st.app.engine.delete_unit = DeleteUnit::of_app(&exe_of(fg)); }
-    if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; let a = st.app.engine.reset(); run_actions(st, a); }
-    // Thai layout / password field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
+    let gi = gui_info(fg); let focus = gi.map(|g| g.hwndFocus).unwrap_or_default();
+    if fg != st.last_fg { let exe = exe_of(fg); st.app.engine.delete_unit = DeleteUnit::of_app(&exe); st.text_app = field::known_text_exe(&exe) || field::known_text_class(&class_of(fg)); }
+    if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; st.gate.reset(); st.field_rx = None; let a = st.app.engine.reset(); run_actions(st, a); }
+    // these may move focus inside the window: a closed gate re-checks
+    if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); }
+    // Thai layout / password field / not a text field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
     st.app.engine.set_thai_active(layout_is_thai(fg)); // Thai layout -> reverse detector (English typed on Kedmanee)
     if !matches!(key, Key::Hotkey(_)) && !st.app.engine.is_bubble_key(&key) {
         if layout_is_thai(fg) && st.app.engine.rev.is_none() { let a = st.app.engine.reset(); run_actions(st, a); return false }
-        // check for a password field at the start of each word and at the boundary (UIA is queried off-thread, 60 ms cap)
-        if (matches!(key, Key::Char(_)) && st.app.engine.buffer().is_empty()) || matches!(key, Key::Boundary(_) | Key::Tab) { st.secure = is_secure(st, focus); }
-        if st.secure { let a = st.app.engine.reset(); run_actions(st, a); return false }
+        // text fields only (games: WASD): a caret (or a known text app) opens, else the cached UIA verdict. One query
+        // (off-thread, 60 ms cap) at each word start answers it and the password check; while closed, only after a
+        // click / focus key.
+        let word_start = (matches!(key, Key::Char(_)) && st.app.engine.buffer().is_empty()) || matches!(key, Key::Boundary(_) | Key::Tab);
+        let caret = st.text_app || gi.is_some_and(|g| !g.hwndCaret.is_invalid());
+        field_collect(st); let now = Instant::now();
+        if st.gate.must_ask(word_start, st.gate.open(caret, || fullscreen(fg))) { let (pw, f) = focus_check(st, focus); st.secure = pw; st.gate.answer(Some(f), now); }
+        else if st.gate.refresh_due(now, true) { field_refresh(st); }
+        if st.secure || !st.gate.open(caret, || fullscreen(fg)) { let a = st.app.engine.reset(); run_actions(st, a); return false }
     }
     let was_paused = st.app.engine.paused;
     let dbg = std::env::var_os("TYPETHAI_DEBUG").is_some();
@@ -322,7 +367,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
         let swallow = with(|st| match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
             // on the bubble: swallow so it is never clicked/activated; a left click on a row accepts that item
             Some(row) => { if let (WM_LBUTTONDOWN, Some(i)) = (m, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-            None => { let a = st.app.engine.reset(); run_actions(st, a); false }
+            None => { st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
         }).unwrap_or(false);
         if swallow { return LRESULT(1) }
     }
@@ -335,6 +380,7 @@ unsafe fn control(st: &mut State) -> bool {
     while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
+    if st.gate.refresh_due(Instant::now(), false) { field_refresh(st); }
     if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
@@ -344,7 +390,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()) }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false }));
         let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };

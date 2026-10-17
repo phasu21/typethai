@@ -21,6 +21,8 @@ pub enum SettingsCmd {
     SetLearnWords(bool),
     SetAccept(AcceptKeys),
     SetPickCtrl(bool),
+    /// Arrow keys pick from the bubble (`Options::pick_arrows`).
+    SetPickArrows(bool),
     SetBubbleLayout(BubbleLayout),
     ForgetWords,
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
@@ -29,7 +31,7 @@ pub enum SettingsCmd {
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_))
     }
 }
 
@@ -43,6 +45,7 @@ pub struct SettingsSnap {
     pub learn_words: bool,
     pub accept: AcceptKeys,
     pub pick_ctrl: bool,
+    pub pick_arrows: bool,
     pub bubble: BubbleLayout,
     /// Distinct words in the word memory.
     pub words_learned: usize,
@@ -62,9 +65,9 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool }
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true } }
 }
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
@@ -87,7 +90,7 @@ impl Prefs {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
         let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -110,10 +113,11 @@ fn parse(text: &str) -> Option<Prefs> {
     let a = v.get("accept_with").and_then(|a| a.as_str());
     let accept = ACCEPT.iter().find(|(_, s)| Some(*s) == a).map_or(AcceptKeys::default(), |(k, _)| *k);
     let pick_ctrl = v.get("pick_with_ctrl").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let pick_arrows = v.get("pick_with_arrows").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let b = v.get("bubble_layout").and_then(|b| b.as_str());
     let bubble = BUBBLE.iter().find(|(_, s)| Some(*s) == b).map_or(BubbleLayout::default(), |(l, _)| *l);
     let check_updates = v.get("check_updates").and_then(serde_json::Value::as_bool).unwrap_or(true);
-    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, accept, pick_ctrl, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates })
+    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, accept, pick_ctrl, pick_arrows, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -211,6 +215,20 @@ mod tests {
         assert_eq!(Prefs::load(&path).accept, AcceptKeys::Tab, "file from before the setting");
         std::fs::write(&path, r#"{"never":[],"accept_with":"enter"}"#).unwrap();
         assert_eq!(Prefs::load(&path).accept, AcceptKeys::Tab, "a value Settings never offers");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn pick_with_arrows_round_trips_and_an_old_file_leaves_it_off() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let on = Prefs { pick_arrows: true, ..Prefs::default() };
+        on.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["pick_with_arrows"], true);
+        assert_eq!(Prefs::load(&path), on);
+        std::fs::write(&path, r#"{"never":["ok"],"pick_with_ctrl":true}"#).unwrap();
+        assert!(!Prefs::load(&path).pick_arrows, "file from before the setting");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]

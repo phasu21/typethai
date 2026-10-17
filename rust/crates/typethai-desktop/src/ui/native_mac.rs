@@ -10,6 +10,11 @@ fn mtm() -> MainThreadMarker { MainThreadMarker::new().expect("UI must run on th
 fn primary_h() -> f64 { NSScreen::screens(mtm()).firstObject().map(|s| s.frame().size.height).unwrap_or(900.0) }
 fn flip(r: NSRect, ph: f64) -> Rect { Rect::new(r.origin.x, ph - (r.origin.y + r.size.height), r.size.width, r.size.height) }
 
+/// The user's accent colour (System Settings > Appearance), as sRGB 0..1. Main thread.
+pub fn accent() -> Option<(f32, f32, f32)> {
+    let c = objc2_app_kit::NSColor::controlAccentColor().colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace())?;
+    Some((c.redComponent() as f32, c.greenComponent() as f32, c.blueComponent() as f32))
+}
 /// Monitors from any thread (the capture thread uses it to sanity-check AX rects); empty off the main thread.
 pub fn monitors_any_thread() -> Vec<Monitor> { if MainThreadMarker::new().is_some() { monitors() } else { MONS.lock().unwrap().clone() } }
 static MONS: std::sync::Mutex<Vec<Monitor>> = std::sync::Mutex::new(Vec::new());

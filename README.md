@@ -91,8 +91,9 @@ which opens the release page.
 
 ## Using it
 
-Each bubble option shows the keys that apply it. In the horizontal strip the highlighted option shows `Tab` and the
-others their number (hold Tab and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
+Each bubble option shows the keys that apply it. In the horizontal strip each button wears its key on its top-left
+corner: `Tab` on the highlighted option (`↵` once the arrow keys are in the strip) and the others their number (hold Tab
+and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
 on the others. Options are numbered from the left in the strip and from the top in rows.
 
 | Key | Action |
@@ -102,6 +103,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
+| **↑**, then **← / →**, then **↑** or **Enter** (Pick with arrow keys on) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. Off by default; until ↑ the arrow keys move the cursor |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
 | **Ctrl+1 / 2 / 3** (Pick with Ctrl+1–3 on) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
@@ -110,7 +112,8 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
-| **Tab+R** | Hold Tab and press R: the ⌃⌥R options for the word you just typed (or the bubble's word). Typing on from Tab quickly types the Tab as usual; Tab after a word is sent when you release it |
+| **Hold Tab** (half a second) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it |
+| **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also

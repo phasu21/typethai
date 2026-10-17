@@ -25,6 +25,8 @@ pub struct BubbleView {
     pub items: Vec<Opt>, pub layout: Layout,
     /// Highlighted row (Tab applies it); 0 on every new bubble.
     pub selected: usize,
+    /// The arrow keys are in the bubble: Enter applies the highlighted option too, and its keycap says so.
+    pub focused: bool,
     /// The panel's bounds as actually laid out by gpui in the last frame (logical px, window-relative).
     pub panel: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Each option's laid-out bounds in the last frame (a row, or a strip button) — for the click hit-test.
@@ -46,6 +48,8 @@ impl Render for BubbleView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.marker { return div().size_full().bg(rgb(0xff2d2d)).into_any_element() }
         let t = cx.theme(); let l = &self.layout; let selected = self.selected;
+        // the strip's pill is too small for "Enter"
+        let (apply_key, apply_pill) = if self.focused { ("Enter", "↵") } else { ("Tab", "Tab") };
         let dark = t.is_dark();
         let hover = t.list_hover;
         // selected row is a little stronger in dark mode
@@ -83,24 +87,31 @@ impl Render for BubbleView {
             .on_children_prepainted(move |b, _, _| slot.set(b.first().copied()));
         match l.kind {
             // No panel: a group is a solid box with a shadow around its buttons, so it reads over any app. One gpui-kit
-            // Button per option, its key hint before the label: an outlined Tab keycap on the highlighted option (a
-            // filled one would vanish on the selected button), the option's number on the others.
+            // Button per option, its key hint a pill on its top-left corner: Tab (Enter while the arrow keys are in the
+            // bubble) on the highlighted option, the option's number on the others.
             BubbleLayout::Horizontal => {
                 { let mut rb = rows_slot.borrow_mut(); rb.clear(); rb.resize(self.items.len(), Bounds::default()); }
                 let groups = l.runs.iter().map(|run| { let (start, rb) = (run.start, rows_slot.clone());
                     div().flex().flex_row().items_center().gap(px(bridge::OPT_GAP as f32)).p(px(bridge::GROUP_PAD as f32))
                         .bg(surface).border_1().border_color(edge).rounded(px(bridge::RADIUS as f32)).shadow_md()
                         .on_children_prepainted(move |b, _, _| { let mut rb = rb.borrow_mut(); for (k, b) in b.into_iter().enumerate() { if let Some(s) = rb.get_mut(start + k) { *s = b } } })
-                        .children((run.start..run.start + run.len).map(|i| {
-                            let hint = if i == selected { cap("Tab".into(), bridge::TAB_CAP_W).border_1().border_color(cap_fg.opacity(0.6)) }
-                                else { cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg) };
-                            Button::new(("opt", i)).selected(i == selected).child(hint).child(column(i, &self.items[i]))
-                        })) });
-                // the badges come after all the buttons, so a neighbour never paints over one
-                let badges = l.badges_of(selected).into_iter().map(|(i, r, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).child(badge(r, if i == selected { btn_sel } else { btn_bg })));
+                        .children((run.start..run.start + run.len).map(|i| Button::new(("opt", i)).selected(i == selected).child(column(i, &self.items[i]).mt(px(bridge::LABEL_DROP as f32))))) });
+                // the badges and key hints come after all the buttons, so a neighbour never paints over one; filled like
+                // their button and ringed in its border colour, so they read as notched into it
+                let badges = l.badges_of().into_iter().map(|(i, r, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).child(badge(r, if i == selected { btn_sel } else { btn_bg })));
+                // solid in the user's accent colour, so the key reads over the button's border and over any app
+                let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
+                let key_bg = Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 });
+                let key_fg = if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) };
+                // the others grey (the theme's muted keycap colours over the surface, still solid)
+                let keys = l.key_hints(selected).into_iter().enumerate().map(|(i, at)| { let on = i == selected;
+                    div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).w(px(at.w as f32)).h(px(at.h as f32)).rounded(px(bridge::KEY_RADIUS as f32)).bg(surface)
+                        .child(div().size_full().flex().items_center().justify_center().rounded(px(bridge::KEY_RADIUS as f32))
+                            .bg(if on { key_bg } else { *cap_bg }).text_color(if on { key_fg } else { cap_fg }).text_size(px(bridge::KEY_FONT_PX as f32))
+                            .child(if on { apply_pill.to_string() } else { (i + 1).to_string() })) });
                 root.pl(px(l.margin as f32)).pt(px(l.margin as f32))
                     .child(div().flex_none().flex().flex_row().items_start().gap(px(bridge::GROUP_GAP_X as f32)).children(groups))
-                    .children(badges).into_any_element()
+                    .children(badges).children(keys).into_any_element()
             }
             BubbleLayout::Vertical => {
                 let panel = div().flex_none().p(px(PAD as f32)).flex().w(px((l.w - 2.0 * l.margin) as f32)).flex_col()
@@ -116,7 +127,7 @@ impl Render for BubbleView {
                             .when(l.reasons.iter().any(Option::is_some), |d| d.child(div().w(px(bridge::BADGE_D as f32)).flex_none().when_some(o.reason, |d, r| d.child(badge(r, if i == selected { row_sel } else { row_bg })))))
                             // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
                             .child(div().w(px(bridge::HINT_SLOT_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
-                                .child(cap("Tab".into(), bridge::TAB_CAP_W).bg(cap_bg))
+                                .child(cap(if i == selected { apply_key } else { "Tab" }.into(), bridge::TAB_CAP_W).bg(cap_bg))
                                 .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg))))
                     }));
                 root.p(px(l.margin as f32)).child(panel).into_any_element()
@@ -165,7 +176,7 @@ impl Ui {
             // rows only know their height once laid out: the same layout as the bubble on screen (typing on, rows
             // refreshed in place) keeps its real size, so the window is not resized to the guess and back
             let size = if visible && l == view.read(cx).layout { real } else { (l.w, l.h) };
-            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
+            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.focused = false; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
             Some(size)
         }).ok().flatten()?;
         self.anchor = Some(anchor); self.size = (0.0, 0.0);
@@ -233,7 +244,7 @@ fn open_bubble(cx: &mut App) -> Ui {
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    let (handle, view) = open_window(opts, cx, |_, cx| cx.new(|_| BubbleView { items: vec![], selected: 0, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false })).expect("bubble window");
+    let (handle, view) = open_window(opts, cx, |_, cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false })).expect("bubble window");
     // gpui-kit's Root fills the window with the theme background; only what the bubble draws may show
     handle.update(cx, |root, _, cx| if let Ok(root) = root.downcast::<gpui_kit::base::Root>() {
         root.update(cx, |r, _| r.style().background = Some(transparent_black().into()))
@@ -283,6 +294,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Move(a) => { ui.reanchor(a, cx); }
                         UiMsg::Hide => ui.hide(cx),
                         UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
+                        UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
                         UiMsg::Paused(p) => if let Some(t) = &tray { t.set_paused(p) },
                         UiMsg::Stopped => stop = true,
                         UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
@@ -361,7 +373,7 @@ pub fn demo_items() -> Vec<Opt> {
 /// while typing. With `shot`, shows once (first point or main-monitor centre), lets it lay out and paint,
 /// prints native vs. laid-out geometry and a per-option self-check, captures the bubble's own window to `shot` (PNG), and quits.
 /// `backdrop` (Some(true): light) opens a window of sample text behind the first point, to see the bubble over an app.
-pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, wanted: BubbleLayout, light: bool, backdrop: Option<bool>) {
+pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, wanted: BubbleLayout, light: bool, backdrop: Option<bool>) {
     let sets = if sets.is_empty() { vec![demo_items()] } else { sets };
     app().run(move |cx| {
         setup(cx);
@@ -379,7 +391,7 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
                 let anchor = if i % 4 == 3 { Anchor { caret: None, field: None, mouse: Some((x, y)) } }
                     else { Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None } };
                 let kind = if anchor.caret.is_some() { "caret" } else { "mouse" };
-                let pl = cx.update(|cx| { let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; cx.notify(); }); p });
+                let pl = cx.update(|cx| { let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; v.focused = focused; cx.notify(); }); p });
                 eprintln!("demo {i}: anchor ({x},{y}) {kind} -> {:?}", pl);
                 // let gpui lay out, then fit the window to the real panel (a couple of frames)
                 for _ in 0..10 {
@@ -433,27 +445,27 @@ fn self_check(v: &BubbleView, measured: &[f64]) -> String {
         let (tw, th) = t.map_or((-1.0, -1.0), |b| (f(b.size.width), f(b.size.height)));
         let (lpad, rpad) = match (t, r) { (Some(t), Some(r)) => (f(t.origin.x) - f(r.origin.x), f(r.origin.x) + f(r.size.width) - (f(t.origin.x) + lw)), _ => (-1.0, -1.0) };
         // rows: the row padding, then the label, the badge column, the gap and the reserved Tab + number slot. Strip: the
-        // button's border and padding with the key hint before the label.
+        // button's border and padding.
         let edge = bridge::OPT_BORDER + bridge::OPT_PX;
         let badge_col = if l.reasons.iter().any(Option::is_some) { bridge::BADGE_D + bridge::HINT_GAP } else { 0.0 };
-        let expect = if strip { (edge + bridge::hint_w(i == v.selected) + bridge::HINT_GAP, edge) } else { (ROW_PX, ROW_PX + bridge::HINT_GAP + bridge::HINT_SLOT_W + badge_col) };
+        let expect = if strip { (edge, edge) } else { (ROW_PX, ROW_PX + bridge::HINT_GAP + bridge::HINT_SLOT_W + badge_col) };
         let wraps = measured[i] > lw;
         let pad_ok = (lpad - expect.0).abs() < 1.5 && (rpad - expect.1).abs() < 1.5;
-        // the strip never wraps, so its buttons sit where the layout put them (the click cells before the first frame);
-        // a moved highlight moves the Tab keycap and the buttons between, as `cells_at` says
-        let cell = l.cells_at(v.selected)[i];
+        // the strip never wraps, so its buttons sit where the layout put them (the click cells before the first frame)
+        let cell = l.cells[i];
         let at_ok = !strip || r.is_some_and(|r| (f(r.origin.x) - cell.x).abs() < 1.0 && (f(r.origin.y) - cell.y).abs() < 1.0 && (f(r.size.width) - cell.w).abs() < 1.0);
         let ok = tw <= lw + 0.5 && (wraps || th < 1.5 * FONT_PX * 1.6) && !(strip && wraps) && pnl.is_some() && pad_ok && at_ok;
         format!("option {i}: chars {} measured {:.1} (incl slack) label_w {lw:.1} rendered {tw:.1}x{th:.1} pad L {lpad:.1} R {rpad:.1} (expect {:.1}/{:.1}) {}{} {}",
             s.label.chars().count(), measured[i], expect.0, expect.1, if wraps { "WRAPS" } else { "fits" }, if at_ok { "" } else { " MOVED" }, if ok { "OK" } else { "CHECK-FAIL" })
     }).collect();
-    if strip { for (r, at) in &l.badges(v.selected) {
+    let hints = l.key_hints(v.selected).into_iter().enumerate().map(|(i, at)| (format!("key hint {i}"), at));
+    if strip { for (r, at) in l.badges().into_iter().map(|(r, at)| (format!("badge {r:?}"), at)).chain(hints) {
         // inside the window, and on no other button (the laid-out ones)
         let inside = at.x >= 0.0 && at.y >= 0.0 && at.right() <= l.w && at.bottom() <= l.h;
         let covers = rb.iter().map(|b| Rect::new(f(b.origin.x), f(b.origin.y), f(b.size.width), f(b.size.height)))
             .filter(|c| at.x < c.right() && c.x < at.right() && at.y < c.bottom() && c.y < at.bottom()).count();
         let ok = inside && covers == 1;
-        lines.push(format!("badge {r:?} at {:.1},{:.1}: inside the window {inside}, on {covers} button(s) {}", at.x, at.y, if ok { "OK" } else { "CHECK-FAIL" }));
+        lines.push(format!("{r} at {:.1},{:.1}: inside the window {inside}, on {covers} button(s) {}", at.x, at.y, if ok { "OK" } else { "CHECK-FAIL" }));
     } }
     let (py, pw, ph) = pnl.map_or((-1.0, -1.0, -1.0), |b| (f(b.origin.y), f(b.size.width), f(b.size.height)));
     // rows wrap, so only a strip's height is known before layout
@@ -471,7 +483,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         completion: crate::engine::CompleteMode::default(),
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS),
         learn_words: true,
-        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, bubble: bridge::BubbleLayout::default(),
+        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: false, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,

@@ -2,9 +2,11 @@
 //! non-activating NSPanel bubble at the caret (AXFocusedUIElement + AXSelectedTextRange + AXBoundsForRange, mouse
 //! fallback), secure-input skip (IsSecureEventInputEnabled / AXSecureTextField), input-source switch to Thai/ABC after applying (TISSelectInputSource), tray.
 #![allow(non_upper_case_globals)]
-use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Arrow, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
 use core_foundation::base::CFRange;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
+use super::field::{self, Field};
 use std::sync::atomic::Ordering;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -58,7 +60,8 @@ const kAXValueCGSizeType: u32 = 2;
 const kAXValueCGRectType: u32 = 3;
 const kAXValueCFRangeType: u32 = 4;
 
-struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str }
+struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str,
+    gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>> }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static TX: RefCell<Option<Sender<UiMsg>>> = const { RefCell::new(None) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -195,6 +198,42 @@ unsafe fn enable_ax_tree(app: AXUIElementRef, pid: i32, bundle: &str) {
 }
 /// The app's AX element (release it), with a short messaging timeout and its AX tree switched on.
 unsafe fn app_element(pid: i32, bundle: &str) -> AXUIElementRef { let e = AXUIElementCreateApplication(pid); AXUIElementSetMessagingTimeout(e, 0.25); enable_ax_tree(e, pid, bundle); e }
+/// Focused element now: (secure, text-field verdict). Goes through the frontmost app's element so its AX tree is on;
+/// right after switching it on the verdict is Unknown (Chromium / Electron build the tree lazily).
+unsafe fn focus_check() -> (bool, Field) {
+    if IsSecureEventInputEnabled() { return (true, Field::Unknown) }
+    autoreleasepool(|_| {
+        let Some((pid, bundle, _)) = frontmost() else { return (false, Field::Unknown) };
+        let fresh = !ENABLED.lock().unwrap().contains(&pid);
+        let app = app_element(pid, &bundle);
+        let s = |e: AXUIElementRef, a: &str| ax_attr(e, a).and_then(|v| v.downcast::<CFString>()).map(|v| v.to_string());
+        let r = match focused_element(Some(app)) {
+            Some(f) => {
+                let fe = f.as_CFTypeRef() as AXUIElementRef; let role = s(fe, "AXRole").unwrap_or_default();
+                (s(fe, "AXSubrole").as_deref() == Some("AXSecureTextField"), field::ax(Some(&role), ax_attr(fe, "AXSelectedTextRange").is_some(), true))
+            }
+            None => (false, field::ax(None, false, ax_attr(app, "AXFocusedWindow").is_some())),
+        };
+        CFRelease(app as CFTypeRef);
+        let f = if field::known_text_app(&bundle) { Field::Text } else if fresh && r.1 != Field::Text { Field::Unknown } else { r.1 };
+        (r.0, f)
+    })
+}
+/// Closed-gate re-checks off the tap thread (AX calls are synchronous IPC to the focused app).
+fn ax_worker() -> Sender<Sender<Field>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Sender<Field>>();
+    let _ = std::thread::Builder::new().name("typethai-ax".into()).spawn(move || for reply in rx { let _ = reply.send(unsafe { focus_check() }.1); });
+    tx
+}
+/// The next key picks the reply up (`field_collect`).
+fn field_refresh(st: &mut State) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if st.ax.send(tx).is_ok() { st.field_rx = Some(rx) } else { st.gate.answer(None, Instant::now()) }
+}
+fn field_collect(st: &mut State) {
+    let Some(rx) = st.field_rx.take() else { return };
+    st.gate.answer(rx.recv_timeout(Duration::from_millis(60)).ok(), Instant::now());
+}
 /// Focused element: system-wide AXFocusedUIElement, else the frontmost app's AXFocusedUIElement.
 unsafe fn focused_element(app: Option<AXUIElementRef>) -> Option<CFType> {
     focused().or_else(|| app.and_then(|a| ax_attr(a, "AXFocusedUIElement")))
@@ -280,6 +319,7 @@ fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
         Action::SwitchInput(l) => *bridge::REQ_SWITCH_INPUT.lock().unwrap() = Some(l),
         Action::Select(i) => send(UiMsg::Select(i)),
+        Action::Focus(f) => send(UiMsg::Focus(f)),
         Action::ShowBubble(items) => {
             send(UiMsg::show(items, st.app.engine.opts.bubble, unsafe { anchor() }));
             // the tap sees the key before the app moves its caret
@@ -346,6 +386,7 @@ fn translate(code: u16, flags: u64) -> Option<Key> {
         0x30 => if shift { Key::Nav } else { Key::Tab }, // Shift+Tab (reverse focus) stays plain navigation
         0x35 => Key::Esc,
         0x7E if shift => Key::SelectPrev, 0x7D if shift => Key::SelectNext,
+        0x7E => Key::Arrow(Arrow::Up), 0x7D => Key::Arrow(Arrow::Down), 0x7B if !shift => Key::Arrow(Arrow::Left), 0x7C if !shift => Key::Arrow(Arrow::Right),
         c => match mac_keycode_to_us(c, shift, caps) { Some(ch) => Key::Char(ch), None => Key::Nav },
     })
 }
@@ -358,7 +399,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             match bridge::geom().and_then(|g| g.hit(p.x, p.y)) {
                 // on the bubble: swallow so the click never reaches (or focuses) it; left click on a row accepts
                 Some(row) => { if let (CGEventType::LeftMouseDown, Some(i)) = (ty, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-                None => { let a = st.app.engine.reset(); run_actions(st, a); false }
+                None => { st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
         CGEventType::KeyDown | CGEventType::KeyUp => {
@@ -371,7 +412,9 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 Key::TabUp
             } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
-            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); let a = st.app.engine.reset(); run_actions(st, a); }
+            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); st.gate.reset(); st.field_rx = None; let a = st.app.engine.reset(); run_actions(st, a); }
+            // these may move focus inside the app: a closed gate re-checks
+            if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
             // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up, and Space when it
             // applies a live row (`is_bubble_key`).
@@ -381,7 +424,14 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             st.app.engine.set_thai_active(thai);
             if !matches!(key, Key::Hotkey(_)) && !st.app.engine.is_bubble_key(&key) {
                 let first = matches!(key, Key::Char(_)) && st.app.engine.buffer().is_empty();
-                if (thai && st.app.engine.rev.is_none()) || ((first || matches!(key, Key::Boundary(_) | Key::Tab)) && unsafe { secure_now() }) { let a = st.app.engine.reset(); run_actions(st, a); return false }
+                if thai && st.app.engine.rev.is_none() { let a = st.app.engine.reset(); run_actions(st, a); return false }
+                // text fields only (games: WASD): the cached AX verdict. One look at each word start answers it and the
+                // secure check; while closed, only after a click / focus key (or off-thread, `field_refresh`).
+                let word_start = first || matches!(key, Key::Boundary(_) | Key::Tab);
+                field_collect(st); let now = Instant::now(); let mut secure = false;
+                if st.gate.must_ask(word_start, st.gate.open(false, || false)) { let (s, f) = unsafe { focus_check() }; secure = s; st.gate.answer(Some(f), now); }
+                else if st.gate.refresh_due(now, true) { field_refresh(st); }
+                if secure || !st.gate.open(false, || false) { let a = st.app.engine.reset(); run_actions(st, a); return false }
             }
             let was = st.app.engine.paused; let o = st.app.engine.on_key(key);
             if was != st.app.engine.paused { send(UiMsg::Paused(st.app.engine.paused)) }
@@ -426,6 +476,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); send(UiMsg::Paused(st.app.engine.paused)); }
         let now = std::time::Instant::now();
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
+        if st.gate.refresh_due(now, false) { field_refresh(st); }
         // a few AX reads after each key: the first is often still the pre-keystroke caret
         if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
             st.move_due = None; st.last_move = Some(now);
@@ -452,7 +503,7 @@ fn capture_thread(app: App, tx: Sender<UiMsg>) {
     let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
     let rl = CFRunLoop::get_current();
     rl.add_source(&src, unsafe { kCFRunLoopCommonModes }); tap.enable();
-    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "" }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None }));
     let timer = CFRunLoopTimer::new(core_foundation::date::CFDate::now().abs_time() + 0.2, 0.025, 0, 0, timer_cb, std::ptr::null_mut());
     rl.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
     CFRunLoop::run_current();

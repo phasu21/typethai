@@ -60,7 +60,12 @@ pub enum Key {
     /// Ctrl+1..3 (Control alone): applies that row while the bubble is up and `Options::pick_ctrl` is on, otherwise
     /// navigation.
     PickRow(usize),
+    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Up moves into a visible bubble, then
+    /// Left/Right move the selection, Up again applies it and Down leaves.
+    Arrow(Arrow),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrow { Up, Down, Left, Right }
 /// Which kind of OS input source fits the text just inserted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputLang { Thai, Latin }
@@ -80,17 +85,18 @@ impl Selection {
     pub fn next(&mut self) -> usize { if self.len > 0 { self.idx = (self.idx + 1) % self.len } self.idx }
     pub fn prev(&mut self) -> usize { if self.len > 0 { self.idx = (self.idx + self.len - 1) % self.len } self.idx }
 }
-/// Tab held over the bubble, or right after a typed word. Over the bubble Tab alone applies the selected row when
-/// released and Tab+1..3 applies that row instead. Tab+R (held `TAB_CHORD_MIN` first) opens the ⌃⌥R rows.
+/// Tab held. Over the bubble Tab alone applies the selected row when released and Tab+1..3 applies that row instead;
+/// elsewhere the release types the Tab. Tab+R (held `TAB_CHORD_MIN` first), or Tab held alone for `TAB_HOLD`, opens the
+/// ⌃⌥R rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TabChord {
     /// Tab is up, or went down as a plain Tab (passed through).
     #[default] Up,
     /// Down over the bubble with nothing applied yet: the release applies the selected row.
     Armed,
-    /// Down right after a word, no bubble: held back in case R follows; the release sends the Tab.
+    /// Down with no bubble: held back in case R follows or it is held for a rewrite; the release sends the Tab.
     Held,
-    /// Still down after a digit picked a row: the release and auto-repeats do nothing.
+    /// Still down after a digit picked a row or a rewrite started: the release and auto-repeats do nothing.
     Spent,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +108,8 @@ pub enum Action {
     HideBubble,
     /// Move the bubble highlight to this row.
     Select(usize),
+    /// The arrow keys moved into (true) or out of (false) the bubble.
+    Focus(bool),
     /// Switch the OS input source to fit the text just inserted (platform: no-op if already that kind).
     SwitchInput(InputLang),
     /// Hand to the rewrite worker. Answers come back through `Engine::on_reply`.
@@ -199,6 +207,9 @@ pub struct Options {
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
+    /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
+    /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
+    pub pick_arrows: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
@@ -206,7 +217,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
 /// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
@@ -244,6 +255,8 @@ pub const REV_AUTO: f64 = 0.98;
 pub const REV_LIVE: f64 = 0.98;
 /// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
 pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
+/// Tab held this long on its own opens the ⌃⌥R rows, like the hotkey: the selection, or the word before the caret.
+pub const TAB_HOLD: Duration = Duration::from_millis(500);
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -271,6 +284,8 @@ pub struct Engine {
     /// Items currently on the bubble (accept by index).
     bubble: Vec<BubbleItem>,
     sel: Selection,
+    /// The arrow keys are in the bubble (Up moved into it). Only while it shows.
+    in_bubble: bool,
     live_streak: usize,
     /// The visible bubble is a live (mid-word) suggestion.
     live: bool,
@@ -308,7 +323,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -372,6 +387,11 @@ impl Engine {
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
             || (matches!(k, Key::PickRow(_)) && self.picks_rows())
             || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
+            || (self.bubble_visible() && self.is_arrow_key(k))
+    }
+    /// Up while the bubble can be entered; every arrow and Enter once in it.
+    fn is_arrow_key(&self, k: &Key) -> bool {
+        (self.opts.pick_arrows && *k == Key::Arrow(Arrow::Up)) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -385,7 +405,7 @@ impl Engine {
     /// Focus change, mouse click, secure field, layout change, any non-bubble key during a rewrite: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
         self.settle();
-        self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
+        self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
@@ -442,6 +462,8 @@ impl Engine {
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
     fn show(&mut self, mut items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
         self.fixing = false;
+        // new rows start with the arrow keys outside (the UI resets on Show / Hide)
+        self.in_bubble = false;
         // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks
         items.sort_by_key(|i| match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 });
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
@@ -468,6 +490,10 @@ impl Engine {
     fn on_key_inner(&mut self, k: Key) -> Outcome {
         if let Key::Hotkey(Hotkey::TogglePause) = k { self.paused = !self.paused; let a = self.reset(); return Outcome { swallow: true, actions: a } }
         if self.paused { return Outcome::pass() }
+        if self.in_bubble && !self.is_bubble_key(&k) && !matches!(k, Key::Hotkey(_) | Key::TabUp) {
+            // any other key leaves the bubble and is handled as usual
+            self.in_bubble = false; let mut o = self.on_key_inner(k); o.actions.insert(0, Action::Focus(false)); return o
+        }
         if let Some(o) = self.tab_chord(&k) { return o }
         let k = match k { Key::PickRow(i) if self.picks_rows() => return self.accept_held(i), Key::PickRow(_) => Key::Nav, k => k };
         if self.rewriting() && !self.rewrite_keeps(&k) { let mut a = self.reset(); let mut o = self.on_key_inner(k); a.append(&mut o.actions); o.actions = a; return o }
@@ -499,7 +525,9 @@ impl Engine {
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
-            Key::Boundary(Boundary::Enter) if self.fixing && self.bubble_visible() => {
+            Key::Arrow(a) => self.on_arrow(a),
+            // Enter in the bubble applies the selection, like Tab
+            Key::Boundary(Boundary::Enter) if (self.fixing || self.in_bubble) && self.bubble_visible() => {
                 let mut o = self.on_hotkey(Hotkey::Accept(self.sel.idx)); o.swallow = true; o
             }
             Key::Boundary(Boundary::Enter) => self.on_enter(),
@@ -507,12 +535,24 @@ impl Engine {
             Key::Hotkey(h) => self.on_hotkey(h),
         }
     }
+    /// Arrow-key picking (see `Options::pick_arrows`); outside the bubble an arrow is navigation.
+    fn on_arrow(&mut self, a: Arrow) -> Outcome {
+        if !self.bubble_visible() || !self.is_arrow_key(&Key::Arrow(a)) { return self.on_key_inner(Key::Nav) }
+        let acts = match (self.in_bubble, a) {
+            (false, _) => { self.in_bubble = true; vec![Action::Focus(true)] }
+            (true, Arrow::Up) => return self.accept_held(self.sel.idx),
+            (true, Arrow::Left) => vec![Action::Select(self.sel.prev())],
+            (true, Arrow::Right) => vec![Action::Select(self.sel.next())],
+            (true, Arrow::Down) => { self.in_bubble = false; vec![Action::Focus(false)] }
+        };
+        Outcome { swallow: true, actions: acts }
+    }
     /// The keys of a held Tab (see `TabChord`); None for keys handled as usual.
     fn tab_chord(&mut self, k: &Key) -> Option<Outcome> {
         let swallowed = Outcome { swallow: true, actions: vec![] };
         Some(match (self.tab, k) {
             (TabChord::Up, Key::Tab) if self.bubble_visible() => { self.tab = TabChord::Armed; self.tab_at = Some(Instant::now()); self.tab_pending = false; swallowed }
-            (TabChord::Up, Key::Tab) if self.holds_tab() => { self.tab = TabChord::Held; self.tab_at = Some(Instant::now()); swallowed }
+            (TabChord::Up, Key::Tab) => { self.tab = TabChord::Held; self.tab_at = Some(Instant::now()); swallowed }
             (TabChord::Up, _) => return None,
             (_, Key::Tab) => swallowed,
             (TabChord::Armed | TabChord::Held, Key::Char('r' | 'R')) if self.tab_at.is_some_and(|t| t.elapsed() >= TAB_CHORD_MIN) => {
@@ -533,11 +573,6 @@ impl Engine {
             // caret moves and deletions drop the held Tab: the bubble no longer matches the text
             _ => { self.tab = TabChord::Up; return None }
         })
-    }
-    /// Tab right after a typed word, with no bubble: held back so Tab+R can open the ⌃⌥R rows. A second Tab in a row
-    /// (Guess) is not held.
-    fn holds_tab(&self) -> bool {
-        !self.tab_pending && (!self.word.is_empty() || self.line.last().is_some_and(|c| self.line.len() > self.line_start && c.extra.is_empty()))
     }
     /// Tab as it always was: a boundary for the word, and a second Tab in a row runs Guess.
     fn plain_tab(&mut self) -> Outcome {
@@ -610,6 +645,7 @@ impl Engine {
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
             SettingsCmd::SetAccept(a) => { let changed = self.opts.accept != a; self.opts.accept = a; changed }
             SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
+            SettingsCmd::SetPickArrows(on) => { let changed = self.opts.pick_arrows != on; self.opts.pick_arrows = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
@@ -617,7 +653,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -688,9 +724,15 @@ impl Engine {
     /// Esc / Dismiss: hide the bubble; completions stay away until the word ends.
     fn dismiss(&mut self, acts: &mut Vec<Action>) { self.comp_muted = !self.word.is_empty(); self.show(vec![], acts) }
     /// Pause mode: the first timer tick at least `complete_idle` after a key in a word offers its completions.
+    /// A Tab held `TAB_HOLD` on its own opens the ⌃⌥R rows.
     pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
         let mut acts = vec![];
-        if self.paused || self.opts.complete != CompleteMode::Pause { return acts }
+        if self.paused { return acts }
+        if matches!(self.tab, TabChord::Armed | TabChord::Held) && self.tab_at.is_some_and(|t| now.saturating_duration_since(t) >= TAB_HOLD) {
+            // starting it lets Tab go: keep it Spent so the repeats and the release type nothing
+            let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; return o.actions
+        }
+        if self.opts.complete != CompleteMode::Pause { return acts }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
         self.last_key = None;
         self.update_completions(true, &[], &mut acts);
@@ -1161,7 +1203,8 @@ impl Engine {
             // holding the hotkey autorepeats: while capturing that is a no-op, not a restart
             Key::Hotkey(Hotkey::Rewrite) => self.capturing.is_some(),
             Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss) => self.bubble_visible(),
-            Key::Boundary(Boundary::Enter) => self.fixing && self.bubble_visible(),
+            Key::Boundary(Boundary::Enter) => (self.fixing || self.in_bubble) && self.bubble_visible(),
+            Key::Arrow(_) => self.bubble_visible() && self.is_arrow_key(k),
             _ => false,
         }
     }
@@ -1466,6 +1509,65 @@ mod tests {
         let o = tab(&mut e); assert!(o.swallow);
         assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
         assert!(o.actions.contains(&Action::SwitchInput(InputLang::Thai))); assert!(!e.bubble_visible()); assert_eq!(e.buffer(), "");
+    }
+    /// `l;ylfu` with the live bubble up and arrow-key picking on.
+    fn railed() -> Option<(Engine, usize)> {
+        let mut e = engine()?;
+        e.opts.live_show = 0.5; e.opts.live_stable = 1; e.opts.live_min_len = 3; e.opts.pick_arrows = true;
+        typ(&mut e, "l;ylfu"); assert!(e.live_visible());
+        let n = e.bubble.len(); Some((e, n))
+    }
+    #[test] fn plain_arrows_are_navigation_without_the_setting() {
+        let Some((mut e, _)) = railed() else { return };
+        e.opts.pick_arrows = false;
+        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Up)));
+        let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]); assert_eq!(e.buffer(), "");
+    }
+    #[test] fn up_enters_the_bubble_and_left_right_move() {
+        let Some((mut e, n)) = railed() else { return };
+        // before Up, Left/Right move the caret: the word ends, the bubble goes
+        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Up))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
+        let o = e.on_key(Key::Arrow(Arrow::Left)); assert!(!o.swallow); assert!(!e.bubble_visible());
+        let Some((mut e, _)) = railed() else { return };
+        let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true)]);
+        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
+        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Select(1 % n)]);
+        let o = e.on_key(Key::Arrow(Arrow::Left)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Select(0)]);
+        // Down leaves; the bubble and the word stay
+        let o = e.on_key(Key::Arrow(Arrow::Down)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(false)]);
+        assert!(e.bubble_visible()); assert_eq!(e.buffer(), "l;ylfu");
+        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(!o.swallow); assert!(!e.bubble_visible());
+    }
+    #[test] fn up_again_applies() {
+        let Some((mut e, _)) = railed() else { return };
+        e.on_key(Key::Arrow(Arrow::Up));
+        let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(o.swallow);
+        assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
+        assert!(!e.bubble_visible()); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Up)), "no bubble: Up moves the caret");
+    }
+    #[test] fn enter_in_the_bubble_applies() {
+        let Some((mut e, _)) = railed() else { return };
+        e.on_key(Key::Arrow(Arrow::Up));
+        let o = e.on_key(Key::Boundary(Boundary::Enter)); assert!(o.swallow);
+        assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: None });
+        assert!(!e.bubble_visible()); assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
+        // not entered: Enter is an ordinary Enter
+        let Some((mut e, _)) = railed() else { return };
+        assert!(!e.on_key(Key::Boundary(Boundary::Enter)).swallow);
+    }
+    #[test] fn typing_leaves_the_bubble() {
+        let Some((mut e, _)) = railed() else { return };
+        e.on_key(Key::Arrow(Arrow::Up));
+        let o = e.on_key(Key::Char('a')); assert!(!o.swallow); assert_eq!(o.actions.first(), Some(&Action::Focus(false)));
+        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
+        assert!(!e.on_key(Key::Arrow(Arrow::Left)).swallow);
+    }
+    #[test] fn tab_still_applies_inside_the_bubble() {
+        let Some((mut e, n)) = railed() else { return };
+        if n < 2 { return }
+        e.on_key(Key::Arrow(Arrow::Up)); e.on_key(Key::Arrow(Arrow::Right));
+        let o = tab(&mut e); assert!(o.swallow); assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. }))); assert!(!e.bubble_visible());
+        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "a new bubble starts outside");
     }
     #[test] fn suggestion_shows_before_space() {
         let Some(mut e) = engine() else { return };
@@ -1963,7 +2065,7 @@ mod tests {
         let o = tab(&mut e); assert!(o.swallow);
         assert_eq!(o.actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste("hello world".into()))]);
         assert!(!e.bubble_visible());
-        assert!(!tab(&mut e).swallow, "the session is over: Tab is a tab again");
+        assert!(types_only_a_tab(&tab(&mut e)), "the session is over: Tab is a tab again");
     }
     #[test] fn rewrite_select_next_or_click_picks_translate() {
         let Some(mut e) = engine() else { return };
@@ -2185,7 +2287,7 @@ mod tests {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
         assert_eq!(e.on_reply(captured(id, Captured::Secure)), vec![]);
-        assert!(!tab(&mut e).swallow, "no session left");
+        assert!(types_only_a_tab(&tab(&mut e)), "no session left");
     }
     #[test] fn rewrite_off_still_captures_and_paused_passes_hotkey() {
         let Some(mut e) = engine() else { return };
@@ -2268,8 +2370,8 @@ mod tests {
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "held back in case R follows");
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat while held");
         let o = e.on_key(Key::TabUp); assert!(o.swallow); assert!(o.actions.contains(&TYPE_TAB), "the release types the Tab: {:?}", o.actions);
-        // nothing typed yet on the line: a plain Tab passes straight through
-        e.reset(); assert_eq!(e.on_key(Key::Tab), Outcome::pass());
+        // nothing typed yet on the line: held too (a held Tab opens the ⌃⌥R rows on a selection)
+        e.reset(); assert_eq!(e.on_key(Key::Tab), SWALLOWED);
     }
     #[test] fn tab_r_opens_the_rewrite_rows() {
         let Some(mut e) = engine() else { return };
@@ -2283,6 +2385,33 @@ mod tests {
         e.reset(); e.opts.live = true; typ(&mut e, "l;ylfu"); assert!(e.bubble_visible());
         hold_tab(&mut e);
         let o = e.on_key(Key::Char('R')); assert!(captures(&o)); assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. })), "no row applied");
+    }
+    /// The timer tick `after` the held Tab went down.
+    fn tick_after(e: &mut Engine, after: Duration) -> Vec<Action> { let t = e.tab_at.expect("Tab is down") + after; e.on_idle(t) }
+    #[test] fn holding_tab_alone_starts_a_rewrite() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        // nothing typed: the selection case. Every Tab is held
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED);
+        assert!(!tick_after(&mut e, TAB_HOLD - Duration::from_millis(1)).iter().any(|a| matches!(a, Action::Rewrite(_))), "not yet");
+        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))), "{a:?}");
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat after the rewrite types nothing");
+        assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the release types no Tab");
+        // over the bubble, instead of applying a row on release
+        e.reset(); e.opts.live = true; typ(&mut e, "l;ylfu"); assert!(e.bubble_visible());
+        e.on_key(Key::Tab);
+        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "no row applied");
+    }
+    #[test] fn a_tab_tap_is_still_a_tab() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "held until released, in case it is held");
+        assert!(tick_after(&mut e, Duration::from_millis(100)).is_empty());
+        assert!(types_only_a_tab(&e.on_key(Key::TabUp)));
+        // AI rewrite off: the hold still opens the ⌃⌥R rows (spelling fixes)
+        e.rewrite.enabled = false; e.on_key(Key::Tab);
+        assert!(tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
     }
     #[test] fn tab_rolled_into_r_types_both() {
         let Some(mut e) = engine() else { return };

@@ -296,18 +296,21 @@ impl SettingsView {
                 move |label, cx| if let Some((b, _)) = BUBBLE.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_bubble(*b, cx)) }) };
         let pick = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.pick_ctrl, move |on, cx| write.update(cx, |v, cx| v.set_pick_ctrl(on, cx))) };
+        let arrows = { let (read, write) = (view.clone(), view.clone());
+            SettingField::switch(move |cx| read.read(cx).snap.pick_arrows, move |on, cx| write.update(cx, |v, cx| v.set_pick_arrows(on, cx))) };
         let learn = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.learn_words, move |on, cx| write.update(cx, |v, cx| v.set_learn_words(on, cx))) };
         let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
             .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
         let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
         page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another. Space can also accept a word typed in the wrong layout.".into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "bubble", "layout", "horizontal", "vertical", "row", "column"], std::iter::empty()),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 Some(SettingItem::new("Bubble layout", layout).description("Horizontal puts the suggestions side by side. Long suggestions and AI rewrite results are always stacked.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
                 Some(SettingItem::new("Pick with Ctrl+1–3", pick).description("While the bubble is up, Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion. Off, those keys reach the app as usual.")),
+                Some(SettingItem::new("Pick with arrow keys", arrows).description("While the bubble is up, press Up to move into it, Left or Right to choose, and Up again or Enter to apply. Down or Esc leaves. Until you press Up, the arrow keys move the cursor as usual.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }
@@ -359,6 +362,12 @@ impl SettingsView {
         bridge::push_settings(SettingsCmd::SetPickCtrl(on));
         cx.notify();
     }
+    fn set_pick_arrows(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.pick_arrows = on;
+        bridge::push_settings(SettingsCmd::SetPickArrows(on));
+        cx.notify();
+    }
     fn set_complete_idle(&mut self, ms: u64, cx: &mut Context<Self>) {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.complete_idle = std::time::Duration::from_millis(ms);
@@ -389,8 +398,8 @@ impl SettingsView {
             .child(Button::new("save-rewrite").label("Save").primary().on_click(click(view, |v, window, cx| v.save_rewrite(window, cx))))
             .into_any_element());
         page("AI rewrite", IconName::Bot,
-            format!("Select text and press {hotkey}: the bubble offers it in the other layout and with typos fixed, worked out on this computer. With AI rewrite on and a key saved, Fix typos and Translate TH↔EN follow; only those send the text to the service below. With nothing selected, {hotkey} offers fixes for the word before the caret."),
-            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", "selection", "selected", "layout", "spelling", "word", hotkey], std::iter::empty()),
+            format!("Select text and hold Tab, or press {hotkey}: the bubble offers it in the other layout and with typos fixed, worked out on this computer. With AI rewrite on and a key saved, Fix typos and Translate TH↔EN follow; only those send the text to the service below. With nothing selected, it offers fixes for the word before the caret."),
+            keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", "selection", "selected", "hold", "tab", "layout", "spelling", "word", hotkey], std::iter::empty()),
             vec![SettingItem::new("Offer AI rewrite", enabled), SettingItem::new("API key", key).description(key_note),
                 SettingItem::new("Model", draft_field(view, |v| v.model.clone(), |v, s| v.model = s)),
                 SettingItem::new("Base URL", draft_field(view, |v| v.base_url.clone(), |v, s| v.base_url = s)),

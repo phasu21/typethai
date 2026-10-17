@@ -8,8 +8,10 @@ use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub enum UiMsg {
-    /// Highlight this row (Shift+Up/Down).
+    /// Highlight this row (Shift+Up/Down, or Left/Right with the arrow keys in the bubble).
     Select(usize),
+    /// The arrow keys moved into / out of the bubble: the highlighted option's keycap says Enter while they are in it.
+    Focus(bool),
     /// `layout`: what the bubble asks for; `layout` falls back to rows when a strip does not fit.
     Show { items: Vec<Opt>, layout: BubbleLayout, anchor: Anchor },
     /// The caret moved while the bubble is shown: re-place it (same size; skipped if the rect doesn't change).
@@ -99,12 +101,27 @@ pub const SCREEN_MARGIN: f64 = 24.0;
 /// Width used by everything except the label column (padding, border, and the Tab keycap slot).
 pub const CHROME_W: f64 = 2.0 * (PAD + BORDER) + 2.0 * ROW_PX + HINT_GAP + HINT_SLOT_W;
 
-/// Strip metrics: each option is a gpui-kit Medium `Button` (1 px border, 10 px padding, 32 px tall) holding the key hint
-/// and the label, `OPT_GAP` apart.
+/// Strip metrics: each option is a gpui-kit Medium `Button` (1 px border, 10 px padding, 32 px tall) holding the label,
+/// `OPT_GAP` apart. Its key hint hangs on its top-left corner like the badge on its top-right, so a button is at least
+/// `OPT_MIN_W` wide: the Tab keycap and the badge never meet.
 pub const OPT_BORDER: f64 = 1.0;
 pub const OPT_PX: f64 = 10.0;
 pub const OPT_H: f64 = 32.0;
 pub const OPT_GAP: f64 = 4.0;
+pub const OPT_MIN_W: f64 = KEY_TAB_W + BADGE_D;
+/// A strip button's key hint: a small solid keycap (accent fill, `KEY_RADIUS` corners) centred on its top edge (`KEY_UP` above it), the label set `LABEL_DROP`
+/// lower so the pill clears the tallest Thai marks.
+pub const KEY_H: f64 = 14.0;
+pub const KEY_UP: f64 = 7.0;
+pub const KEY_TAB_W: f64 = 26.0;
+pub const KEY_DIGIT_W: f64 = 14.0;
+pub const KEY_FONT_PX: f64 = 9.5;
+pub const KEY_RADIUS: f64 = 3.0;
+/// The key hints' fill when the system accent colour cannot be read: macOS's default blue.
+pub const ACCENT_FALLBACK: (f32, f32, f32) = (0.0, 0.478, 1.0);
+/// Text on an accent fill: dark on a light accent (yellow, graphite's light grey), white otherwise. sRGB 0..1.
+pub fn dark_text_on(rgb: (f32, f32, f32)) -> bool { 0.2126 * rgb.0 + 0.7152 * rgb.1 + 0.0722 * rgb.2 > 0.6 }
+pub const LABEL_DROP: f64 = 3.0;
 /// A label wider than this stacks the bubble: past about 28 Latin letters an option is a phrase, and phrases side by
 /// side are no longer read at a glance.
 pub const STRIP_LABEL_MAX: f64 = 240.0;
@@ -134,7 +151,7 @@ impl Layout {
     /// suggestion reads on from what is being typed.
     pub fn text_x(&self) -> f64 {
         match (self.kind, self.cells.first()) {
-            (BubbleLayout::Horizontal, Some(c)) => c.x + OPT_BORDER + OPT_PX + hint_w(true) + HINT_GAP,
+            (BubbleLayout::Horizontal, Some(c)) => c.x + OPT_BORDER + OPT_PX,
             _ => self.margin + PAD + BORDER + ROW_PX,
         }
     }
@@ -164,11 +181,11 @@ fn rows(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64) -> Layout 
     let ph = y + PAD + BORDER - m;
     Layout { kind: BubbleLayout::Vertical, w: pw + 2.0 * m, h: ph + 2.0 * m, margin: m, surfaces: vec![Rect::new(m, m, pw, ph)], runs: runs(reasons), label_w: vec![label_w; label_widths.len()], cells, reasons: reasons.to_vec() }
 }
-/// One button per option, left to right, in a box per run. The first option is highlighted when the bubble appears;
-/// moving the highlight swaps which button carries the wider Tab keycap, so the strip's width never changes.
+/// One button per option, left to right, in a box per run. The key hints hang outside the buttons, so moving the
+/// highlight moves nothing.
 fn strip(label_widths: &[f64], reasons: &[Option<Reason>]) -> Layout {
     let (top, inset) = (SHADOW_M, BORDER + GROUP_PAD);
-    let label_w: Vec<f64> = label_widths.iter().map(|w| w.ceil()).collect();
+    let label_w: Vec<f64> = label_widths.iter().map(|w| w.ceil().max(OPT_MIN_W - 2.0 * (OPT_BORDER + OPT_PX))).collect();
     let runs = runs(reasons);
     let (mut x, mut cells, mut surfaces) = (SHADOW_M, vec![], vec![]);
     for (k, run) in runs.iter().enumerate() {
@@ -176,7 +193,7 @@ fn strip(label_widths: &[f64], reasons: &[Option<Reason>]) -> Layout {
         x = left + inset;
         for i in run.start..run.start + run.len {
             if i > run.start { x += OPT_GAP }
-            let c = Rect::new(x, top + inset, 2.0 * (OPT_BORDER + OPT_PX) + hint_w(i == 0) + HINT_GAP + label_w[i], OPT_H);
+            let c = Rect::new(x, top + inset, 2.0 * (OPT_BORDER + OPT_PX) + label_w[i], OPT_H);
             x = c.right(); cells.push(c);
         }
         x += inset;
@@ -185,7 +202,7 @@ fn strip(label_widths: &[f64], reasons: &[Option<Reason>]) -> Layout {
     let h = top + 2.0 * inset + OPT_H + SHADOW_M;
     Layout { kind: BubbleLayout::Horizontal, w: x + SHADOW_M, h, margin: SHADOW_M, surfaces, runs, label_w, cells, reasons: reasons.to_vec() }
 }
-/// A strip option's key hint: the Tab keycap on the highlighted option, its number on the others.
+/// A key hint's width: the Tab keycap on the highlighted option, its number on the others.
 pub fn hint_w(highlighted: bool) -> f64 { if highlighted { TAB_CAP_W } else { DIGIT_CAP_W } }
 pub fn max_width_for(visible_w: f64) -> f64 { visible_w - 2.0 * SCREEN_MARGIN }
 
@@ -207,35 +224,27 @@ impl Geom {
     }
 }
 impl Layout {
-    /// Each option's box with option `sel` highlighted. In a strip the Tab keycap moves to it: its button widens, the
-    /// first narrows and the buttons between move; the strip's width stays.
-    pub fn cells_at(&self, sel: usize) -> Vec<Rect> {
-        if self.kind == BubbleLayout::Vertical { return self.cells.clone() }
-        let grow = |i: usize| hint_w(i == sel) - hint_w(i == 0);
-        let mut dx = 0.0;
-        self.cells.iter().enumerate().map(|(i, c)| { let r = Rect::new(c.x + dx, c.y, c.w + grow(i), c.h); dx += grow(i); r }).collect()
+    /// Each strip button's key hint with option `sel` highlighted: on its top-left corner, the wider Tab one on the
+    /// highlighted button. Rows
+    /// keep theirs inline (none here).
+    pub fn key_hints(&self, sel: usize) -> Vec<Rect> {
+        if self.kind == BubbleLayout::Vertical { return vec![] }
+        self.cells.iter().enumerate().map(|(i, c)| Rect::new(c.x, c.y - KEY_UP, if i == sel { KEY_TAB_W } else { KEY_DIGIT_W }, KEY_H)).collect()
     }
-    /// The surfaces with option `sel` highlighted: a strip run's box follows its buttons.
-    pub fn surfaces_at(&self, sel: usize) -> Vec<Rect> {
-        if self.kind == BubbleLayout::Vertical { return self.surfaces.clone() }
-        let (cells, inset) = (self.cells_at(sel), BORDER + GROUP_PAD);
-        self.runs.iter().zip(&self.surfaces).map(|(run, s)| {
-            let (a, b) = (cells[run.start].x - inset, cells[run.start + run.len - 1].right() + inset);
-            Rect::new(a, s.y, b - a, s.h)
-        }).collect()
-    }
-    /// Each badge with option `sel` highlighted: on a button's top-right corner, or in a row's badge column.
-    pub fn badges(&self, sel: usize) -> Vec<(Reason, Rect)> { self.badges_of(sel).into_iter().map(|(_, r, at)| (r, at)).collect() }
+    /// Each badge: on a button's top-right corner, or in a row's badge column.
+    pub fn badges(&self) -> Vec<(Reason, Rect)> { self.badges_of().into_iter().map(|(_, r, at)| (r, at)).collect() }
     /// The same, with the option each badge marks.
-    pub fn badges_of(&self, sel: usize) -> Vec<(usize, Reason, Rect)> {
+    pub fn badges_of(&self) -> Vec<(usize, Reason, Rect)> {
         let at = |c: &Rect| match self.kind {
             BubbleLayout::Horizontal => Rect::new(c.right() + OPT_GAP - BADGE_D, c.y - BADGE_UP, BADGE_D, BADGE_D),
             BubbleLayout::Vertical => Rect::new(c.right() - ROW_PX - HINT_SLOT_W - HINT_GAP - BADGE_D, c.y + (ROW_H - BADGE_D) / 2.0, BADGE_D, BADGE_D),
         };
-        self.cells_at(sel).iter().zip(&self.reasons).enumerate().filter_map(|(i, (c, r))| Some((i, (*r)?, at(c)))).collect()
+        self.cells.iter().zip(&self.reasons).enumerate().filter_map(|(i, (c, r))| Some((i, (*r)?, at(c)))).collect()
     }
-    /// What takes clicks before gpui has laid the bubble out: the surfaces and the badges.
-    pub fn solid(&self, sel: usize) -> Vec<Rect> { self.surfaces_at(sel).into_iter().chain(self.badges(sel).into_iter().map(|(_, r)| r)).collect() }
+    /// What takes clicks before gpui has laid the bubble out: the surfaces, the badges and the key hints.
+    pub fn solid(&self, sel: usize) -> Vec<Rect> {
+        self.surfaces.iter().copied().chain(self.badges().into_iter().map(|(_, r)| r)).chain(self.key_hints(sel)).collect()
+    }
 }
 pub static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 pub fn geom() -> Option<Geom> { GEOM.lock().unwrap().clone() }
@@ -283,21 +292,21 @@ mod tests {
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
         assert_eq!(l.kind, BubbleLayout::Horizontal);
         assert_eq!(l.label_w, vec![41.0, 61.0, 90.0]);
-        // [shadow margin 10][group border+pad 4][border+pad][Tab 30][gap 8][label][pad+border]; the others carry an
-        // 18 px number keycap, 4 px apart
-        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 101.0, 32.0), Rect::new(119.0, 14.0, 109.0, 32.0), Rect::new(232.0, 14.0, 138.0, 32.0)]);
-        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 364.0, 40.0)]);
-        assert_eq!((l.w, l.h, l.margin), (384.0, 60.0, 10.0));
-        assert_eq!(l.text_x(), 63.0, "the first label, after the Tab keycap");
+        // [shadow margin 10][group border+pad 4][border+pad 11][label][pad+border 11], 4 px apart: the key hints hang on
+        // the corners
+        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 63.0, 32.0), Rect::new(81.0, 14.0, 83.0, 32.0), Rect::new(168.0, 14.0, 112.0, 32.0)]);
+        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 274.0, 40.0)]);
+        assert_eq!((l.w, l.h, l.margin), (294.0, 60.0, 10.0));
+        assert_eq!(l.text_x(), 25.0, "the first label, after the button's border and padding");
         assert_eq!(plain(&[40.0], 1392.0, BubbleLayout::Vertical).text_x(), 27.0, "margin, panel border and padding, row padding");
     }
     #[test] fn a_long_label_or_a_narrow_screen_stacks_the_bubble() {
         let long = plain(&[40.0, 241.0], 1392.0, BubbleLayout::Horizontal);
         assert_eq!(long.kind, BubbleLayout::Vertical, "a label past STRIP_LABEL_MAX");
         assert_eq!(plain(&[40.0, 240.0], 1392.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal, "at the limit");
-        // three 200 px labels: 3 * (22 + 8 + 200) + 30 + 2 * 18 + 2 * 4 + 2 * 4 + 2 * 10 = 792 px
-        assert_eq!(plain(&[200.0; 3], 792.0, BubbleLayout::Horizontal).w, 792.0);
-        let narrow = plain(&[200.0; 3], 791.0, BubbleLayout::Horizontal);
+        // three 200 px labels: 3 * (22 + 200) + 2 * 4 + 2 * 4 + 2 * 10 = 702 px
+        assert_eq!(plain(&[200.0; 3], 702.0, BubbleLayout::Horizontal).w, 702.0);
+        let narrow = plain(&[200.0; 3], 701.0, BubbleLayout::Horizontal);
         assert_eq!(narrow.kind, BubbleLayout::Vertical, "the strip is one px wider than the screen allows");
         assert_eq!(narrow.w, CHROME_W + 200.0 + 2.0 * SHADOW_M);
         assert_eq!(plain(&[40.0], 1392.0, BubbleLayout::Vertical).kind, BubbleLayout::Vertical, "the setting");
@@ -324,13 +333,14 @@ mod tests {
         assert_eq!(rows.hit(150.0, 100.0 + INSET + 3.0 * ROW_H + 1.0), Some(Some(2)));
         assert_eq!(rows.hit(150.0, 100.0 + SHADOW_M + 2.0), Some(None), "the panel's padding");
         assert_eq!(rows.hit(150.0, 101.0), None, "the shadow margin: the click is the app's");
-        // strip at 1.5x (Windows DPI): one group at x 10..374, y 10..50 logical; buttons at x 14..115, 119..228, 232..370
+        // strip at 1.5x (Windows DPI): one group at x 10..284, y 10..50 logical; buttons at x 14..77, 81..164, 168..280
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
-        let strip = Geom { frame: Rect::new(0.0, 0.0, 576.0, 90.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0) };
+        let strip = Geom { frame: Rect::new(0.0, 0.0, 441.0, 90.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0) };
         let at = |x: f64, y: f64| strip.hit(x * 1.5, y * 1.5);
-        assert_eq!((at(20.0, 20.0), at(114.0, 20.0), at(150.0, 20.0), at(300.0, 20.0)), (Some(Some(0)), Some(Some(0)), Some(Some(1)), Some(Some(2))));
-        assert_eq!(at(117.0, 20.0), Some(None), "the gap between two buttons of a group");
-        assert_eq!(at(300.0, 12.0), Some(None), "the group's padding above the buttons");
+        assert_eq!((at(20.0, 20.0), at(76.0, 20.0), at(100.0, 20.0), at(250.0, 20.0)), (Some(Some(0)), Some(Some(0)), Some(Some(1)), Some(Some(2))));
+        assert_eq!(at(79.0, 20.0), Some(None), "the gap between two buttons of a group");
+        assert_eq!(at(250.0, 12.0), Some(None), "the group's padding above the buttons");
+        assert_eq!(at(88.0, 9.0), Some(None), "a key hint's overhang applies nothing");
         assert_eq!(at(300.0, 5.0), None, "the shadow margin: the click is the app's");
         assert_eq!(at(378.0, 20.0), None, "right of the group");
     }
@@ -376,34 +386,47 @@ mod tests {
     #[test] fn a_strip_hangs_each_badge_on_its_buttons_corner() {
         let l = layout(&[40.2, 61.0, 90.0], &[TH, TYPO, TYPO], 1392.0, BubbleLayout::Horizontal);
         // a box per run, GROUP_GAP_X (8) apart, inside the 10 px shadow margin
-        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 109.0, 40.0), Rect::new(127.0, 10.0, 259.0, 40.0)]);
-        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 101.0, 32.0), Rect::new(131.0, 14.0, 109.0, 32.0), Rect::new(244.0, 14.0, 138.0, 32.0)]);
+        assert_eq!(l.surfaces, vec![Rect::new(10.0, 10.0, 71.0, 40.0), Rect::new(89.0, 10.0, 207.0, 40.0)]);
+        assert_eq!(l.cells, vec![Rect::new(14.0, 14.0, 63.0, 32.0), Rect::new(93.0, 14.0, 83.0, 32.0), Rect::new(180.0, 14.0, 112.0, 32.0)]);
         // 6 px above each button and 4 px past it: the second badge ends where the third button starts
-        assert_eq!(l.badges(0), vec![(Reason::Layout(InputLang::Thai), Rect::new(103.0, 8.0, 16.0, 16.0)),
-            (Reason::Typo, Rect::new(228.0, 8.0, 16.0, 16.0)), (Reason::Typo, Rect::new(370.0, 8.0, 16.0, 16.0))]);
-        assert_eq!((l.w, l.h), (396.0, 60.0));
-        // the highlight on the second: the Tab keycap (12 px wider than a digit) moves there, and the first group shrinks
-        assert_eq!(l.cells_at(1), vec![Rect::new(14.0, 14.0, 89.0, 32.0), Rect::new(119.0, 14.0, 121.0, 32.0), Rect::new(244.0, 14.0, 138.0, 32.0)]);
-        assert_eq!(l.surfaces_at(1), vec![Rect::new(10.0, 10.0, 97.0, 40.0), Rect::new(115.0, 10.0, 271.0, 40.0)]);
-        assert_eq!(l.badges(1).iter().map(|(_, b)| b.x).collect::<Vec<_>>(), vec![91.0, 228.0, 370.0]);
+        assert_eq!(l.badges(), vec![(Reason::Layout(InputLang::Thai), Rect::new(65.0, 8.0, 16.0, 16.0)),
+            (Reason::Typo, Rect::new(164.0, 8.0, 16.0, 16.0)), (Reason::Typo, Rect::new(280.0, 8.0, 16.0, 16.0))]);
+        assert_eq!((l.w, l.h), (306.0, 60.0));
+        // the key hints on the top-left corners: Tab on the highlighted button, its number on the others; the third
+        // button's starts where the second's badge ends
+        assert_eq!(l.key_hints(0), vec![Rect::new(14.0, 7.0, 26.0, 14.0), Rect::new(93.0, 7.0, 14.0, 14.0), Rect::new(180.0, 7.0, 14.0, 14.0)]);
+        assert_eq!(l.key_hints(1).iter().map(|k| k.w).collect::<Vec<_>>(), vec![14.0, 26.0, 14.0], "the highlight moves only the Tab keycap");
         let window = Rect::new(0.0, 0.0, l.w, l.h);
-        assert!(l.badges(0).iter().chain(&l.badges(2)).all(|(_, b)| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "no badge is clipped");
-        assert_eq!(l.text_x(), 63.0);
+        assert!(l.badges().iter().map(|(_, b)| *b).chain(l.key_hints(2)).all(|b| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "nothing is clipped");
+        assert_eq!(l.text_x(), 25.0);
         let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0) };
-        assert_eq!(g.hit(110.0, 9.0), Some(None), "the badge's overhang applies nothing");
+        assert_eq!(g.hit(70.0, 9.0), Some(None), "the badge's overhang applies nothing");
         assert_eq!(g.hit(20.0, 30.0), Some(Some(0)));
-        assert_eq!(g.hit(123.0, 30.0), None, "between the groups: the app's");
+        assert_eq!(g.hit(85.0, 30.0), None, "between the groups: the app's");
         assert_eq!(g.hit(50.0, 5.0), None, "the shadow margin: the app's");
-        // three 200 px labels fill 792 px as one group; as three, each group's border, padding and gap take 16 px more
-        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 816.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal);
-        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 815.0, BubbleLayout::Horizontal).kind, BubbleLayout::Vertical);
+        // three 200 px labels fill 702 px as one group; as three, each group's border, padding and gap take 16 px more
+        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 726.0, BubbleLayout::Horizontal).kind, BubbleLayout::Horizontal);
+        assert_eq!(layout(&[200.0; 3], &[TH, TYPO, None], 725.0, BubbleLayout::Horizontal).kind, BubbleLayout::Vertical);
+    }
+    #[test] fn a_short_label_keeps_its_key_hint_clear_of_its_badge() {
+        // "ok": the button widens so the Tab keycap and the corner badge never meet
+        let l = layout(&[14.0], &[TYPO], 1392.0, BubbleLayout::Horizontal);
+        assert_eq!(l.cells[0].w, OPT_MIN_W);
+        let (k, b) = (l.key_hints(0)[0], l.badges()[0].1);
+        assert!(k.right() < b.x, "Tab keycap {k:?} clear of badge {b:?}");
+    }
+    #[test] fn accent_text_stays_readable() {
+        assert!(!dark_text_on(ACCENT_FALLBACK), "white on blue");
+        assert!(dark_text_on((1.0, 0.8, 0.0)), "dark on yellow");
+        assert!(!dark_text_on((0.55, 0.55, 0.55)), "white on graphite");
     }
     #[test] fn rows_keep_a_badge_column_when_any_row_has_a_badge() {
         let l = layout(&[100.0, 180.0, 50.0], &[TH, TYPO, None], 1400.0, BubbleLayout::Vertical);
         // CHROME_W 92 + the badge column (16 + 8) + the widest label, in the 10 px shadow margin; each badge centred
         // before the key hint
         assert_eq!((l.w, l.h, l.label_w[0]), (316.0, 124.0, 180.0));
-        assert_eq!(l.badges(1), vec![(Reason::Layout(InputLang::Thai), Rect::new(215.0, 24.0, 16.0, 16.0)), (Reason::Typo, Rect::new(215.0, 54.0, 16.0, 16.0))]);
+        assert_eq!(l.badges(), vec![(Reason::Layout(InputLang::Thai), Rect::new(215.0, 24.0, 16.0, 16.0)), (Reason::Typo, Rect::new(215.0, 54.0, 16.0, 16.0))]);
+        assert!(l.key_hints(0).is_empty(), "rows keep their key hints inline");
         assert_eq!(plain(&[100.0, 180.0, 50.0], 1400.0, BubbleLayout::Vertical).w, 292.0, "no badges, no column");
     }
 }
