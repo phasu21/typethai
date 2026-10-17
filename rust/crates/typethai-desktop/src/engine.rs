@@ -767,7 +767,8 @@ impl Engine {
             if held >= self.opts.tab_hold {
                 // starting it lets Tab go: keep it Spent so the repeats and the release type nothing
                 let mut a: Vec<Action> = self.hold_off().into_iter().collect();
-                let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; a.extend(o.actions); return a
+                // Spent first, as for Tab+R: a hotkey while Tab is Held would count as its release and type the Tab
+                self.tab = TabChord::Spent; let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; a.extend(o.actions); return a
             }
             if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + self.opts.tab_hold }))) }
         }
@@ -2186,6 +2187,21 @@ mod tests {
         log.push((None, tab(&mut e)));
         assert_eq!(screen(&log), "is this ");
     }
+    #[test] fn held_tab_fixes_the_word_being_typed() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
+        let mut log = vec![];
+        feed(&mut e, &mut log, "is ths");
+        log.push((None, e.on_key(Key::Tab)));
+        let a = tick_after(&mut e, TAB_HOLD); let id = match a.iter().find_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }) { Some(id) => id, None => panic!("{a:?}") };
+        assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "the hold types no Tab: {a:?}");
+        log.push((None, Outcome { swallow: false, actions: a.clone() }));
+        log.push((None, Outcome { swallow: false, actions: e.on_reply(captured(id, Captured::NoSelection)) }));
+        assert_eq!(labels(&e), ["this", "the"]);
+        log.push((None, e.on_key(Key::TabUp)));
+        log.push((None, tab(&mut e)));
+        assert_eq!(screen(&log), "is this", "the fix replaces the word, nothing before it");
+    }
     #[test] fn nothing_selected_fixes_the_spelling_of_the_buffer() {
         let Some(mut e) = engine() else { return };
         e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
@@ -2434,6 +2450,7 @@ mod tests {
         assert_eq!(e.on_key(Key::Tab), SWALLOWED);
         assert!(!tick_after(&mut e, TAB_HOLD - Duration::from_millis(1)).iter().any(|a| matches!(a, Action::Rewrite(_))), "not yet");
         let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))), "{a:?}");
+        assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "the hold types no Tab: {a:?}");
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat after the rewrite types nothing");
         assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the release types no Tab");
         // over the bubble, instead of applying a row on release
