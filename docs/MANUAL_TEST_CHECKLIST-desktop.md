@@ -125,6 +125,8 @@
 - [ ] Settings → Word suggestions → Show it again after: pick 5 s, stop typing in the same field: the pill stays away until ~5 s. Quit and relaunch: the choice is kept (prefs.json `"badge_idle_ms": 5000`), and an older prefs.json opens at 2 s.
 - [ ] Click on a page, a canvas or another app: the pill goes (no pill where there is no text field, and none in a password field).
 - [ ] Clicking a second field in the same window moves it to the new caret.
+- [ ] With the pill up, click into another text field (another app too): the pill jumps to that caret within ~a tenth of a second, without a flash.
+- [ ] In a terminal (TUI app), press Enter while the pill is up: it goes on the key and comes back after the pause, on the *new* prompt line. `typethai log` prints `typethai: preview anchor ...` whenever the pill moves: compare its caret rect with the real one if a pill still reads as misplaced.
 - [ ] The pill never takes focus and clicks pass through it (macOS).
 - [ ] ⌃⌥P (or the tray menu) while the pill is up: it goes, and does not come back until typeThai is unpaused.
 - [ ] Windows (Notepad): the same, including a click from the browser into Notepad and back.

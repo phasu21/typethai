@@ -1,5 +1,21 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.9**
+- **The input language shows before you type.** Focus a text field and the 🇹🇭 ไทย / 🇺🇸 EN flag sits above the caret and
+  stays until your first key, so the language you are about to type is in sight; it comes back on its own after a pause
+  in typing. Settings → Word suggestions → *Show it again after* chooses the pause (1 to 10 seconds, 2 by default).
+  As before, it keeps out of password fields, non-text fields and the bubble's way.
+- **Next-word prediction.** Beside the dictionary completions, a small model of *your own* typing finishes the word
+  from the words around it, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or
+  a word you misspell the same way twice). It learns from the lines you finish and stays on your machine. Settings →
+  Word suggestions → *Predict the next word* turns it off; *Forget learned words* clears it.
+- Settings → Word suggestions now shows how long a pause brings the input language back, next to the switch for it.
+
+**Fixed in 0.5.9**
+- The input-language flag is placed where the caret really is. Right after Enter in a terminal it used to land a line
+  off (the caret is read before the app lays the new line out), and it stayed on the old spot when you moved to another
+  text field. It now waits for the caret to settle and follows it.
+
 **New in 0.5.8**
 - **Pick with arrow keys is on by default.** With the bubble up, ↑ moves into it, ←/→ choose, ↑ again or Enter
   applies; until ↑ the arrow keys move the cursor as before.

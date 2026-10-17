@@ -524,14 +524,16 @@ fn offer_badge(st: &mut State, pin: bool) -> bool {
     let at = if pin { crate::badge::anchor_for(on, bubble, blocked, badge_anchor) } else { crate::badge::anchor_for(on, bubble, blocked, || unsafe { anchor() }) };
     match at { Some(anchor) => { send(UiMsg::Badge { lang, anchor, pin }); true } None => false }
 }
-/// The last preview anchor logged: a caret that has not moved keeps the log quiet.
-static LAST_BADGE: std::sync::Mutex<Option<Anchor>> = std::sync::Mutex::new(None);
-/// The caret the preview sits on. The keyword is logged whenever it moves, so a pill that reads as misplaced can be
-/// checked against what Accessibility reported (`--probe-caret` shows the same for a moment on screen).
+/// The last caret / field the preview was placed from (the mouse is part of an `Anchor` but moves constantly, so it is
+/// left out of the comparison).
+static LAST_BADGE: std::sync::Mutex<Option<(Option<Rect>, Option<Rect>)>> = std::sync::Mutex::new(None);
+/// The caret the preview sits on. The line is logged whenever it moves, so a pill that reads as misplaced can be
+/// checked against what Accessibility reported (`--probe-caret` shows the same on screen for a moment).
 fn badge_anchor() -> Anchor {
     let (a, info) = caret_anchor();
     let mut last = LAST_BADGE.lock().unwrap();
-    if *last != Some(a) { *last = Some(a); eprintln!("typethai: preview anchor {info}") }
+    let seen = (a.caret, a.field);
+    if *last != Some(seen) { *last = Some(seen); eprintln!("typethai: preview anchor {info}") }
     a
 }
 fn service_settings(st: &mut State) {
@@ -549,7 +551,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         let now = std::time::Instant::now();
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         if st.gate.refresh_due(now, false) { field_refresh(st); }
-        if let Some((t, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
+        if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
         if bridge::REQ_BADGE.lock().unwrap().take().is_some() { offer_badge(st, false); }
         // a few AX reads after a key (the first is often still the pre-keystroke caret), and one when the preview goes
         // up: the app lays the caret out under it, and an app that scrolls (a terminal) moves it while the pill shows

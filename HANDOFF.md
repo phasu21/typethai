@@ -137,8 +137,15 @@ completion frequencies).
 - Policy in the engine (`focus_moved` / `on_keystroke` / `on_idle`, `Action::Badge(bool)`), so it is unit-tested;
   `Engine::reset()` deliberately does *not* touch it (a click re-asks focus a moment later, and hiding first would blink).
   `Shown::pinned` / `unpin` hold the state on the UI side; `UiMsg::Badge { …, pin }` and `UiMsg::UnpinBadge` carry it.
-- Focus verdicts: macOS does one synchronous `focus_check()` in the timer, `field::SETTLE` (40 ms) after a click, an
-  app switch or a focus key (`arm_focus_look` → `focus_look`); `offer_badge` looks again inside its `blocked` closure.
+- Focus verdicts: macOS does one synchronous `focus_check()` in the timer, `field::SETTLE` (40 ms) after a click or an
+  app switch (`arm_focus_look` → `focus_look`); a look armed by a *key* (Tab, ⌘K, Enter) only calls
+  `Engine::set_field`: the caret under it is not laid out yet and the keystroke is typing, so the preview waits for the
+  pause instead of pinning at a stale line (a terminal scrolling on Enter showed exactly that, off by a line).
+  `offer_badge` looks again inside its `blocked` closure.
+- The preview follows the caret: `Action::Badge(true)` arms the same 3-sample `arm_caret_follow` the bubble uses, and
+  the timer sends `UiMsg::MoveBadge` while `Engine::badge_shown()` (a click or a switch arms it too, so focusing
+  another field moves the pill there). `badge_anchor()` logs `typethai: preview anchor …` whenever that rect changes.
+  Windows has no keystroke-driven follow; its window switch and mouse hook re-place the pill directly.
   Windows uses cheap signals (caret / known text app / the gate's cached verdict) and full UIA only in `offer_badge`.
   The Windows path type-checks (`cargo check --target x86_64-pc-windows-msvc`) but is not run on Windows yet.
 - `--simulate` has `<Focus>` / `<Blur>` and any key now counts as a keystroke, so the whole policy is smoke-testable;
