@@ -1,5 +1,16 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.11**
+- **Mistyped English on the Thai layout is offered as what you meant.** With Thai active, English typed with a slip is
+  offered back as the corrected word, not the raw keys: the row now carries the spelling the spell checker (macOS) or
+  the completer's keyboard-aware distance picks (`know` typed as `าืนไ` roughly). A word one keyboard slip away is
+  offered even when the raw keys are not a known word, so long as the model reads the keys as English at all.
+- **The next word now draws on your own typing.** The *Suggest the next word* rows still lead with the built-in word
+  pairs; the personal model (`Finish words from my typing`, renamed from *Predict the next word*) adds the word it
+  expects to follow when it is not already one of them — a name, jargon or a habit of yours the built-in pairs do not
+  know. Both sources are one feature with one switch (*Suggest the next word*); the model's own switch decides whether
+  the model is used at all.
+
 **New in 0.5.10**
 - **The input language shows before you type.** Focus a text field and the 🇹🇭 ไทย / 🇺🇸 EN flag sits above the caret and
   stays until your first key, so the language you are about to type is in sight; it comes back on its own after a pause
