@@ -116,14 +116,14 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
-| **Hold Tab** (half a second) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
+| **Hold Tab** (half a second; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
 | **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
 default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
-(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows under the
+(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows over the
 caret when it switches (**Show the input language**, on by default; prefs.json `"input_badge": false` turns it off), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 

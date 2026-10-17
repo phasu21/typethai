@@ -1,5 +1,17 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.7**
+- **Input language at the caret.** When the input source switches, by you or by typeThai after a conversion, a small
+  flag with ไทย or EN shows just above the caret for a moment. Settings → Word suggestions → *Show the input language*.
+- **Holding Tab shows its progress.** Held past a tap, a *Rewrite* pill (or, over the bubble, the Tab key) fills until
+  the ⌃⌥R options open; let go early and it is just a Tab.
+- **Choose how long to hold Tab**: Settings → AI rewrite → *Hold Tab for*, from 200 ms to 1 s (500 ms by default).
+- **Quicker suggestions**: *Pause before suggesting* now also offers 50 and 100 ms.
+
+**Fixed in 0.5.7**
+- Holding Tab for the ⌃⌥R options typed a Tab first, so applying a fix could replace the wrong letters (`nw` became
+  `ew` instead of `new`).
+
 **Fixed in 0.5.6**
 - Suggestions show again in Electron apps (terminals, chat and editor apps built on Electron) when they hide their
   text fields from macOS: 0.5.5 took that for "no text field" and offered nothing.
