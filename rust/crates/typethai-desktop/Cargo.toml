@@ -1,6 +1,6 @@
 [package]
 name = "typethai-desktop"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 description = "typeThai: fix Thai typed on the wrong keyboard layout (macOS + Windows)"
 repository = "https://github.com/phasu21/typethai"

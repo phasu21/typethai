@@ -1,5 +1,17 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.8**
+- **Pick with arrow keys is on by default.** With the bubble up, ↑ moves into it, ←/→ choose, ↑ again or Enter
+  applies; until ↑ the arrow keys move the cursor as before.
+- **Faster by default**: suggestions after a 50 ms pause and the ⌃⌥R options after holding Tab for 200 ms, the
+  quickest choices in Settings. Settings you have already saved keep their values.
+- **English typed on the Thai layout is offered more often.** A known English word of 4+ letters (`stab`, typed as
+  หะฟิ) is offered after a pause or at Space even when it is not certain enough to show while you type.
+
+**Fixed in 0.5.8**
+- macOS: suggestions no longer come up in apps built on Electron or Chrome when no text field has focus (a settings
+  or welcome page), or on the Finder desktop.
+
 **New in 0.5.7**
 - **Input language at the caret.** When the input source switches, by you or by typeThai after a conversion, a small
   flag with ไทย or EN shows just above the caret for a moment. Settings → Word suggestions → *Show the input language*.
