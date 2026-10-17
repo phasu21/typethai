@@ -25,9 +25,10 @@ impl Gate {
     pub fn answer(&mut self, f: Option<Field>, now: Instant) { self.inflight = false; if let Some(f) = f { self.field = Some(f); self.at = Some(now); self.touched = None; } }
     /// Keys go to the engine: a caret (or a known text app) always opens; unknown opens unless fullscreen.
     pub fn open(&self, caret: bool, fullscreen: impl FnOnce() -> bool) -> bool { caret || match self.field { Some(Field::Text) => true, Some(Field::NotText) => false, _ => !fullscreen() } }
-    /// Classify synchronously before this key? Open: at each word start (shared with the password check). Closed:
-    /// only after a trigger nothing has answered yet, so a closed gate never queries per key.
-    pub fn must_ask(&self, word_start: bool, open: bool) -> bool { self.field.is_none() || if open { word_start } else { self.touched.is_some() && !self.inflight } }
+    /// Classify synchronously before this key? Unknown focus, or an open gate at each word start (shared with the
+    /// password check). Never while closed: the hooks share one thread, and a key waiting on a query there holds up
+    /// every mouse move (a game, clicking and pressing keys); a trigger is re-checked off-thread (`refresh_due`).
+    pub fn must_ask(&self, word_start: bool, open: bool) -> bool { self.field.is_none() || (open && word_start) }
     /// Closed: send an off-thread re-check (marks it in flight). From the timer (`key` false) after a settled trigger;
     /// from a key also when the verdict is older than `REVERIFY`.
     pub fn refresh_due(&mut self, now: Instant, key: bool) -> bool {
@@ -109,10 +110,12 @@ mod tests {
         let t = Instant::now(); let mut g = Gate::default(); g.answer(Some(Field::Text), t);
         assert!(g.must_ask(true, true)); assert!(!g.must_ask(false, true));
     }
-    #[test] fn touch_while_closed_asks_until_answered() {
+    #[test] fn touch_while_closed_rechecks_off_thread_only() {
+        // a click then a key in a game: no query on the key, the timer sends one after SETTLE
         let t = Instant::now(); let mut g = closed(t); g.touch(t);
-        assert!(g.must_ask(true, false));
-        g.answer(Some(Field::Text), ms(t, 5)); assert!(g.open(false, || true)); assert!(!g.must_ask(false, true));
+        assert!(!g.must_ask(true, false)); assert!(!g.refresh_due(ms(t, 10), true));
+        assert!(g.refresh_due(ms(t, 50), false));
+        g.answer(Some(Field::Text), ms(t, 60)); assert!(g.open(false, || true)); assert!(!g.must_ask(false, true));
     }
     #[test] fn timer_refreshes_after_settle_once() {
         let t = Instant::now(); let mut g = closed(t); g.touch(t);
