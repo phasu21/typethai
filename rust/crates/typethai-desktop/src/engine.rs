@@ -60,8 +60,8 @@ pub enum Key {
     /// Ctrl+1..3 (Control alone): applies that row while the bubble is up and `Options::pick_ctrl` is on, otherwise
     /// navigation.
     PickRow(usize),
-    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Up moves into a visible bubble, then
-    /// Left/Right move the selection, Up again applies it and Down leaves.
+    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Left/Right move the selection of a visible
+    /// bubble (and move into it, like Up), Up or Enter in it applies and Down leaves.
     Arrow(Arrow),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,8 +224,9 @@ pub struct Options {
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
-    /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
-    /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
+    /// The arrow keys can pick from the bubble, like Windows text suggestions but without Up first: while it shows,
+    /// Left/Right pick (Up moves into it too), Enter or Up then applies, Down / Esc / typing leave. Off: plain arrows
+    /// are always navigation.
     pub pick_arrows: bool,
     /// The input-language badge at the caret when the input source changes; read by the platform layer.
     pub input_badge: bool,
@@ -429,9 +430,9 @@ impl Engine {
             || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
             || (self.bubble_visible() && self.is_arrow_key(k))
     }
-    /// Up while the bubble can be entered; every arrow and Enter once in it.
+    /// Up, Left and Right while the bubble can be entered; every arrow and Enter once in it.
     fn is_arrow_key(&self, k: &Key) -> bool {
-        (self.opts.pick_arrows && *k == Key::Arrow(Arrow::Up)) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
+        (self.opts.pick_arrows && matches!(k, Key::Arrow(Arrow::Up | Arrow::Left | Arrow::Right))) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -589,6 +590,8 @@ impl Engine {
     fn on_arrow(&mut self, a: Arrow) -> Outcome {
         if !self.bubble_visible() || !self.is_arrow_key(&Key::Arrow(a)) { return self.on_key_inner(Key::Nav) }
         let acts = match (self.in_bubble, a) {
+            (false, Arrow::Left) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.prev())] }
+            (false, Arrow::Right) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.next())] }
             (false, _) => { self.in_bubble = true; vec![Action::Focus(true)] }
             (true, Arrow::Up) => return self.accept_held(self.sel.idx),
             (true, Arrow::Left) => vec![Action::Select(self.sel.prev())],
@@ -1583,12 +1586,17 @@ mod tests {
         assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Up)));
         let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]); assert_eq!(e.buffer(), "");
     }
+    #[test] fn left_right_pick_without_up_first() {
+        let Some((mut e, n)) = railed() else { return };
+        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Down)));
+        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true), Action::Select(1 % n)]);
+        assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "Enter applies once an arrow picked");
+        // Down is still navigation outside the bubble
+        let Some((mut e, _)) = railed() else { return };
+        assert!(!e.on_key(Key::Arrow(Arrow::Down)).swallow); assert!(!e.bubble_visible());
+    }
     #[test] fn up_enters_the_bubble_and_left_right_move() {
         let Some((mut e, n)) = railed() else { return };
-        // before Up, Left/Right move the caret: the word ends, the bubble goes
-        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Up))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
-        let o = e.on_key(Key::Arrow(Arrow::Left)); assert!(!o.swallow); assert!(!e.bubble_visible());
-        let Some((mut e, _)) = railed() else { return };
         let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true)]);
         assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
         let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Select(1 % n)]);
@@ -1596,7 +1604,7 @@ mod tests {
         // Down leaves; the bubble and the word stay
         let o = e.on_key(Key::Arrow(Arrow::Down)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(false)]);
         assert!(e.bubble_visible()); assert_eq!(e.buffer(), "l;ylfu");
-        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(!o.swallow); assert!(!e.bubble_visible());
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "out again: Enter is an ordinary Enter");
     }
     #[test] fn up_again_applies() {
         let Some((mut e, _)) = railed() else { return };
@@ -1619,15 +1627,14 @@ mod tests {
         let Some((mut e, _)) = railed() else { return };
         e.on_key(Key::Arrow(Arrow::Up));
         let o = e.on_key(Key::Char('a')); assert!(!o.swallow); assert_eq!(o.actions.first(), Some(&Action::Focus(false)));
-        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
-        assert!(!e.on_key(Key::Arrow(Arrow::Left)).swallow);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
     }
     #[test] fn tab_still_applies_inside_the_bubble() {
         let Some((mut e, n)) = railed() else { return };
         if n < 2 { return }
-        e.on_key(Key::Arrow(Arrow::Up)); e.on_key(Key::Arrow(Arrow::Right));
+        e.on_key(Key::Arrow(Arrow::Right));
         let o = tab(&mut e); assert!(o.swallow); assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. }))); assert!(!e.bubble_visible());
-        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "a new bubble starts outside");
+        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "no bubble: Left moves the caret");
     }
     #[test] fn suggestion_shows_before_space() {
         let Some(mut e) = engine() else { return };

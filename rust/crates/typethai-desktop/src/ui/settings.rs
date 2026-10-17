@@ -33,6 +33,8 @@ enum KeyState { Checking, Missing, Saved, Failed(String) }
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "Off"), (CompleteMode::Pause, "After a pause"), (CompleteMode::Typing, "While typing")];
 const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "Tab"), (AcceptKeys::TabOrSpace, "Tab or Space")];
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "Horizontal"), (BubbleLayout::Vertical, "Vertical")];
+/// "Pick with": (pick_arrows, pick_ctrl). Both off (only from a hand-edited prefs.json) shows no choice.
+const PICK: [((bool, bool), &str); 3] = [((true, false), "Arrow keys"), ((false, true), "Ctrl+1–3"), ((true, true), "Arrow keys and Ctrl+1–3")];
 fn delay_label(ms: u64) -> SharedString { format!("{ms} ms").into() }
 const KEY_STORE: &str = if cfg!(windows) { "Credential Manager" } else { "the Keychain" };
 
@@ -295,9 +297,10 @@ impl SettingsView {
                 move |cx| BUBBLE.iter().find(|(b, _)| *b == read.read(cx).snap.bubble).map_or("", |(_, l)| l).into(),
                 move |label, cx| if let Some((b, _)) = BUBBLE.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_bubble(*b, cx)) }) };
         let pick = { let (read, write) = (view.clone(), view.clone());
-            SettingField::switch(move |cx| read.read(cx).snap.pick_ctrl, move |on, cx| write.update(cx, |v, cx| v.set_pick_ctrl(on, cx))) };
-        let arrows = { let (read, write) = (view.clone(), view.clone());
-            SettingField::switch(move |cx| read.read(cx).snap.pick_arrows, move |on, cx| write.update(cx, |v, cx| v.set_pick_arrows(on, cx))) };
+            let options = PICK.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+            SettingField::dropdown(options,
+                move |cx| { let s = &read.read(cx).snap; PICK.iter().find(|(p, _)| *p == (s.pick_arrows, s.pick_ctrl)).map_or("", |(_, l)| l).into() },
+                move |label, cx| if let Some(&(p, _)) = PICK.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_pick(p, cx)) }) };
         let badge = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.input_badge, move |on, cx| write.update(cx, |v, cx| v.set_input_badge(on, cx))) };
         let learn = { let (read, write) = (view.clone(), view.clone());
@@ -312,8 +315,7 @@ impl SettingsView {
                 Some(SettingItem::new("Bubble layout", layout).description("Horizontal puts the suggestions side by side. Long suggestions and AI rewrite results are always stacked.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
                 Some(SettingItem::new("Show the input language", badge).description("When the keyboard switches between Thai and English, a flag shows by the caret for a moment.")),
-                Some(SettingItem::new("Pick with Ctrl+1–3", pick).description("While the bubble is up, Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion. Off, those keys reach the app as usual.")),
-                Some(SettingItem::new("Pick with arrow keys", arrows).description("While the bubble is up, press Up to move into it, Left or Right to choose, and Up again or Enter to apply. Down or Esc leaves. Until you press Up, the arrow keys move the cursor as usual.")),
+                Some(SettingItem::new("Pick with", pick).description("Arrow keys: while the bubble is up, Left or Right chooses and Enter or Up applies; Down or Esc leaves. With no bubble the arrows move the cursor. Ctrl+1–3: Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion; otherwise those keys reach the app.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }
@@ -365,16 +367,11 @@ impl SettingsView {
         bridge::push_settings(SettingsCmd::SetInputBadge(on));
         cx.notify();
     }
-    fn set_pick_ctrl(&mut self, on: bool, cx: &mut Context<Self>) {
+    fn set_pick(&mut self, (arrows, ctrl): (bool, bool), cx: &mut Context<Self>) {
         (self.confirm_reset, self.confirm_forget) = (false, false);
-        self.snap.pick_ctrl = on;
-        bridge::push_settings(SettingsCmd::SetPickCtrl(on));
-        cx.notify();
-    }
-    fn set_pick_arrows(&mut self, on: bool, cx: &mut Context<Self>) {
-        (self.confirm_reset, self.confirm_forget) = (false, false);
-        self.snap.pick_arrows = on;
-        bridge::push_settings(SettingsCmd::SetPickArrows(on));
+        (self.snap.pick_arrows, self.snap.pick_ctrl) = (arrows, ctrl);
+        bridge::push_settings(SettingsCmd::SetPickArrows(arrows));
+        bridge::push_settings(SettingsCmd::SetPickCtrl(ctrl));
         cx.notify();
     }
     fn set_tab_hold(&mut self, ms: u64, cx: &mut Context<Self>) {

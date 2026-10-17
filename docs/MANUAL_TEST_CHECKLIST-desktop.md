@@ -69,7 +69,7 @@
 ## v13
 - [ ] Space/Enter never change text (forward and reverse); the bubble shows for the finished word; Tab converts it, ⌃Z undoes.
 - [ ] Reverse: type `i dont know` on the Thai layout + Enter -> bubble `i dont know`; Tab replaces all three words.
-- [ ] Bubble disappears when typing the next word, on Left / Right / Down or a click; Up moves into it (Pick with arrow keys, on by default).
+- [ ] Bubble disappears when typing the next word, on Down or a click; Left / Right pick from it and Up moves into it (Pick with: Arrow keys, the default).
 - [ ] `--probe-caret --secs 20` (from a terminal that has Accessibility): red marker on the caret in TextEdit, Notes, Safari, Chrome, Slack, VS Code, Discord, Cursor; log says source=caret.
 - [ ] Bubble's first-row text starts at the caret x; follows the caret while typing without flicker; flips above near the bottom; external monitor.
 - [ ] v13.1: Backspace mid-word updates the bubble without flicker; Backspace over the space re-enters the word (bubble stays); ⌥⌫ drops one word of a reverse phrase; ⌘⌫ closes.
