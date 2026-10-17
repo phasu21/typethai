@@ -3,7 +3,7 @@
 //! (ES_PASSWORD / UIA IsPassword), switch to Thai/US layout after applying, tray icon.
 use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Arrow, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
 use std::cell::{Cell, RefCell};
-use std::sync::mpsc;
+use std::sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, mpsc, OnceLock};
 use std::time::{Duration, Instant};
 use super::field::{self, Field};
 use windows::core::w;
@@ -13,7 +13,7 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Ole::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -104,10 +104,14 @@ fn field_refresh(st: &mut State) {
     let (tx, rx) = mpsc::channel();
     if st.uia.as_ref().is_some_and(|u| u.send((UiaQuery::Focus, tx)).is_ok()) { st.field_rx = Some(rx) } else { st.gate.answer(None, Instant::now()) }
 }
+/// Takes the off-thread reply if it is in; never waits (see `Gate::must_ask`).
 fn field_collect(st: &mut State) {
     let Some(rx) = st.field_rx.take() else { return };
-    let f = match rx.recv_timeout(Duration::from_millis(60)) { Ok(UiaResp::Focus(_, f)) => Some(f), _ => None };
-    st.gate.answer(f, Instant::now());
+    match rx.try_recv() {
+        Ok(UiaResp::Focus(_, f)) => st.gate.answer(Some(f), Instant::now()),
+        Err(mpsc::TryRecvError::Empty) => st.field_rx = Some(rx),
+        _ => st.gate.answer(None, Instant::now()),
+    }
 }
 unsafe fn class_of(h: HWND) -> String { let mut c = [0u16; 64]; let n = GetClassNameW(h, &mut c) as usize; String::from_utf16_lossy(&c[..n]) }
 /// Foreground window covers its whole monitor without being maximized (borderless / exclusive fullscreen: games).
@@ -332,6 +336,7 @@ unsafe fn service_settings(st: &mut State) {
     let _ = st.tx.send(UiMsg::Settings(snap));
 }
 unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
+    take_click(st);
     if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x} up={up}"); }
     // every keystroke, whatever becomes of it: typing takes the input-language preview down
     if !up { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
@@ -373,6 +378,15 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     run_actions(st, o.actions); st.app.maybe_save();
     o.swallow
 }
+// ---------- mouse thread ----------
+/// The last click the mouse thread saw, for the hook thread: 0 none, 1 elsewhere (the caret may have moved), 2 + i a
+/// left click on bubble row i. Taken before the next key and on the timer, so a key typed after a click sees it first.
+static CLICK: AtomicUsize = AtomicUsize::new(0);
+/// The hook thread, woken (WM_APP) to apply a clicked row right away.
+static HOOK_TID: AtomicU32 = AtomicU32::new(0);
+static MOUSE_TX: OnceLock<mpsc::Sender<UiMsg>> = OnceLock::new();
+/// Runs on its own thread: Windows holds every mouse move until a low-level hook returns, so this one never waits on
+/// the engine or a UI Automation query (a game, clicking and pressing keys, stuttered when it shared their thread).
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let m = wp.0 as u32;
     if code == HC_ACTION as i32 && (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN) {
@@ -380,20 +394,44 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
         // on the badge: swallow (it is not click-through here) and take it down, so the next click reaches the app
         if bridge::BADGE_AT.lock().unwrap().is_some_and(|r| r.contains(pt.x as f64, pt.y as f64)) {
             *bridge::BADGE_AT.lock().unwrap() = None;
-            let _ = with(|st| st.tx.send(UiMsg::HideBadge));
+            if let Some(tx) = MOUSE_TX.get() { let _ = tx.send(UiMsg::HideBadge); }
             return LRESULT(1)
         }
-        let swallow = with(|st| match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
+        match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
             // on the bubble: swallow so it is never clicked/activated; a left click on a row accepts that item
-            Some(row) => { if let (WM_LBUTTONDOWN, Some(i)) = (m, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-            None => { st.gate.touch(Instant::now()); arm_focus_look(st, false);
-                // the click moved the caret: a preview that is up follows it (Windows has no keystroke-driven follow)
-                if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); }
-                let a = st.app.engine.reset(); run_actions(st, a); false }
-        }).unwrap_or(false);
-        if swallow { return LRESULT(1) }
+            Some(row) => {
+                if let (WM_LBUTTONDOWN, Some(i)) = (m, row) {
+                    CLICK.store(2 + i, Ordering::SeqCst);
+                    let _ = PostThreadMessageW(HOOK_TID.load(Ordering::SeqCst), WM_APP, WPARAM(0), LPARAM(0));
+                }
+                return LRESULT(1)
+            }
+            None => CLICK.store(1, Ordering::SeqCst),
+        }
     }
     CallNextHookEx(None, code, wp, lp)
+}
+/// The click the mouse thread saw, on the hook thread.
+unsafe fn take_click(st: &mut State) {
+    match CLICK.swap(0, Ordering::SeqCst) {
+        0 => {}
+        1 => {
+            st.gate.touch(Instant::now()); arm_focus_look(st, false);
+            // the click moved the caret: a preview that is up follows it (Windows has no keystroke-driven follow)
+            if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); }
+            let a = st.app.engine.reset(); run_actions(st, a);
+        }
+        n => { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(n - 2))); run_actions(st, o.actions); }
+    }
+}
+fn mouse_thread() {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
+        let Ok(h) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0) else { eprintln!("SetWindowsHookEx (mouse) failed"); return };
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        let _ = UnhookWindowsHookEx(h);
+    }
 }
 
 // ---------- hook thread ----------
@@ -435,6 +473,7 @@ unsafe fn watch_layout(st: &mut State) {
     if st.layouts.see(fg.0 as usize as u64, layout_is_thai(fg)).is_some() { let _ = offer_badge(st, fg, false); }
 }
 unsafe fn control(st: &mut State) -> bool {
+    take_click(st);
     service_settings(st);
     watch_layout(st);
     while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
@@ -446,24 +485,28 @@ unsafe fn control(st: &mut State) -> bool {
     if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
-/// Low-level hooks are delivered to the installing thread's message loop, so they live on their own thread with the
-/// Engine; gpui owns the main thread. A 25 ms thread timer services tray requests (pause / quit) and the typing pause
-/// that brings up word completions.
+/// Low-level hooks are delivered to the installing thread's message loop, so the keyboard hook lives on its own thread
+/// with the Engine (the mouse hook on another, `mouse_thread`); gpui owns the main thread. A 25 ms thread timer services
+/// tray requests (pause / quit), clicks and the typing pause that brings up word completions.
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
         ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), badge_due: Some((Instant::now(), false)) }));
-        let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
+        HOOK_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
+        let Ok(kb) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };
+        let _ = MOUSE_TX.set(tx.clone());
+        std::thread::Builder::new().name("typethai-mouse".into()).spawn(mouse_thread).expect("mouse thread");
         let timer = SetTimer(None, 0, 25, None);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_TIMER && msg.hwnd.is_invalid() { if with(|st| control(st)).unwrap_or(false) { break } continue }
+            if msg.message == WM_APP && msg.hwnd.is_invalid() { let _ = with(|st| take_click(st)); continue }
             let _ = TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         let _ = KillTimer(None, timer);
-        let _ = UnhookWindowsHookEx(kb); let _ = UnhookWindowsHookEx(ms);
+        let _ = UnhookWindowsHookEx(kb);
     }
 }
 

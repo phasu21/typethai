@@ -5,7 +5,7 @@
 use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Arrow, Boundary, Hotkey, InputLang, Key}, inputsrc::{fits, pick, Source}, keys::mac_keycode_to_us, placement::{Anchor, Rect}, rewrite};
 use core_foundation::base::CFRange;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use super::field::{self, Field};
 use std::sync::atomic::Ordering;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
@@ -249,9 +249,14 @@ fn field_refresh(st: &mut State) {
     let (tx, rx) = std::sync::mpsc::channel();
     if st.ax.send(tx).is_ok() { st.field_rx = Some(rx) } else { st.gate.answer(None, Instant::now()) }
 }
+/// Takes the off-thread reply if it is in; never waits (see `Gate::must_ask`).
 fn field_collect(st: &mut State) {
     let Some(rx) = st.field_rx.take() else { return };
-    st.gate.answer(rx.recv_timeout(Duration::from_millis(60)).ok(), Instant::now());
+    match rx.try_recv() {
+        Ok(f) => st.gate.answer(Some(f), Instant::now()),
+        Err(std::sync::mpsc::TryRecvError::Empty) => st.field_rx = Some(rx),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => st.gate.answer(None, Instant::now()),
+    }
 }
 /// Focused element: system-wide AXFocusedUIElement, else the frontmost app's AXFocusedUIElement.
 unsafe fn focused_element(app: Option<AXUIElementRef>) -> Option<CFType> {
