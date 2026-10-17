@@ -3,9 +3,11 @@
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
 use crate::backspace::{self, DeleteUnit};
 use crate::bridge::BubbleLayout;
+use crate::predict;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, reverse::{RevDecision, Reverse}, corrector::Corrector, detector::Detector, keymap::en_to_th, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
@@ -23,6 +25,15 @@ pub trait Speller {
 }
 /// How much of the line in front of a word the spell checker is given, in bytes.
 const SPELL_CONTEXT: usize = 200;
+/// How much of the line before a word the predictor is given, in characters (the model reads a recent tail).
+const PREDICT_BEFORE_CHARS: usize = 2000;
+/// The query the predictor is asked for a word: the line, the head kept in front of it, and the word being typed, so
+/// the same state is asked once and an answer for a state the user typed past is dropped.
+fn query_key(line: &str, head: &str, tail: &str, thai: bool) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (line, head, tail, thai).hash(&mut h);
+    h.finish()
+}
 /// The end of `text` the spell checker reads as a word's context: its last line, at most `SPELL_CONTEXT` bytes.
 fn spell_context(text: &str) -> &str {
     let line = &text[text.rfind('\n').map_or(0, |i| i + 1)..];
@@ -114,6 +125,9 @@ pub enum Action {
     SwitchInput(InputLang),
     /// Hand to the rewrite worker. Answers come back through `Engine::on_reply`.
     Rewrite(Job),
+    /// Show (true) or take down (false) the input-language preview: focus is in a text field nothing has been typed in
+    /// yet, or typing resumed / focus left it.
+    Badge(bool),
     /// Tab is being held towards `TAB_HOLD`: show how far (None: take it down).
     Hold(Option<Hold>),
 }
@@ -221,22 +235,29 @@ pub struct Options {
     pub tab_hold: Duration,
     /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
     pub learn_words: bool,
+    /// Offer the word the personal word n-gram predicts from the words around it, beside the dictionary completions.
+    /// Off means the model is not even started: nothing is read from or written to its state file.
+    pub predict: bool,
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
     /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
     /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
     pub pick_arrows: bool,
-    /// The input-language badge at the caret when the input source changes; read by the platform layer.
+    /// The input-language badge at the caret when the input source changes; read by the platform layer. The badge also
+    /// pins while focus sits in a text field nothing has been typed in yet, and comes back after `badge_idle`.
     pub input_badge: bool,
+    /// How long a typing pause brings the input-language preview back (`Engine::on_idle`); the platform's timer ticks
+    /// every 25 ms, and Settings offers `BADGE_IDLE_CHOICES_MS`.
+    pub badge_idle: Duration,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
     pub bubble: BubbleLayout,
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
-    live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Duration::from_millis(BADGE_IDLE_DEFAULT_MS), slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
 /// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
 /// 250 ms or more keeps it away until a real pause.
@@ -247,15 +268,19 @@ pub const COMPLETE_IDLE_DEFAULT_MS: u64 = COMPLETE_IDLE_CHOICES_MS[0];
 /// What a key or a pause asks of the completion rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
-    /// A key in `CompleteMode::Typing`: rows nobody waited for, so the completed part needs 3 chars and `complete_conf`.
+    /// A key in `CompleteMode::Typing`: rows nobody waited for, so a Thai tail needs 3 chars and `complete_conf`.
     Typing,
     /// A key while rows from a pause are up: they follow the word in place instead of going until the next pause.
     Refresh,
-    /// The pause in `CompleteMode::Pause`: 2 chars, ungated, and the spell checker tops the rows up.
+    /// The pause in `CompleteMode::Pause`: a Thai tail needs 2 chars, rows are ungated, and the spell checker tops them
+    /// up. An English word is asked from its first letter whatever the ask (see `completion_rows`).
     Pause,
 }
 impl Ask {
-    fn min_len(self) -> usize { if self == Ask::Typing { 3 } else { 2 } }
+    /// The Thai tail the rows read: while typing, nobody waited for the rows, so a tail needs 3 keys; the pause and the
+    /// keys that follow it ask from the first key. English is asked from its first letter whatever the ask (see
+    /// `completion_rows`), and `complete_conf` keeps Typing-mode rows away unless one word really is the favourite.
+    fn min_len(self) -> usize { if self == Ask::Typing { 3 } else { 1 } }
     fn gated(self) -> bool { self == Ask::Typing }
     /// The spell checker takes ~0.85 ms a call, and a slow tap callback gets the tap disabled: keys never call it.
     fn spells(self) -> bool { self == Ask::Pause }
@@ -291,6 +316,10 @@ pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
 /// (`ok` -> นา). Words on the don't-translate list are offered the same way.
 pub const REV_ALWAYS: [&str; 1] = ["ok"];
+/// Pauses Settings offers for the input-language preview to come back after: long enough to read as a real stop, and
+/// past the pause that brings up word completions. The default is the second: two seconds.
+pub const BADGE_IDLE_CHOICES_MS: [u64; 5] = [1000, 2000, 3000, 5000, 10000];
+pub const BADGE_IDLE_DEFAULT_MS: u64 = BADGE_IDLE_CHOICES_MS[1];
 
 pub struct Engine {
     /// Reverse-direction model; None disables it (the engine then ignores keys while Thai is active).
@@ -344,17 +373,32 @@ pub struct Engine {
     pub words: Arc<WordMemory>,
     /// The last Char / Backspace, until `on_idle` has handled the pause after it.
     last_key: Option<Instant>,
+    /// Focus is in a text field (the platform's gate): the input-language preview shows there and nowhere else.
+    focus: bool,
+    /// The preview is up (`Action::Badge(true)`); a key, focus leaving, the bubble or a hold takes it down.
+    badge_up: bool,
+    /// The last keystroke (`on_keystroke`): the preview comes back `Options::badge_idle` after it.
+    typed_at: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
     comp_muted: bool,
     /// The row the spell checker put first at the last pause (what it inserts): a key keeps it first while it still fits.
     spell_lead: Option<String>,
+    /// Contextual word prediction: the personal word n-gram on its own thread (`predict.rs`). None when the setting is
+    /// off or the state could not be opened; the rows it offers are added to the completion rows.
+    pub predict: Option<predict::Predict>,
+    /// The query the predictor was last asked (`key`, the word being typed, and whether the buffer reads as Thai), the
+    /// answer it gave (`key`, its confidence, the whole word), and the word last shown, which stays while the word is
+    /// typed through: a ghost must not move under the user's fingers.
+    pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String)>,
+    /// The finished line has been given to the predictor (a line is learned once).
+    line_learned: bool,
     /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
     pub delete_unit: DeleteUnit,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -369,6 +413,38 @@ impl Engine {
     /// Platform reports the active input source before each key. A change starts a new word (the line and a visible
     /// bubble are kept, so undo / Tab still work right after a conversion switched the layout).
     pub fn set_thai_active(&mut self, on: bool) { if on != self.thai_active { self.thai_active = on; self.word.clear(); self.live_streak = 0; } }
+    /// The platform's gate looked at focus: it is (`text`) or is not in a text field. Focus landing in one shows the
+    /// input-language preview and keeps it up: nothing has been typed there yet, so the language about to be typed is
+    /// what the user needs to see. Focus leaving a text field takes it down.
+    pub fn on_focus(&mut self, text: bool) -> Vec<Action> {
+        self.focus = text; self.typed_at = None;
+        if text { self.badge_show() } else { self.hide_badge() }
+    }
+    /// The platform's gate looked at focus after a keystroke that may have moved it (Tab, ⌘K), so this is not a focus
+    /// the user made: the verdict decides whether the preview may be up at all, and one that is up goes when it is no
+    /// longer a text field. Typing just happened, so nothing is shown on the spot — the pause after it shows the
+    /// preview, on a caret that has settled (the keystroke may have scrolled or laid the field out under it).
+    pub fn set_field(&mut self, text: bool) -> Vec<Action> {
+        self.focus = text;
+        if text { vec![] } else { self.hide_badge() }
+    }
+    /// A keystroke the user made, however the platform then routes it (a converted key, a bypassed one, one of ours):
+    /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field.
+    pub fn on_keystroke(&mut self, now: Instant) -> Vec<Action> {
+        if !self.focus { return vec![] }
+        self.typed_at = Some(now);
+        self.hide_badge()
+    }
+    /// The preview is up (`Action::Badge(true)`): the platform layer keeps it on the caret while it is.
+    pub fn badge_shown(&self) -> bool { self.badge_up }
+    /// Show the input-language preview: one action per time it goes up, and never where the bubble has the window.
+    fn badge_show(&mut self) -> Vec<Action> {
+        if self.badge_up || self.paused || !self.opts.input_badge || self.bubble_visible() { return vec![] }
+        self.badge_up = true; vec![Action::Badge(true)]
+    }
+    /// Take the preview down, if it was up: for typing and for focus leaving (above), and for a pause (the pause
+    /// branch of `on_key`).
+    fn hide_badge(&mut self) -> Vec<Action> { std::mem::take(&mut self.badge_up).then_some(Action::Badge(false)).into_iter().collect() }
     /// What `typed` keys put on screen in the current mode, and what a conversion would replace it with.
     fn screen_of(&self, typed: &str) -> String { if self.thai_active { en_to_th(typed) } else { typed.to_string() } }
     /// Replace `old`, the text right before the caret, with `new`; what they share stays on screen.
@@ -453,8 +529,11 @@ impl Engine {
     }
     fn reset_inner(&mut self) -> Vec<Action> {
         self.settle();
+        self.learn_line();
+        self.line_learned = false;
         self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
+        self.pred_shown = None;
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
     fn decisions(&self, last: &str) -> Vec<TokenDecision> {
@@ -516,7 +595,7 @@ impl Engine {
         items.sort_by_key(|i| match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 });
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
         let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
-            else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); Action::ShowBubble(items) };
+            else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); self.badge_up = false; Action::ShowBubble(items) };
         // one bubble update per key (the live row and the completions under it are worked out one after the other)
         acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
         acts.push(act);
@@ -538,7 +617,7 @@ impl Engine {
         o
     }
     fn on_key_inner(&mut self, k: Key) -> Outcome {
-        if let Key::Hotkey(Hotkey::TogglePause) = k { self.paused = !self.paused; let a = self.reset(); return Outcome { swallow: true, actions: a } }
+        if let Key::Hotkey(Hotkey::TogglePause) = k { self.paused = !self.paused; let mut a = self.reset(); a.extend(self.hide_badge()); return Outcome { swallow: true, actions: a } }
         if self.paused { return Outcome::pass() }
         if self.in_bubble && !self.is_bubble_key(&k) && !matches!(k, Key::Hotkey(_) | Key::TabUp) {
             // any other key leaves the bubble and is handled as usual
@@ -698,14 +777,16 @@ impl Engine {
             SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
             SettingsCmd::SetPickArrows(on) => { let changed = self.opts.pick_arrows != on; self.opts.pick_arrows = on; changed }
             SettingsCmd::SetInputBadge(on) => { let changed = self.opts.input_badge != on; self.opts.input_badge = on; changed }
+            SettingsCmd::SetBadgeIdle(d) => { let changed = self.opts.badge_idle != d; self.opts.badge_idle = d; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
-            SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
+            SettingsCmd::ForgetWords => { self.words = Arc::default(); if let Some(p) = &self.predict { p.forget() } self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.events_since_save += 1; true }
+            SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; changed }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
             SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -780,6 +861,18 @@ impl Engine {
     pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
         let mut acts = vec![];
         if self.paused { return acts }
+        // the model's answer lands a tick or two after the state that asked for it: the rows that state shows take it
+        // in, without the pause's spell checker call
+        let answered = self.poll_prediction();
+        if answered && !self.word.is_empty() && self.opts.complete != CompleteMode::Off
+            && (self.opts.complete == CompleteMode::Typing || self.last_key.is_none())
+        {
+            let up = self.completions_up();
+            if self.opts.complete == CompleteMode::Typing || !up.is_empty() { self.update_completions(false, &up, &mut acts) }
+            else { self.update_completions(true, &[], &mut acts) }
+        }
+        // typing stopped while focus sits in a text field: the input-language preview comes back
+        if self.focus && self.typed_at.is_some_and(|t| now.saturating_duration_since(t) >= self.opts.badge_idle) { acts.extend(self.badge_show()); }
         if let Some(t) = self.tab_at.filter(|_| self.tab_down()) {
             let held = now.saturating_duration_since(t);
             if held >= self.opts.tab_hold {
@@ -792,8 +885,10 @@ impl Engine {
         }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
         self.last_key = None;
-        // English on the Thai layout below the live bar: its reverse row, which also keeps Thai completions away
-        if self.opts.live && self.thai_active && !self.live_visible() && self.rev_suggestable(&self.word) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
+        // English on the Thai layout: its reverse row, which the words just typed may also get. A word whose keys are
+        // always offered back as the English (`ok` -> นา, `REV_ALWAYS`, or a don't-translate word) gets it after the
+        // pause too, not only at the word boundary.
+        if self.opts.live && self.thai_active && !self.live_visible() && (self.rev_wanted(&self.word) || self.rev_suggestable(&self.word)) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
         acts
     }
@@ -802,6 +897,7 @@ impl Engine {
     /// Re-derive the completion rows under the live row (if it is up); stale ones go. `idle`: the pause has elapsed.
     /// `up`: the rows that were on the bubble before this key.
     fn update_completions(&mut self, idle: bool, up: &[BubbleItem], acts: &mut Vec<Action>) {
+        self.poll_prediction();
         let ask = match (self.opts.complete, idle) {
             (CompleteMode::Typing, false) => Some(Ask::Typing),
             (CompleteMode::Pause, false) if !up.is_empty() => Some(Ask::Refresh),
@@ -815,21 +911,91 @@ impl Engine {
         let items: Vec<BubbleItem> = live.into_iter().chain(rows).collect();
         if items != self.bubble { self.show(items, acts) }
     }
+    /// What the line shows in front of `line[..upto]`: every committed word with the boundary after it.
+    fn shown_line(&self, upto: usize) -> String {
+        self.line[self.line_start.min(upto)..upto].iter().map(|c| format!("{}{}", c.shown(), c.after())).collect()
+    }
+    /// What the predictor reads as the line so far: the words of the shown text with the gaps between them
+    /// (`typethai_core::predict`), tail-capped the way the model's own clients cap a query.
+    fn predict_text(&self, upto: usize) -> String {
+        let shown = self.shown_line(upto);
+        let n = shown.chars().count();
+        let tail: String = if n > PREDICT_BEFORE_CHARS { shown.chars().skip(n - PREDICT_BEFORE_CHARS).collect() } else { shown };
+        typethai_core::predict::engine_text(&tail, &self.det.th_dict)
+    }
+    /// Give the finished line to the predictor. A line is given once, when it ends (Enter, or the line is forgotten),
+    /// which is the moment a chat prompt would be submitted: what the user typed within the line reaches the model
+    /// through the words around the word being completed.
+    fn learn_line(&mut self) {
+        if self.line_learned || !self.opts.learn_words || self.predict.is_none() { return }
+        self.line_learned = true;
+        let text = self.predict_text(self.line.len());
+        // an Enter with no words we track (an empty field, a terminal prompt we cannot read) has nothing to learn from
+        if text.is_empty() { return }
+        if let Some(p) = &self.predict { p.learn(text) }
+    }
+    /// Take the predictor's answers. The thread answers at most one query at a time and may answer none, so only a
+    /// reply for the query the user is still on counts; the others are the states already typed past.
+    fn poll_prediction(&mut self) -> bool {
+        let Some(p) = &self.predict else { return false };
+        let mut answered = false;
+        while let Some((key, suffix, confidence)) = p.answer() {
+            let Some((asked, tail, thai)) = self.pred_ask.clone() else { continue };
+            if asked != key { continue }
+            let typed = format!("{tail}{suffix}");
+            // Latin words come back lowercased; the row is what the keys typed, case included
+            let word = if thai { typed } else { typethai_core::completer::recase(&typed, &tail) };
+            self.pred_answer = Some((key, confidence, word));
+            answered = true;
+        }
+        answered
+    }
+    /// The row the predictor offers for the word being typed: `(label, insert)`, or None while its answer is on the
+    /// way. The query is asked once per state of the word; until the answer arrives the word last shown stays, as long
+    /// as the user is still typing into it.
+    fn predicted(&mut self, head: &str, tail: &str, thai: bool, ask: Ask) -> Option<(String, String)> {
+        if !self.opts.predict || tail.is_empty() || self.predict.is_none() { return None }
+        let line = self.shown_line(self.line.len());
+        let key = query_key(&line, head, tail, thai);
+        if let Some((answer, confidence, word)) = self.pred_answer.clone() {
+            if answer == key {
+                if ask.gated() && confidence < self.opts.complete_conf { return None }
+                self.pred_shown = Some((line, thai, word.clone()));
+                return Some((word.clone(), format!("{head}{word}")))
+            }
+        }
+        if let Some((shown, shown_thai, word)) = self.pred_shown.clone() {
+            if shown == line && shown_thai == thai && word.len() > tail.len() && word.starts_with(tail) {
+                return Some((word.clone(), format!("{head}{word}")))
+            }
+        }
+        if self.pred_ask.as_ref().is_none_or(|(asked, ..)| *asked != key) {
+            let before = typethai_core::predict::engine_text(&format!("{line}{head}"), &self.det.th_dict);
+            self.pred_ask = Some((key, tail.to_string(), thai));
+            self.pred_answer = None;
+            if let Some(p) = &self.predict { p.ask(key, before, tail.to_string()) }
+        }
+        None
+    }
     /// Completions of the buffer, at most 3 rows with the live row. Thai (a Thai layout run, or a wrong-layout word the
     /// live row converts): the run's last word is completed and the rest kept, labelled with that word only. Otherwise
     /// an English word. `ask` sets the length, the gate and the spell checker; rows in `carry` that still extend the
     /// buffer fill what is left, except the spell checker's lead row (`spell_lead`), which stays first. Also returns the
     /// row the spell checker put first, if it did.
-    fn completion_rows(&self, ask: Ask, carry: &[BubbleItem]) -> (Vec<BubbleItem>, Option<String>) {
+    fn completion_rows(&mut self, ask: Ask, carry: &[BubbleItem]) -> (Vec<BubbleItem>, Option<String>) {
         if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return (vec![], None) }
-        let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.as_str()), _ => None });
-        // English typed on the Thai layout: the reverse live row is what was meant
-        if self.thai_active && live.is_some() { return (vec![], None) }
+        let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.clone()), _ => None });
+        // English typed on the Thai layout: the reverse live row is what was meant. A word the app always offers back
+        // (`ok` -> นา) keeps its Thai completions under that row instead, so the bubble holds both readings.
+        if self.thai_active && live.is_some() && !self.rev_wanted(&self.word) { return (vec![], None) }
         let (min, k) = (ask.min_len(), 3 - usize::from(live.is_some()));
-        let gate = |c: &Completions| !ask.gated() || c.confidence >= self.opts.complete_conf;
-        // `reading`: the buffer as the rows read it, `head` its part kept in front of each completed word
+        let conf = self.opts.complete_conf;
+        let gate = |c: &Completions| !ask.gated() || c.confidence >= conf;
+        let thai = self.thai_active || live.is_some();
+        // `reading`: the buffer as the rows read it, `head` its part kept in front of each completed word, `tail` the
+        // word being typed (Thai runs are not separated by spaces, so the row keeps the head in front of it)
         let mut lead = None;
-        let (head, reading, found) = if self.thai_active || live.is_some() {
+        let (head, reading, tail, found) = if thai {
             let Some(comp) = &self.thai_comp else { return (vec![], None) };
             let run = en_to_th(&self.word);
             let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= min) else { return (vec![], None) };
@@ -837,10 +1003,13 @@ impl Engine {
             // the word before the tail in the run, else the one the line shows before the run
             let d = &self.det.th_dict;
             let prev = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => self.word_before(self.line.len()) };
-            (head.to_string(), run.clone(), comp.complete(tail, k, self.context(prev.as_deref(), InputLang::Thai)))
+            (head.to_string(), run.clone(), tail.to_string(), comp.complete(tail, k, self.context(prev.as_deref(), InputLang::Thai)))
         } else {
             let w = self.word.as_str();
-            if w.len() < min || !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return (vec![], None) }
+            // an English word is asked from its first letter: `t` offers the frequency list's `the`, the way a ghost
+            // text does. Noise stays away by itself — `complete_conf` gates Typing-mode rows (0.4), and the pause is
+            // what a Pause-mode row waited for.
+            if !w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') { return (vec![], None) }
             let Some(comp) = &self.en_comp else { return (vec![], None) };
             let prev = self.word_before(self.line.len());
             let mut found = comp.complete(w, k, self.context(prev.as_deref(), InputLang::Latin));
@@ -859,18 +1028,22 @@ impl Engine {
                     if !found.words.iter().any(|f| f.eq_ignore_ascii_case(&g)) { found.words.push(g) }
                 }
             } }
-            (String::new(), w.to_string(), found)
+            (String::new(), w.to_string(), w.to_string(), found)
         };
-        if !gate(&found) { return (vec![], None) }
+        // the contextual predictor's word leads the rows that follow the spell checker's, and stands on its own: a word
+        // the frequency list does not have, typed before, is exactly what the model is for
+        let predicted = self.predicted(&head, &tail, thai, ask);
+        if !gate(&found) && predicted.is_none() { return (vec![], None) }
         let carried: Vec<(String, String)> = carry.iter().filter_map(|b| match &b.kind {
             BubbleKind::Complete { insert, .. } if insert.len() > reading.len() && insert.starts_with(&reading) => Some((b.label.clone(), insert.clone())),
             _ => None,
         }).collect();
         let kept_lead = carried.iter().find(|(_, i)| self.spell_lead.as_ref() == Some(i)).cloned();
+        let extensions = found.words.into_iter().map(|w| (w.clone(), format!("{head}{w}")));
         let mut rows: Vec<BubbleItem> = vec![];
-        for (label, insert) in kept_lead.into_iter().chain(found.words.into_iter().map(|w| (w.clone(), format!("{head}{w}")))).chain(carried) {
+        for (label, insert) in kept_lead.into_iter().chain(predicted).chain(extensions).chain(carried) {
             if rows.len() == k { break }
-            if Some(insert.as_str()) == live || rows.iter().any(|r| matches!(&r.kind, BubbleKind::Complete { insert: i, .. } if *i == insert)) { continue }
+            if live.as_deref() == Some(insert.as_str()) || rows.iter().any(|r| matches!(&r.kind, BubbleKind::Complete { insert: i, .. } if *i == insert)) { continue }
             rows.push(BubbleItem { kind: BubbleKind::Complete { typed: self.word.clone(), insert }, label });
         }
         (rows, lead)
@@ -914,10 +1087,7 @@ impl Engine {
         vec![(!core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic())).then(|| core.to_ascii_lowercase())]
     }
     /// What the line shows in front of `line[j]` (the buffer, with `j` = `line.len()`), as the spell checker's context.
-    fn text_before(&self, j: usize) -> String {
-        let shown: String = self.line[self.line_start.min(j)..j].iter().map(|c| format!("{}{}", c.shown(), c.after())).collect();
-        spell_context(&shown).to_string()
-    }
+    fn text_before(&self, j: usize) -> String { spell_context(&self.shown_line(j)).to_string() }
     /// The last word `line[j - 1]` shows, unless a line break follows it.
     fn word_before(&self, j: usize) -> Option<String> {
         let c = self.line.get(j.checked_sub(1)?)?;
@@ -1082,8 +1252,11 @@ impl Engine {
     /// Enter: a new line starts. Only the last word is kept (so the bubble / Tab can still apply to it); contexts and
     /// the reverse lookback start after it.
     fn new_line(&mut self) {
+        // the finished line goes to the predictor before its last words are kept for the bubble
+        self.learn_line();
         // keep the finished line's last few words (a pending ConvertPrev may span up to 4); contexts start after them
         let n = self.line.len().saturating_sub(4); self.line.drain(..n); self.line_start = self.line.len();
+        self.line_learned = false;
     }
     /// Reverse: flip the last committed word and the `k` before it (as they are on screen) to the typed English.
     fn flip_prev(&mut self, k: usize, acts: &mut Vec<Action>) {
@@ -2741,7 +2914,8 @@ mod tests {
     #[test] fn completes_english_while_typing_above_the_confidence_gate() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Typing);
-        typ(&mut e, "he"); assert!(!e.bubble_visible(), "2 letters are too few while typing");
+        // while typing, the confidence gate — not the number of keys — decides: `he` is already a clear favourite
+        typ(&mut e, "he"); assert_eq!(labels(&e), ["help", "hello", "helmet"], "2 letters, one clear favourite");
         typ(&mut e, "l"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
         let mut log = vec![]; feed(&mut e, &mut log, "\t");
         assert_eq!(log[0].1.actions, vec![Action::Replace { delete: 0, insert: "p".into(), then: None }, Action::HideBubble, Action::SwitchInput(InputLang::Latin)]);
@@ -2771,6 +2945,266 @@ mod tests {
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
     }
     fn complete(typed: &str, insert: &str) -> BubbleItem { BubbleItem { label: insert.into(), kind: BubbleKind::Complete { typed: typed.into(), insert: insert.into() } } }
+    /// One English letter is enough: after the pause the frequency list ranks `h` to its top words, and Tab applies the
+    /// whole word to the single typed letter.
+    #[test] fn one_english_letter_is_enough_for_a_completion() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        typ(&mut e, "h");
+        assert_eq!(labels(&e), Vec::<String>::new(), "nothing while the keys are still coming");
+        let o = idle(&mut e, 600);
+        let items = bubble_items(&Outcome { swallow: false, actions: o }).cloned().unwrap_or_default();
+        assert_eq!(items, vec![complete("h", "help"), complete("h", "hello"), complete("h", "helmet")], "{:?}", labels(&e));
+        tab(&mut e);
+        assert_eq!(e.buffer(), "", "the row was applied and the word is the one it inserted");
+    }
+    /// Thai asks from one key too, after a pause; while typing it still waits for three keys.
+    #[test] fn one_thai_key_is_enough_after_a_pause() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.opts.live = false;
+        typ_th(&mut e, "ภ");
+        let o = idle(&mut e, 600);
+        assert!(bubble_items(&Outcome { swallow: false, actions: o }).is_some_and(|v| v.iter().any(|b| b.label == "ภาษา")), "{:?}", labels(&e));
+        // while typing, the same word needs three keys: two are not enough, the third offers it
+        let Some(mut t) = engine() else { return };
+        completers(&mut t, CompleteMode::Typing);
+        t.opts.live = false;
+        typ_th(&mut t, "ภา");
+        assert_eq!(labels(&t), Vec::<String>::new(), "two keys while typing");
+        typ_th(&mut t, "ษ");
+        assert!(labels(&t).iter().any(|l| l == "ภาษา"), "{:?}", labels(&t));
+    }
+    // ---------- the contextual predictor ----------
+    /// An engine with the words the test needs and no model at all: only the predictor's path is exercised, so it does
+    /// not need `TYPETHAI_MODEL`.
+    fn bare_engine(th_dict: &[&str], en_words: &[&str]) -> Engine {
+        // the classifier's own feature counts: 29 for a token, those plus 9 context features for the second stage
+        let lr = |n: usize| typethai_core::classifier::Lr { w: vec![0.0; n], b: 0.0, mu: vec![0.0; n], sd: vec![1.0; n] };
+        let flip = typethai_core::classifier::FlipModel { stage1: lr(29), stage2: lr(38), threshold: 0.0, names: vec![] };
+        let det = Detector {
+            thai: typethai_core::ngram::Ngram::default(), english: typethai_core::ngram::Ngram::default(),
+            th_dict: Arc::new(typethai_core::dict::Dict::new(th_dict.iter().map(|w| w.to_string()))),
+            en_words: Arc::new(en_words.iter().map(|w| w.to_string()).collect()),
+            brands: Default::default(), collapse: false, params: typethai_core::detector::Params::default(),
+        };
+        Engine::new(det, PersonalModel::new(flip, None, DEFAULT_PERSONAL), None, Options::default())
+    }
+    /// The predictor's thread over a fresh state directory, trusting `known` as real words (the host passes its own
+    /// dictionaries; the model itself only ever learns what this user typed).
+    fn predictor(e: &mut Engine, tag: &str, known: &[&str]) {
+        let dir = std::env::temp_dir().join(format!("typethai-predict-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let words: std::collections::HashSet<String> = known.iter().map(|w| w.to_string()).collect();
+        let oracle = Arc::new(typethai_core::predict::KnownWords::new(Arc::new(typethai_core::dict::Dict::new(words.iter().cloned())), Arc::new(words)));
+        e.predict = Some(crate::predict::Predict::spawn(dir, oracle));
+    }
+    /// Tick the idle timer until `done`: the model answers from its own thread, so the row arrives a tick later.
+    fn until_idle(e: &mut Engine, done: impl Fn(&Engine) -> bool) -> bool {
+        for _ in 0..200 {
+            e.on_idle(Instant::now() + Duration::from_millis(600));
+            if done(e) { return true }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done(e)
+    }
+    /// A word the app always offers back as its English (`ok` -> นา) gets that row after the pause too — first, with the
+    /// Thai completions under it — and Tab applies the English.
+    #[test] fn the_always_offered_english_joins_the_pause_rows() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.thai_comp = Some(Completer::new([("นาน".to_string(), 9.0), ("นาง".to_string(), 5.0)]));
+        typ_th(&mut e, "นา");
+        assert_eq!(e.buffer(), "ok", "the keys typed for นา");
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["ok", "นาน", "นาง"], "the English first, the Thai words under it");
+        assert_eq!(replaced(&[tab(&mut e)]), ["ok"], "Tab applies the English row");
+        assert_eq!(e.buffer(), "", "and the word is the one it inserted");
+    }
+    #[test] fn the_predictor_finishes_a_word_from_the_line_before_it() {
+        let mut e = bare_engine(&[], &[]);
+        // the frequency list cannot extend "pars"; only the model can
+        e.en_comp = Some(Completer::new([("helmet".to_string(), 9.0)]));
+        e.opts.complete = CompleteMode::Pause; e.opts.slips = None;
+        predictor(&mut e, "line", &["please", "refactor", "the", "parser"]);
+        // the line the user finished is what the model learns from
+        typ(&mut e, "please refactor the parser\n");
+        typ(&mut e, "pars");
+        assert!(until_idle(&mut e, |e| labels(e).iter().any(|l| l == "parser")), "no predicted row: {:?}", labels(&e));
+    }
+    #[test] fn an_accepted_prediction_is_edited_as_the_word() {
+        let mut e = bare_engine(&[], &[]);
+        e.en_comp = Some(Completer::new([("helmet".to_string(), 9.0)]));
+        e.opts.complete = CompleteMode::Typing; e.opts.slips = None;
+        predictor(&mut e, "accept", &["please", "refactor", "the", "parser"]);
+        typ(&mut e, "please refactor the parser\n");
+        typ(&mut e, "pars");
+        assert!(until_idle(&mut e, |e| labels(e).iter().any(|l| l == "parser")), "no predicted row: {:?}", labels(&e));
+        // the row carries the whole word as its insert, and Tab applies it exactly like a completion: what the keys
+        // typed stays on screen and the rest goes after it
+        assert!(e.bubble.iter().any(|b| matches!(&b.kind, BubbleKind::Complete { typed, insert } if typed == "pars" && insert == "parser")), "{:?}", labels(&e));
+        let o = tab(&mut e);
+        assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { delete: 0, insert, .. } if insert.as_str() == "er")), "{:?}", o.actions);
+    }
+    #[test] fn a_thai_prediction_keeps_the_run_in_front_of_its_word() {
+        let mut e = bare_engine(&["สวัสดี", "ครับ"], &[]);
+        e.thai_comp = Some(Completer::new([("สวัสดี".to_string(), 9.0), ("ครับ".to_string(), 9.0)]));
+        e.opts.complete = CompleteMode::Pause; e.opts.slips = None; e.opts.live = false;
+        predictor(&mut e, "thai", &["สวัสดี", "ครับ"]);
+        typ_th(&mut e, "สวัสดีครับ");
+        typ(&mut e, "\n");
+        // the second visit: the run's last word is what the model finishes, and the row keeps the head in front of it
+        e.set_thai_active(true);
+        typ(&mut e, &keys("สวัสดีครั"));
+        assert!(until_idle(&mut e, |e| e.bubble.iter().any(|b| matches!(&b.kind, BubbleKind::Complete { insert, .. } if insert == "สวัสดีครับ"))), "{:?}", labels(&e));
+    }
+    #[test] fn the_predictor_is_off_without_its_setting() {
+        let mut e = bare_engine(&[], &[]);
+        e.en_comp = Some(Completer::new([("helmet".to_string(), 9.0)]));
+        e.opts.complete = CompleteMode::Pause; e.opts.slips = None;
+        predictor(&mut e, "off", &["please", "refactor", "the", "parser"]);
+        typ(&mut e, "please refactor the parser\n");
+        e.opts.predict = false;
+        typ(&mut e, "pars");
+        // the model may still answer; the setting keeps every row off the bubble
+        for _ in 0..40 { e.on_idle(Instant::now() + Duration::from_millis(600)); std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(labels(&e), Vec::<String>::new(), "a row with the setting off");
+    }
+    /// What one predicted word costs the predictor's thread, on a model bootstrapped from this build's word lists:
+    /// `cargo test --release -p typethai-desktop predict_cost -- --ignored --nocapture`.
+    #[test] #[ignore] fn predict_cost() {
+        let Some(mut m) = model() else { return };
+        let dir = std::env::temp_dir().join(format!("typethai-predict-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let words: Vec<String> = m.english_freq.keys().cloned().collect();
+        let oracle = Arc::new(typethai_core::predict::KnownWords::new(
+            Arc::new(typethai_core::dict::Dict::new(m.thai_words.iter().cloned())),
+            Arc::new(words.iter().cloned().collect())));
+        let config = typethai_predict::Config { state_dir: dir.clone(), oracle: Some(oracle), show_threshold: None };
+        use typethai_predict::Predictor as _;
+        let mut ngram = typethai_predict::ngram::NgramPredictor::open(&config, typethai_predict::Params::default()).expect("open");
+        // 5,000 lines of 8 words: a heavy typist's history
+        let lines: Vec<String> = (0..5000).map(|i| (0..8).map(|j| words[(i * 8 + j * 7919) % words.len()].clone()).collect::<Vec<_>>().join(" ")).collect();
+        let t = Instant::now();
+        let mut observes: Vec<u128> = lines.iter().map(|l| { let t = Instant::now(); ngram.observe(l); t.elapsed().as_nanos() }).collect();
+        let boot = t.elapsed().as_secs_f64();
+        observes.sort_unstable();
+        let heap = ngram.heap_bytes();
+        let before = "the quick brown fox jumps over the lazy dog and then ";
+        for len in [1usize, 2, 4] {
+            let prefixes: Vec<String> = words.iter().filter(|w| w.len() > len + 2).take(64).map(|w| w[..len].to_string()).collect();
+            let mut ns: Vec<u128> = vec![];
+            for p in &prefixes {
+                for _ in 0..200 {
+                    let t = Instant::now();
+                    std::hint::black_box(ngram.complete(&typethai_predict::Query { before, prefix: p }));
+                    ns.push(t.elapsed().as_nanos());
+                }
+            }
+            ns.sort_unstable();
+            println!("complete {len}-letter prefix: p50 {:.1} us p99 {:.1} us (n={})", ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
+        }
+        println!("observe: p50 {:.0} us p99 {:.0} us; 5,000 lines bootstrapped in {boot:.2} s; heap {} MiB", observes[observes.len() / 2] as f64 / 1e3, observes[observes.len() * 99 / 100] as f64 / 1e3, heap / (1024 * 1024));
+        let t = Instant::now(); ngram.persist().expect("persist"); let write = t.elapsed().as_secs_f64() * 1e3;
+        let size = std::fs::metadata(dir.join(typethai_predict::ngram::SNAPSHOT_FILE)).map_or(0, |m| m.len());
+        let t = Instant::now();
+        let _ = typethai_predict::ngram::NgramPredictor::open(&config, typethai_predict::Params::default()).expect("restore");
+        println!("snapshot: {} KB, persist {write:.0} ms, restore {:.0} ms", size / 1024, t.elapsed().as_secs_f64() * 1e3);
+        let _ = std::fs::remove_dir_all(&dir);
+        // what the query, the adapter and the projection add to a keystroke on the key thread (the model answers on its
+        // own thread, so this is the whole cost the user can feel)
+        let Some(mut e) = engine() else { return };
+        e.load_completers(&mut m);
+        let run = keys("วันนี้ฉันอยากไปกินข้าวที่ร้านอาห");
+        for on in [false, true] {
+            e.predict = None;
+            if on { predictor(&mut e, "keystroke", &[]) }
+            e.opts.complete = CompleteMode::Typing; e.opts.predict = on;
+            let mut ns: Vec<u128> = vec![];
+            for _ in 0..50 { e.reset(); e.set_thai_active(true); for c in run.chars() { let t = Instant::now(); std::hint::black_box(e.on_key(Key::Char(c))); ns.push(t.elapsed().as_nanos()) } }
+            ns.sort_unstable();
+            println!("on_key over a 30-char Thai run, predictor {on}: p50 {:.1} us p99 {:.1} us (n={})", ns[ns.len() / 2] as f64 / 1e3, ns[ns.len() * 99 / 100] as f64 / 1e3, ns.len());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("typethai-predict-{}-keystroke", std::process::id())));
+    }
+    #[test] fn the_preview_shows_when_focus_lands_in_a_text_field() {
+        let Some(mut e) = engine() else { return };
+        assert_eq!(e.on_focus(true), vec![Action::Badge(true)]);
+        assert_eq!(e.on_focus(true), vec![], "one show while it is up");
+        assert_eq!(e.on_focus(false), vec![Action::Badge(false)]);
+        assert_eq!(e.on_focus(false), vec![], "already down");
+        e.opts.input_badge = false;
+        assert_eq!(e.on_focus(true), vec![], "setting off");
+        assert_eq!(e.on_focus(false), vec![]);
+    }
+    #[test] fn a_key_takes_the_preview_down_and_a_long_pause_brings_it_back() {
+        let Some(mut e) = engine() else { return };
+        e.on_focus(true);
+        let t = Instant::now();
+        assert_eq!(e.on_keystroke(t), vec![Action::Badge(false)]);
+        assert_eq!(e.on_keystroke(t), vec![], "already down");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle - Duration::from_millis(10)), vec![], "not yet");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle), vec![Action::Badge(true)]);
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "up once per pause");
+        assert_eq!(e.on_keystroke(t + e.opts.badge_idle * 2), vec![Action::Badge(false)], "typing again");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 4), vec![Action::Badge(true)], "and back after the next pause");
+    }
+    #[test] fn the_preview_follows_its_pause_setting() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.apply_settings(SettingsCmd::SetBadgeIdle(Duration::from_millis(5000))));
+        assert!(!e.apply_settings(SettingsCmd::SetBadgeIdle(Duration::from_millis(5000))), "same delay is not a change");
+        assert_eq!(e.settings_snapshot().badge_idle, Duration::from_millis(5000));
+        e.on_focus(true);
+        let t = Instant::now();
+        e.on_keystroke(t);
+        assert_eq!(e.on_idle(t + Duration::from_millis(2000)), vec![], "the default would have shown it");
+        assert_eq!(e.on_idle(t + Duration::from_millis(5000)), vec![Action::Badge(true)]);
+    }
+    #[test] fn no_preview_outside_a_text_field_or_while_paused() {
+        let Some(mut e) = engine() else { return };
+        let t = Instant::now();
+        assert_eq!(e.on_keystroke(t), vec![], "outside a text field there is nothing to take down");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "and none to bring back");
+        e.paused = true;
+        assert_eq!(e.on_focus(true), vec![], "paused: no preview");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![]);
+        e.paused = false;
+        assert_eq!(e.on_focus(true), vec![Action::Badge(true)], "and it is not lost: focus is still there");
+    }
+    #[test] fn a_look_after_a_key_leaves_the_preview_down() {
+        let Some(mut e) = engine() else { return };
+        e.on_focus(true);
+        assert_eq!(e.set_field(false), vec![Action::Badge(false)], "focus moved off a text field: it goes");
+        assert!(e.badge_shown() == false);
+        assert_eq!(e.set_field(true), vec![], "a text field, but the user just typed: nothing on the spot");
+        assert!(!e.badge_shown());
+        let t = Instant::now();
+        e.on_keystroke(t);
+        assert_eq!(e.on_idle(t + e.opts.badge_idle), vec![Action::Badge(true)], "and the pause after it shows it");
+    }
+    #[test] fn a_pause_takes_the_preview_down_and_the_setting_too() {
+        let Some(mut e) = engine() else { return };
+        e.on_focus(true);
+        let o = e.on_key(Key::Hotkey(Hotkey::TogglePause));
+        assert!(o.actions.contains(&Action::Badge(false)), "pausing takes it down");
+        assert!(!e.on_key(Key::Hotkey(Hotkey::TogglePause)).actions.contains(&Action::Badge(true)), "unpausing does not show one by itself");
+        e.on_focus(true);
+        assert!(e.apply_settings(SettingsCmd::SetInputBadge(false)));
+        assert_eq!(e.hide_badge(), vec![Action::Badge(false)], "the setting going off takes it down");
+        assert_eq!(e.hide_badge(), vec![], "already down");
+    }
+    #[test] fn the_bubble_has_the_window_and_the_preview_returns_when_it_goes() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.on_focus(true);
+        let t = Instant::now();
+        e.on_keystroke(t);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["help", "hello", "helmet"], "the bubble is up");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "no preview over the bubble");
+        let o = e.on_key(Key::Esc); assert_eq!(o.actions, vec![Action::HideBubble]);
+        assert_eq!(e.on_idle(t + e.opts.badge_idle * 3), vec![Action::Badge(true)], "the bubble is gone");
+    }
     #[test] fn a_key_with_pause_rows_up_updates_them_in_place() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Pause);

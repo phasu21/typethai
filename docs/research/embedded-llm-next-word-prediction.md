@@ -215,3 +215,23 @@ microseconds, deterministic, and never invents words; an LLM adds context awaren
 memory, and only in pause mode. Prototype it behind an opt-in flag, measure on the real model, and ship only if pause-mode
 latency stays under ~200 ms on an 8 GB machine. If the prototype underperforms, the cheaper win is to extend the
 n-gram model to a 4-gram with a larger corpus, which stays inside the current architecture.
+
+## 13. What shipped instead (2026-10-17)
+
+The n-gram route this document pointed at was taken, from a working implementation rather than from scratch:
+`crates/typethai-predict` is a port of oh-my-pi's `pi-predict` word-trigram engine (MIT), and its rows join the
+existing completion bubble (`HANDOFF.md`, “Contextual word prediction”). Two things the port settled that this
+document could not:
+
+- **Cost, measured rather than derived** (`cargo test --release -p typethai-desktop predict_cost -- --ignored
+  --nocapture`, M4 Max, 5,000 lines of 8 words): `complete` p50 2.7 us at a one-letter prefix, 0.6 us at four
+  (p99 4.3 us), `observe` p50 12 us per finished line, heap 5 MiB, snapshot 569 KB written in 21 ms and restored in
+  9 ms. That is inside the keystroke budget, so the model works in both `Typing` and `Pause` mode, not only after a
+  pause; the millisecond-sized snapshot is what keeps the model on a thread of its own.
+- **The web prior is not portable to Thai.** The upstream engine's cold start comes from Norvig's English counts
+  (`data/web-prior.bin.zst`, ~2.6 MB compressed, ~9 MiB decoded). Dropping it leaves the model learning purely from
+  this user's typing, which changes the operating point: the upstream `show_threshold 0.15` and its keystroke-saving
+  replay table are English-and-prior numbers and are **not** claimed here. What remains true is the structure: a word
+  the dictionaries know is offered after one finished line, a word they do not after two.
+- A Thai-capable small LLM is still the only route to *sentence* prediction (this document's §4): the word n-gram
+  above predicts one word, from the words actually typed, and never invents text.

@@ -2,10 +2,12 @@
 //! the text the target field would end up with. Hotkeys: `^Z` undo, `^X` force-convert, `^1`..`^3` accept, `^P` pause.
 //! Input source: `<TH>` / `<EN>` set the active layout. Thai chars in the input stand for their Kedmanee keys (shown
 //! as Thai while Thai is active, as the US letter after a switch to ABC); the sim follows `SwitchInput`.
+//! Focus: `<Focus>` / `<Blur>`: focus is in a text field (the input-language preview shows and stays) or left it. Any
+//! other token is a keystroke, so it takes the preview down like a real key does.
 //! Editing: `<BS>` Backspace, `<A-BS>` Option/Ctrl+Backspace (word), `<C-BS>` Cmd+Backspace (line).
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
 //! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`, `<C-1>`..`<C-3>` (Ctrl+digit). `<Idle>`: a typing pause long enough for word
-//! completions. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
+//! completions and for the input-language preview. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
 //! deletes a grapheme per Backspace, here and in the engine's count.
 //! `^R` (Ctrl+Opt+R) reads the selection at once: the text of the last `<SEL:text>` (taken by that capture), else nothing
@@ -47,11 +49,12 @@ pub fn run(mut app: App) {
                 println!("  [selected: {sel:?}]");
                 i += sel.chars().count() + "<SEL:>".len(); selection = Some(sel); continue
             }
-            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
+            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
                 i += t.chars().count() - 1;
                 if t == "<TH>" || t == "<EN>" { app.engine.set_thai_active(t == "<TH>"); println!("  [input source: {}]", if t == "<TH>" { "Thai" } else { "ABC" }); i += 1; continue }
+                if t == "<Focus>" || t == "<Blur>" { for a in app.engine.on_focus(t == "<Focus>") { println!("  {t} -> {a:?}") } i += 1; continue }
                 match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
                     "<C-1>" | "<C-2>" | "<C-3>" => (Some(Key::PickRow(t.as_bytes()[3] as usize - b'1' as usize)), None), _ => (Some(Key::Esc), None) }
             } else if ch[i] == '^' && i + 1 < ch.len() { i += 1; (Some(Key::Hotkey(hotkey_for(ch[i]).expect("hotkey"))), None) }
@@ -64,7 +67,12 @@ pub fn run(mut app: App) {
             // a Tab not held with `<TabDown>` is released right away
             let release = k == Some(Key::Tab) && tok != Some("<TabDown>");
             for (k, typed) in std::iter::once((k, typed)).chain(release.then_some((Some(Key::TabUp), None))) {
-                let mut o = match &k { Some(k) => app.engine.on_key(k.clone()), None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle) } };
+                // a keystroke, as the platform sees it: it takes the input-language preview down (`<Idle>` is no key)
+                let mut o = match &k {
+                    Some(k) => { let mut a = if *k == Key::TabUp { vec![] } else { app.engine.on_keystroke(std::time::Instant::now()) };
+                        let o = app.engine.on_key(k.clone()); a.extend(o.actions); Outcome { swallow: o.swallow, actions: a } }
+                    None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle.max(app.engine.opts.badge_idle)) },
+                };
                 let captures: Vec<_> = o.actions.iter().filter_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }).collect();
                 for id in captures {
                     let sel = selection.take().map_or(Captured::NoSelection, Captured::Text);

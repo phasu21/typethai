@@ -24,7 +24,10 @@ unless you press a key.
   converting to Thai, ABC/US after converting to English or undoing.
 - **Input language at the caret.** When the input source switches between Thai and English (⌘/Ctrl+Space,
   Win+Space, Alt+Shift, the menu bar, or typeThai after a conversion), a small 🇹🇭 ไทย / 🇺🇸 EN badge shows over the
-  caret for about a second, clear of macOS's own indicator below it. Not in password fields or outside a text field,
+  caret for about a second, clear of macOS's own indicator below it. It also shows when focus lands in a text field
+  nothing has been typed in yet, and stays there until you type (so the language about to be typed is in sight), and it
+  comes back on its own when typing stops for a moment (Settings → Word suggestions → **Show it again after**:
+  1–10 s, 2 s by default; prefs.json `"badge_idle_ms"`). Not in password fields or outside a text field,
   not while the bubble is up, and only where the caret or the text field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
 - **Why each option is offered.** A badge marks every fix: the flag of the language a wrong-layout word becomes
   (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. Finishing the
@@ -36,14 +39,22 @@ unless you press a key.
   the caret near the bottom of the screen and works across monitors. Chromium/Electron apps are supported.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
-  Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
+  Thai run, or a word typed on the wrong layout — from the third key, the point where typeThai is sure enough that you
+  meant Thai, which is also when the live conversion appears — which is converted as it is completed) or an English word. By
   default completions appear after a short pause in typing (50 ms; choose 50 to 600 ms in Settings), and
 once they are up they follow the word as you keep typing. **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
   highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
   one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in
   list lacks is offered once you have typed it three times. **Learn from my typing** turns this off, and **Forget
-  learned words** clears it.
+  learned words** clears it. One letter or one Thai key is enough once you pause — `t` offers *the / to / that*, the
+  way a code editor's ghost text does. Typing English keys on the Thai layout also offers that English back as the
+  first row (notably `ok` ≈ `นา`), with the Thai words under it.
+- **Next-word prediction.** Beside the dictionary completions, a small model of *your own* typing finishes the word
+  from the words around it, in Thai or English, and can offer words the built-in lists do not have (a name, jargon,
+  or a word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on
+  by default: **Settings… → Word suggestions → Predict the next word** turns it off, and **Forget learned words**
+  clears it.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
@@ -124,7 +135,9 @@ there you can choose when word suggestions show (Off, After a pause, While typin
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
 default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
 (**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows over the
-caret when it switches (**Show the input language**, on by default; prefs.json `"input_badge": false` turns it off), list words that stay as you type
+caret (**Show the input language**, on by default: when it switches, and while focus sits in a text field nothing has
+been typed in yet; prefs.json `"input_badge": false` turns it off), how long a pause brings it back
+(**Show it again after**), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
@@ -148,11 +161,11 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
-| `--demo-badge [x,y ...] [--en] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge at a fake caret, Thai first, then taking turns (no key capture) |
+| `--demo-badge [x,y ...] [--en] [--pin] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge at a fake caret, Thai first, then taking turns (no key capture); `--pin` shows it as the focus preview, which stays up |
 | `--demo-hold [x,y ...] [--progress P] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the hold-Tab indicator at a fake caret, filling as a real hold does (or stopped at P); `--demo-bubble --hold P` shows it on the bubble's Tab key |
 | `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
 
@@ -177,6 +190,10 @@ in between) to run the guess-convert on the current or last word instead of usin
 - With **Learn from my typing** on (the default), the words you finish and which word came before each are counted in
   `words.json`, next to `personal.json`, to rank word suggestions. Text in password fields is never seen. Turn the
   setting off to stop counting, and use **Forget learned words** or delete the file to clear it.
+- **Next-word prediction** counts the same lines in `ngram.snapshot`, next to `words.json`: a word n-gram of the words
+  you type, with no other data in it. It starts with your first finished lines, so it is strongest once you have typed
+  for a while. **Predict the next word** off (Word suggestions) stops the model and touches no state file at all;
+  **Forget learned words** clears the snapshot too. Deleting the file resets it.
 
 ## Accuracy (measured on held-out data; summary)
 

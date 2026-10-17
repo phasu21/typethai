@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/typethai-core", "crates/typethai-desktop"]
+members = ["crates/typethai-core", "crates/typethai-desktop", "crates/typethai-predict"]
 
 # Dependencies (mostly GPUI) carry no debug info in dev builds: clean builds are about 13% faster and target/ is about 40% smaller.
 # Workspace crates keep full debug info for lldb.

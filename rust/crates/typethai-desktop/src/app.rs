@@ -77,13 +77,27 @@ impl App {
         let mut engine = Engine::new(m.learn_detector(), personal, corrector, opts);
         let prefs_path = prefs::prefs_beside(&cli.state);
         let p = Prefs::load(&prefs_path);
-        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.tab_hold, engine.opts.learn_words, engine.opts.accept, engine.opts.pick_ctrl, engine.opts.pick_arrows, engine.opts.input_badge, engine.opts.bubble, engine.rewrite, engine.check_updates) = (p.never, p.completion, p.complete_idle, p.tab_hold, p.learn_words, p.accept, p.pick_ctrl, p.pick_arrows, p.input_badge, p.bubble, p.rewrite, p.check_updates);
+        (engine.never, engine.opts.complete, engine.opts.complete_idle, engine.opts.tab_hold, engine.opts.learn_words, engine.opts.predict, engine.opts.accept, engine.opts.pick_ctrl, engine.opts.pick_arrows, engine.opts.input_badge, engine.opts.badge_idle, engine.opts.bubble, engine.rewrite, engine.check_updates) = (p.never, p.completion, p.complete_idle, p.tab_hold, p.learn_words, p.predict, p.accept, p.pick_ctrl, p.pick_arrows, p.input_badge, p.badge_idle, p.bubble, p.rewrite, p.check_updates);
         let words_path = cli.state.with_file_name("words.json");
         engine.words = Arc::new(load_words(&words_path));
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
         engine.load_completers(&mut m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
-        Ok(App { engine, state_path: cli.state.clone(), prefs_path, words_path, saver: Saver::spawn() })
+        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, saver: Saver::spawn() };
+        app.set_predict(app.engine.opts.predict);
+        Ok(app)
+    }
+    /// Start or stop the contextual predictor with its setting. While it is off no model is read and no state file is
+    /// written.
+    pub fn set_predict(&mut self, on: bool) {
+        if on {
+            if self.engine.predict.is_none() {
+                let dir = self.words_path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                let (thai, english) = (Arc::clone(&self.engine.det.th_dict), Arc::clone(&self.engine.det.en_words));
+                let oracle = Arc::new(typethai_core::predict::KnownWords::new(thai, english));
+                self.engine.predict = Some(crate::predict::Predict::spawn(dir, oracle));
+            }
+        } else if let Some(p) = self.engine.predict.take() { p.flush() }
     }
     pub fn save(&mut self) {
         self.engine.personal.compact(0.05);
@@ -92,9 +106,9 @@ impl App {
         self.engine.events_since_save = 0;
     }
     /// Save, and return once the files are on disk (quitting).
-    pub fn save_and_wait(&mut self) { self.save(); self.saver.flush(); }
+    pub fn save_and_wait(&mut self) { self.save(); if let Some(p) = &self.engine.predict { p.flush() } self.saver.flush(); }
     pub fn maybe_save(&mut self) { if self.engine.events_since_save >= 10 { self.save() } }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, accept: self.engine.opts.accept, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, bubble: self.engine.opts.bubble, rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, bubble: self.engine.opts.bubble, rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates }.save(&self.prefs_path); }
 }
 /// Hotkeys are Ctrl+Alt (Windows) / Ctrl+Option (macOS) + key char.
 pub fn hotkey_for(c: char) -> Option<Hotkey> {

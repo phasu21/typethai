@@ -10,3 +10,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+typethai-predict = { path = "../typethai-predict" }

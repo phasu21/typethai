@@ -26,7 +26,10 @@ const THAI_KLID: usize = 0x041E;
 
 /// `layouts`: the foreground window's input language as last seen, for the badge.
 struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
-    gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch }
+    gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch,
+    /// When the next look at focus is due, and whether a keystroke armed it (a click, a window switch or a key may have
+    /// moved focus, and the handler that saw the trigger cannot wait for UI Automation).
+    badge_due: Option<(Instant, bool)> }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static BUSY: Cell<bool> = const { Cell::new(false) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -186,6 +189,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
         Action::Rewrite(job) => st.worker.submit(job),
+        Action::Badge(on) => if on { let _ = offer_badge(st, GetForegroundWindow(), true); } else { let _ = st.tx.send(UiMsg::UnpinBadge); },
         Action::Hold(hold) => { let an = hold.filter(|_| !st.app.engine.bubble_visible()).map(|_| anchor(st)); let _ = st.tx.send(UiMsg::Hold { hold, anchor: an }); }
     } }
 }
@@ -313,6 +317,8 @@ unsafe fn typing_in_our_window(st: &mut State, fg: HWND) -> bool {
     if fg != st.last_fg {
         st.last_fg = fg;
         st.last_focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
+        // the Settings window has focus: no caret of ours to sit over, and the preview belongs to the app behind it
+        let _ = st.tx.send(UiMsg::HideBadge);
         let a = st.app.engine.reset();
         run_actions(st, a);
     }
@@ -327,6 +333,8 @@ unsafe fn service_settings(st: &mut State) {
 }
 unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x} up={up}"); }
+    // every keystroke, whatever becomes of it: typing takes the input-language preview down
+    if !up { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
     let fg = GetForegroundWindow();
     if typing_in_our_window(st, fg) { return false }
     let key = if up {
@@ -336,9 +344,12 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     } else { let Some(key) = translate(vk) else { return false }; key };
     let gi = gui_info(fg); let focus = gi.map(|g| g.hwndFocus).unwrap_or_default();
     if fg != st.last_fg { let exe = exe_of(fg); st.app.engine.delete_unit = DeleteUnit::of_app(&exe); st.text_app = field::known_text_exe(&exe) || field::known_text_class(&class_of(fg)); }
-    if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; st.gate.reset(); st.field_rx = None; let a = st.app.engine.reset(); run_actions(st, a); }
-    // these may move focus inside the window: a closed gate re-checks
-    if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); }
+    if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; st.gate.reset(); st.field_rx = None; arm_focus_look(st, false);
+        // the new window's caret is somewhere else: a preview that is up follows it there
+        if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); } let a = st.app.engine.reset(); run_actions(st, a); }
+    // these may move focus inside the window: a closed gate re-checks, and so does the preview's policy (a look armed by
+    // a key never pins the preview: the caret under it is not laid out yet, and Enter/Ctrl+C are typing)
+    if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
     // Thai layout / password field / not a text field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
     st.app.engine.set_thai_active(layout_is_thai(fg)); // Thai layout -> reverse detector (English typed on Kedmanee)
     if !matches!(key, Key::Hotkey(_)) && !st.app.engine.is_bubble_key(&key) {
@@ -375,7 +386,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
         let swallow = with(|st| match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
             // on the bubble: swallow so it is never clicked/activated; a left click on a row accepts that item
             Some(row) => { if let (WM_LBUTTONDOWN, Some(i)) = (m, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-            None => { st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
+            None => { st.gate.touch(Instant::now()); arm_focus_look(st, false);
+                // the click moved the caret: a preview that is up follows it (Windows has no keystroke-driven follow)
+                if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); }
+                let a = st.app.engine.reset(); run_actions(st, a); false }
         }).unwrap_or(false);
         if swallow { return LRESULT(1) }
     }
@@ -383,12 +397,24 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 // ---------- hook thread ----------
-/// Each window's thread has its own layout (Win+Space, Alt+Shift, the taskbar, or our switch after a conversion): a
-/// change in the window in front brings up the badge, unless it is off, typeThai is paused, the bubble is up, the
-/// window is ours, or focus is a password field or no text field. A different window with another layout is not a switch.
-unsafe fn watch_layout(st: &mut State) {
-    let fg = GetForegroundWindow(); if fg.is_invalid() { return }
-    let Some(lang) = st.layouts.see(fg.0 as usize as u64, layout_is_thai(fg)) else { return };
+/// Focus may have moved into or out of a text field (a click, a window switch, a focus key): `focus_look` asks once the
+/// window has settled. The handler that saw the trigger cannot wait for it. `key`: a keystroke armed it, so this is not a
+/// focus the user made (see `Engine::set_field`), and nothing is shown on the spot.
+fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now() + field::SETTLE, key)); }
+/// One look at Focus, then the preview's policy: a focus the user made (a click, a window switch) shows the preview and
+/// keeps it up while nothing has been typed in that field; elsewhere, in a password field, or in a game's window it
+/// goes. Cheap signals only (a caret, a known text app, the gate's cached verdict): a full UIA look runs in
+/// `offer_badge`, once the policy asks for one.
+unsafe fn focus_look(st: &mut State, key: bool) {
+    let fg = GetForegroundWindow(); let caret = st.text_app || gui_info(fg).is_some_and(|g| !g.hwndCaret.is_invalid());
+    let text = !st.secure && st.gate.open(caret, || fullscreen(fg));
+    let a = if key { st.app.engine.set_field(text) } else { st.app.engine.on_focus(text) }; run_actions(st, a);
+}
+/// The badge at the caret, unless it is off, typeThai is paused, the window is ours, or focus is a password field or no
+/// text field (a fresh look, by the gate's rule: a caret or a known text app opens). `pin`: focus just landed in a text
+/// field, so it stays until typing or focus leaving; else it goes after a moment.
+unsafe fn offer_badge(st: &mut State, fg: HWND, pin: bool) -> bool {
+    let lang = if layout_is_thai(fg) { InputLang::Thai } else { InputLang::Latin };
     let e = &st.app.engine; let on = e.opts.input_badge && !e.paused && !foreground_is_self(fg);
     // a password field or no text field (a fresh look, by the gate's rule: a caret or a known text app opens)
     let blocked = || {
@@ -396,7 +422,17 @@ unsafe fn watch_layout(st: &mut State) {
         let caret = (if fg == st.last_fg { st.text_app } else { field::known_text_exe(&exe_of(fg)) || field::known_text_class(&class_of(fg)) }) || gi.is_some_and(|g| !g.hwndCaret.is_invalid());
         pw || !field::Gate::told(f).open(caret, || fullscreen(fg))
     };
-    if let Some(anchor) = crate::badge::anchor_for(on, e.bubble_visible(), blocked, || anchor(st)) { let _ = st.tx.send(UiMsg::Badge { lang, anchor }); }
+    match crate::badge::anchor_for(on, e.bubble_visible(), blocked, || anchor(st)) {
+        Some(anchor) => { let _ = st.tx.send(UiMsg::Badge { lang, anchor, pin }); true }
+        None => false,
+    }
+}
+/// Each window's thread has its own layout (Win+Space, Alt+Shift, the taskbar, or our switch after a conversion): a
+/// change in the window in front brings up the badge, unless it is off, typeThai is paused, the bubble is up, the
+/// window is ours, or focus is a password field or no text field. A different window with another layout is not a switch.
+unsafe fn watch_layout(st: &mut State) {
+    let fg = GetForegroundWindow(); if fg.is_invalid() { return }
+    if st.layouts.see(fg.0 as usize as u64, layout_is_thai(fg)).is_some() { let _ = offer_badge(st, fg, false); }
 }
 unsafe fn control(st: &mut State) -> bool {
     service_settings(st);
@@ -405,6 +441,8 @@ unsafe fn control(st: &mut State) -> bool {
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
     if st.gate.refresh_due(Instant::now(), false) { field_refresh(st); }
+    let now = Instant::now();
+    if let Some((t, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; unsafe { focus_look(st, key) } }
     if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
@@ -414,7 +452,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new() }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), badge_due: Some((Instant::now(), false)) }));
         let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };

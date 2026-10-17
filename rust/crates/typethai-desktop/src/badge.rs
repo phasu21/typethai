@@ -1,5 +1,6 @@
 //! The input-language badge: the language now typed, over the caret for a moment after the keyboard input source
-//! changes (by the user, or by typeThai after a conversion). Pure logic; the platform layers feed it.
+//! changes (by the user, or by typeThai after a conversion), and for as long as focus sits in a text field nothing has
+//! been typed in yet. Pure logic; the platform layers feed it.
 use crate::engine::InputLang;
 use crate::placement::Anchor;
 use std::time::{Duration, Instant};
@@ -57,26 +58,35 @@ pub fn label(lang: InputLang) -> &'static str { match lang { InputLang::Thai => 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd { Show(InputLang), Hold, Hide }
 /// UI side: what the badge window shows. The bubble wins: nothing while it shows, and it takes the window down. A
-/// held Tab's indicator (`Cmd::Hold`, no bubble up) replaces the language badge until Tab lets go.
+/// held Tab's indicator (`Cmd::Hold`, no bubble up) replaces the language badge until Tab lets go. A *pinned* badge
+/// (`pinned`, the language of a text field just focused with nothing typed in it) stays until a key, focus leaving,
+/// the bubble or a hold; one shown on an input-source change (`changed`) goes after `SHOW_FOR`.
 #[derive(Default)]
-pub struct Shown { until: Option<Instant>, bubble: bool, hold: bool }
+pub struct Shown { until: Option<Instant>, pin: bool, bubble: bool, hold: bool }
 impl Shown {
     pub fn changed(&mut self, lang: InputLang, now: Instant) -> Option<Cmd> {
         if self.bubble || self.hold { return None }
         self.until = Some(now + SHOW_FOR); Some(Cmd::Show(lang))
     }
+    /// Focus landed in a text field with nothing typed yet: show and stay.
+    pub fn pinned(&mut self, lang: InputLang) -> Option<Cmd> {
+        if self.bubble || self.hold || self.pin { return None }
+        self.pin = true; self.until = None; Some(Cmd::Show(lang))
+    }
+    /// A key was typed, or focus left the text field: a pinned badge goes (a badge on a switch keeps its moment).
+    pub fn unpin(&mut self) -> Option<Cmd> { std::mem::take(&mut self.pin).then_some(Cmd::Hide) }
     pub fn bubble(&mut self, visible: bool) -> Option<Cmd> { self.bubble = visible; if visible { self.clicked() } else { None } }
-    pub fn tick(&mut self, now: Instant) -> Option<Cmd> { self.until.take_if(|t| now >= *t).map(|_| Cmd::Hide) }
+    pub fn tick(&mut self, now: Instant) -> Option<Cmd> { if self.pin { return None } self.until.take_if(|t| now >= *t).map(|_| Cmd::Hide) }
     /// Tab held (`on`) or let go.
     pub fn hold(&mut self, on: bool) -> Option<Cmd> {
         if on && self.bubble { return None }
-        if on { self.until = None; self.hold = true; return Some(Cmd::Hold) }
+        if on { self.until = None; self.pin = false; self.hold = true; return Some(Cmd::Hold) }
         std::mem::take(&mut self.hold).then_some(Cmd::Hide)
     }
     /// A click on it (Windows; on macOS clicks pass through).
-    pub fn clicked(&mut self) -> Option<Cmd> { let up = self.up(); (self.until, self.hold) = (None, false); up.then_some(Cmd::Hide) }
+    pub fn clicked(&mut self) -> Option<Cmd> { let up = self.up(); (self.until, self.pin, self.hold) = (None, false, false); up.then_some(Cmd::Hide) }
     /// Something is up.
-    pub fn up(&self) -> bool { self.until.is_some() || self.hold }
+    pub fn up(&self) -> bool { self.until.is_some() || self.pin || self.hold }
 }
 
 #[cfg(test)]
@@ -163,6 +173,44 @@ mod tests {
         s.changed(Thai, t);
         assert_eq!(s.clicked(), Some(Cmd::Hide));
         assert_eq!(s.tick(t + SHOW_FOR), None);
+    }
+    #[test] fn a_pinned_badge_stays_until_a_key_or_focus_leaving() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        assert_eq!(s.pinned(Thai), Some(Cmd::Show(Thai)));
+        assert_eq!(s.pinned(Thai), None, "already up: no second show");
+        assert!(s.up());
+        assert_eq!(s.tick(t + SHOW_FOR * 10), None, "a pinned badge has no time of its own");
+        assert_eq!(s.unpin(), Some(Cmd::Hide));
+        assert_eq!(s.unpin(), None, "already down");
+        assert!(!s.up());
+    }
+    #[test] fn a_switch_while_pinned_shows_the_new_language_and_keeps_it_up() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        s.pinned(Thai);
+        assert_eq!(s.changed(Latin, t), Some(Cmd::Show(Latin)));
+        assert_eq!(s.tick(t + SHOW_FOR), None, "pinned: the switch's own time does not take it down");
+        assert_eq!(s.unpin(), Some(Cmd::Hide));
+    }
+    #[test] fn a_key_leaves_a_switch_badge_its_moment() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        s.changed(Thai, t);
+        assert_eq!(s.unpin(), None);
+        assert_eq!(s.tick(t + SHOW_FOR), Some(Cmd::Hide));
+    }
+    #[test] fn the_bubble_a_hold_or_a_click_take_a_pinned_badge_down() {
+        let mut s = Shown::default();
+        s.pinned(Thai);
+        assert_eq!(s.bubble(true), Some(Cmd::Hide));
+        assert_eq!(s.unpin(), None, "the bubble already took it down");
+        s.bubble(false);
+        assert_eq!(s.pinned(Thai), Some(Cmd::Show(Thai)), "and it shows again once the bubble goes");
+        assert_eq!(s.hold(true), Some(Cmd::Hold));
+        assert_eq!(s.pinned(Thai), None, "no pinned badge over the hold indicator");
+        assert_eq!(s.unpin(), None);
+        s.hold(false);
+        s.pinned(Thai);
+        assert_eq!(s.clicked(), Some(Cmd::Hide));
+        assert_eq!(s.unpin(), None);
     }
     #[test] fn the_badge_shows_at_once_and_hides_after_its_time() {
         let (mut s, t) = (Shown::default(), Instant::now());

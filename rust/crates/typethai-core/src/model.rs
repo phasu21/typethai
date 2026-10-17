@@ -11,6 +11,7 @@ use crate::{classifier::FlipModel, completer::{Bigrams, Completer}, corpus, corr
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct ModelFiles {
     pub thai: Ngram, pub english: Ngram, pub thai_words: Vec<String>, pub english_words: Vec<String>, pub brands: Vec<String>,
@@ -101,8 +102,8 @@ impl ModelFiles {
     /// v5 rules detector (bundle params + normalisation + wNorm, guard 4, brands) — the TS `detRules`.
     pub fn rules_detector(&self) -> Detector {
         let mut p = self.params.clone(); p.normalize = Some(true); p.w_norm = Some(self.w_norm);
-        Detector { thai: self.thai.clone(), english: self.english.clone(), th_dict: Dict::new(self.thai_words.iter().cloned()),
-            en_words: self.english_words.iter().cloned().collect(), brands: self.brands.iter().cloned().collect(), collapse: self.collapse, params: p }
+        Detector { thai: self.thai.clone(), english: self.english.clone(), th_dict: Arc::new(Dict::new(self.thai_words.iter().cloned())),
+            en_words: Arc::new(self.english_words.iter().cloned().collect()), brands: self.brands.iter().cloned().collect(), collapse: self.collapse, params: p }
     }
     /// Detector feeding the classifier (TS `detLearn`: brands empty, normalisation on, no wNorm).
     pub fn learn_detector(&self) -> Detector {

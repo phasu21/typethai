@@ -62,7 +62,10 @@ const kAXValueCGRectType: u32 = 3;
 const kAXValueCFRangeType: u32 = 4;
 
 struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str,
-    gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>> }
+    gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>>,
+    /// When the next look at focus is due, and whether a keystroke armed it (a click, an app switch or a key may have
+    /// moved focus, and the handler that saw the trigger cannot wait for AX).
+    badge_due: Option<(std::time::Instant, bool)> }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static TX: RefCell<Option<Sender<UiMsg>>> = const { RefCell::new(None) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -351,6 +354,7 @@ fn run_actions(st: &mut State, acts: Vec<Action>) {
         }
         Action::HideBubble => { bridge::set_geom(None); send(UiMsg::Hide) }
         Action::Rewrite(job) => st.worker.submit(job),
+        Action::Badge(on) => if on { if offer_badge(st, true) { arm_caret_follow(st) } } else { send(UiMsg::UnpinBadge) },
         Action::Hold(hold) => { let anchor = hold.filter(|_| !st.app.engine.bubble_visible()).map(|_| unsafe { anchor() }); send(UiMsg::Hold { hold, anchor }) }
     } }
 }
@@ -424,10 +428,12 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             match bridge::geom().and_then(|g| g.hit(p.x, p.y)) {
                 // on the bubble: swallow so the click never reaches (or focuses) it; left click on a row accepts
                 Some(row) => { if let (CGEventType::LeftMouseDown, Some(i)) = (ty, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-                None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
+                None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); arm_focus_look(st, false); arm_caret_follow(st); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
         CGEventType::KeyDown | CGEventType::KeyUp => {
+            // every keystroke, whatever becomes of it: typing takes the input-language preview down
+            if matches!(ty, CGEventType::KeyDown) { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
@@ -437,9 +443,12 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 Key::TabUp
             } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
-            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); st.gate.reset(); st.field_rx = None; let a = st.app.engine.reset(); run_actions(st, a); }
-            // these may move focus inside the app: a closed gate re-checks
-            if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); }
+            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); st.gate.reset(); st.field_rx = None; arm_focus_look(st, false); arm_caret_follow(st);
+                // the new app's caret is somewhere else, and the pill may be up over the old one
+                let a = st.app.engine.reset(); run_actions(st, a); }
+            // these may move focus inside the app: a closed gate re-checks, and so does the preview's policy (a look
+            // armed by a key never pins the preview: the caret under it is not laid out yet, and Enter/⌘C are typing)
+            if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
             // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up, and Space when it
             // applies a live row (`is_bubble_key`).
@@ -482,18 +491,48 @@ fn typing_in_our_window(st: &mut State, target_pid: i64) -> bool {
     let us = std::process::id() as i64;
     if st.last_pid != us {
         st.last_pid = us;
+        // the Settings window has focus: no caret of ours to sit over, and the preview belongs to the app behind it
+        send(UiMsg::HideBadge);
         let a = st.app.engine.reset();
         run_actions(st, a);
     }
     true
 }
-/// The input source changed: the badge at the caret, unless it is off, typeThai is paused, the bubble is up, the
-/// Settings window is in front, or focus is a password field or no text field (a fresh look, by the gate's rule).
-fn offer_badge(st: &mut State, lang: InputLang) {
-    let e = &st.app.engine; let ours = key_targets_us(0);
-    let on = e.opts.input_badge && !e.paused && !ours;
+/// The input source now in effect, as the menu bar shows it.
+fn source_lang() -> InputLang { if bridge::INPUT_THAI.load(Ordering::SeqCst) { InputLang::Thai } else { InputLang::Latin } }
+/// Focus may have moved into or out of a text field (a click, an app switch, a focus key): `focus_look` asks AX once the
+/// app has settled. The handler that saw the trigger cannot wait for it. `key`: a keystroke armed it, so this is not a
+/// focus the user made (see `Engine::set_field`), and nothing is shown on the spot.
+fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now() + field::SETTLE, key)); }
+/// One fresh look at Focus, then the preview's policy: a focus the user made (a click, an app switch) shows the preview
+/// and keeps it up while nothing has been typed in that field; elsewhere, or in a password field, it goes. The verdict
+/// is the gate's own rule (macOS has no caret flag: the focused element decides, and an unknown one opens).
+fn focus_look(st: &mut State, key: bool) {
+    let (secure, f) = unsafe { focus_check() };
+    let text = !secure && field::Gate::told(f).open(false, || false);
+    let acts = if key { st.app.engine.set_field(text) } else { st.app.engine.on_focus(text) };
+    run_actions(st, acts);
+}
+/// The input source changed: the badge at the caret, unless it is off, typeThai is paused, the Settings window is in
+/// front, or focus is a password field or no text field (a fresh look, by the gate's rule). `pin`: focus just landed in
+/// a text field, so it stays until typing or focus leaving; else it goes after a moment.
+fn offer_badge(st: &mut State, pin: bool) -> bool {
+    let lang = source_lang();
+    let ours = key_targets_us(0);
+    let (on, bubble) = (st.app.engine.opts.input_badge && !st.app.engine.paused && !ours, st.app.engine.bubble_visible());
     let blocked = || { let (secure, f) = unsafe { focus_check() }; secure || !field::Gate::told(f).open(false, || false) };
-    if let Some(anchor) = crate::badge::anchor_for(on, e.bubble_visible(), blocked, || unsafe { anchor() }) { send(UiMsg::Badge { lang, anchor }) }
+    let at = if pin { crate::badge::anchor_for(on, bubble, blocked, badge_anchor) } else { crate::badge::anchor_for(on, bubble, blocked, || unsafe { anchor() }) };
+    match at { Some(anchor) => { send(UiMsg::Badge { lang, anchor, pin }); true } None => false }
+}
+/// The last preview anchor logged: a caret that has not moved keeps the log quiet.
+static LAST_BADGE: std::sync::Mutex<Option<Anchor>> = std::sync::Mutex::new(None);
+/// The caret the preview sits on. The keyword is logged whenever it moves, so a pill that reads as misplaced can be
+/// checked against what Accessibility reported (`--probe-caret` shows the same for a moment on screen).
+fn badge_anchor() -> Anchor {
+    let (a, info) = caret_anchor();
+    let mut last = LAST_BADGE.lock().unwrap();
+    if *last != Some(a) { *last = Some(a); eprintln!("typethai: preview anchor {info}") }
+    a
 }
 fn service_settings(st: &mut State) {
     let cmds = bridge::take_settings();
@@ -510,15 +549,17 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         let now = std::time::Instant::now();
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         if st.gate.refresh_due(now, false) { field_refresh(st); }
-        if let Some(lang) = bridge::REQ_BADGE.lock().unwrap().take() { offer_badge(st, lang) }
-        // a few AX reads after each key: the first is often still the pre-keystroke caret
+        if let Some((t, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
+        if bridge::REQ_BADGE.lock().unwrap().take().is_some() { offer_badge(st, false); }
+        // a few AX reads after a key (the first is often still the pre-keystroke caret), and one when the preview goes
+        // up: the app lays the caret out under it, and an app that scrolls (a terminal) moves it while the pill shows
         if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
             st.move_due = None; st.last_move = Some(now);
-            if st.app.engine.bubble_visible() {
-                send(UiMsg::Move(unsafe { anchor() }));
-                if st.move_left > 1 { st.move_left -= 1; st.move_due = Some(now + std::time::Duration::from_millis(70)); }
-                else { st.move_left = 0; }
-            } else { st.move_left = 0; }
+            let follow = if st.app.engine.bubble_visible() { send(UiMsg::Move(unsafe { anchor() })); true }
+                else if st.app.engine.badge_shown() { send(UiMsg::MoveBadge(badge_anchor())); true }
+                else { false };
+            if follow && st.move_left > 1 { st.move_left -= 1; st.move_due = Some(now + std::time::Duration::from_millis(70)); }
+            else { st.move_left = 0; }
         }
         if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); send(UiMsg::Stopped); CFRunLoop::get_current().stop(); }
     });
@@ -537,7 +578,7 @@ fn capture_thread(app: App, tx: Sender<UiMsg>) {
     let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
     let rl = CFRunLoop::get_current();
     rl.add_source(&src, unsafe { kCFRunLoopCommonModes }); tap.enable();
-    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: port, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
     let timer = CFRunLoopTimer::new(core_foundation::date::CFDate::now().abs_time() + 0.2, 0.025, 0, 0, timer_cb, std::ptr::null_mut());
     rl.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
     CFRunLoop::run_current();

@@ -77,6 +77,75 @@ completion frequencies).
   NSSpellChecker top-up costs about 0.85 ms per call, so it runs only for Pause-mode rows (`on_idle`), never inside
   the key hook (Typing mode uses the frequency list alone); it fills in when the list has fewer than 3 words.
 - Data: `tt-pack --enfreq` drops the `n't` stems the subtitle list splits off (`wasn`, `aren`, ... `NT_STEMS`; `won` stays).
+- Ask length: a pause and the keys that follow it ask from the **first** key or letter, so `t` offers the list's `the`
+  and `to` after the pause (a code editor's ghost does the same); `Ask::Typing` still waits for **3** keys for a Thai
+  run (nobody waited for those rows) and English Typing rows stay away by themselves under `complete_conf`.
+- Reverse rows: English typed on the Thai layout keeps its reverse row as the first row of the pause bubble. A word the
+  app always offers back (`REV_ALWAYS`: `ok` ← นา, and every don't-translate word) gets that row after a pause as well,
+  not only at the word boundary, and its Thai completions stay under it (`completion_rows` skips the live-row
+  suppression for those words), so the same bubble holds both readings.
+
+## Contextual word prediction (next word from your own typing)
+
+- Core: `crates/typethai-predict`, a port of oh-my-pi's `pi-predict` n-gram engine (MIT; the crate carries
+  `LICENSE-THIRD-PARTY.md`). An interpolated absolute-discounting **word trigram** over the words this user typed,
+  ranked under the typed prefix with a finished-word-aware posterior (the prefix itself competes, so `the|re` shows
+  only when *there* clearly beats stopping at *the*), a prompt-local and a session cache, vocabulary hygiene (rare
+  misspellings fold into a real edit-distance-1 word, a habitual slip of a word the user also types is never offered)
+  and a zstd `PINGRAM` snapshot written atomically. The Norvig web prior the upstream engine ships is **not** ported:
+  nothing outside this user's own typing reaches the model, and the words a dictionary knows are injected through
+  `WordOracle` instead. `Method`, the SmolLM2-135M engine and the macOS `NSSpellChecker` engine are dropped
+  (`docs/research/embedded-llm-next-word-prediction.md` §12 explains why an embedded LLM is not the default here).
+- Adapter: `typethai_core::predict` reads a line the way the model does — English lowercased, Thai runs segmented with
+  the dictionary, and every run of non-word characters rewritten as the one character the model reads it by: `" "`
+  (join: space, comma, dash), `"\n"` (sentence: `.` `!` `?` `:` newline) or `"|"` (break: a symbol, a digit, Thai the
+  dictionary does not cover, a script switch with no separator). `KnownWords` is the oracle: the model's Thai
+  dictionary plus its English word list.
+- Thread: `typethai_desktop::predict::Predict` owns the model off the key tap callback for the same reason `words.json`
+  has a saver thread. `Engine::learn_line` sends the finished line once (on Enter, or when the line is forgotten),
+  gated by `learn_words`; `Engine::predicted` asks once per word state and reads the answer on a later tick, so the
+  published row can lag one keystroke, which `pred_shown` papers over by keeping the shown word up while the user types
+  into it. The snapshot is written 5 min after the last line, 15 min at the latest, and on quit (`App::save_and_wait`).
+- Rows: one `BubbleKind::Complete { typed, insert }` row, first under the spell checker's lead row, and it stands on
+  its own — a word the frequency list cannot extend but the user has typed before is exactly what the model is for.
+  It follows the same `Ask` rules, `k` cap, dedupe and accept path as the dictionary rows (`Tab` completes the word,
+  what the keys typed stays on screen). A word neither dictionary knows is offered after it was typed twice
+  (`Params::min_count`, upstream's rule); a word they know is offered after one line.
+- Settings: `prefs.json` `"predict"` (missing -> on), `SettingsCmd::SetPredict`, "Predict the next word" in Word
+  suggestions. Off means the model is not even started: no state file is read or written. **Forget learned words**
+  clears it too.
+- State: `<state dir>/ngram.snapshot` beside `words.json`; a snapshot from another version or a damaged one is dropped
+  and the model re-learns from then on. There is no hard vocabulary cap, as upstream: the model compacts its learned
+  vocabulary into the sorted base every 4,096 new words and drops paste-only trigrams on every persist, and a typist's
+  vocabulary saturates — 5,000 finished lines of 8 words hold 5 MiB of heap (upstream's 52,950-prompt model held
+  52 MiB, most of it the web prior this port does not ship).
+- Cost (`cargo test --release -p typethai-desktop predict_cost -- --ignored --nocapture`, M4 Max, a model
+  bootstrapped from this build's 46k-word English list with 5,000 lines of 8 words): `complete` p50 **2.4 us** at one
+  letter, **0.9 us** at two, **0.6 us** at four (p99 4.5 us); `observe` p50 12 us per finished line; heap 5 MiB;
+  snapshot 570 KB, persist 16 ms, restore 9 ms. On the key thread the query, the adapter and the projection add
+  **+3.8 us p50** to a keystroke over a 30-char Thai run (15.7 us -> 19.5 us; p99 45.3 -> 55.5 us), which is inside
+  the ~1 ms the macOS tap allows. The µs query fits the key hook, the ms persist does not, which is why the model
+  lives on its own thread.
+
+## Input-language preview while a field is untouched
+
+- The badge (🇹🇭 ไทย / 🇺🇸 EN over the caret) now also shows when focus lands in a text field nothing has been typed in
+  yet, and *stays* until the first keystroke; it comes back `Options::badge_idle` after typing stops (Settings → Word
+  suggestions → **Show it again after**: `BADGE_IDLE_CHOICES_MS` 1/2/3/5/10 s, default 2 s, prefs `"badge_idle_ms"`).
+  A switch still shows it for `SHOW_FOR` (1.2 s). Everything else that owns the window still wins: the bubble, the hold
+  indicator, pause, our own Settings window, a password field.
+- Policy in the engine (`focus_moved` / `on_keystroke` / `on_idle`, `Action::Badge(bool)`), so it is unit-tested;
+  `Engine::reset()` deliberately does *not* touch it (a click re-asks focus a moment later, and hiding first would blink).
+  `Shown::pinned` / `unpin` hold the state on the UI side; `UiMsg::Badge { …, pin }` and `UiMsg::UnpinBadge` carry it.
+- Focus verdicts: macOS does one synchronous `focus_check()` in the timer, `field::SETTLE` (40 ms) after a click, an
+  app switch or a focus key (`arm_focus_look` → `focus_look`); `offer_badge` looks again inside its `blocked` closure.
+  Windows uses cheap signals (caret / known text app / the gate's cached verdict) and full UIA only in `offer_badge`.
+  The Windows path type-checks (`cargo check --target x86_64-pc-windows-msvc`) but is not run on Windows yet.
+- `--simulate` has `<Focus>` / `<Blur>` and any key now counts as a keystroke, so the whole policy is smoke-testable;
+  `--demo-badge --pin` shows the pinned badge (`--secs 2` proves it outlives `SHOW_FOR`), and `--demo-settings` shows
+  the two controls on the Word suggestions page.
+- Verified: `cargo test -p typethai-desktop` (245 pass, model-backed), the CI `--simulate` line, `--demo-badge --pin`
+  and `--demo-badge` on the Mac. Not verified live: the AX focus look after a real click (see the manual checklist).
 
 ## Open limitations
 

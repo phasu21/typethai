@@ -3,7 +3,7 @@ use crate::{dict::Dict, keymap::en_to_th, ngram::Ngram, normalize::normalize_tha
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,7 +27,7 @@ pub struct TokenDecision {
 }
 impl TokenDecision { pub fn convertible(&self) -> bool { self.reason.as_deref() != Some("not convertible") } }
 
-pub struct Detector { pub thai: Ngram, pub english: Ngram, pub th_dict: Dict, pub en_words: HashSet<String>, pub brands: HashSet<String>, pub collapse: bool, pub params: Params }
+pub struct Detector { pub thai: Ngram, pub english: Ngram, pub th_dict: Arc<Dict>, pub en_words: Arc<HashSet<String>>, pub brands: HashSet<String>, pub collapse: bool, pub params: Params }
 
 fn re(cell: &'static OnceLock<Regex>, pat: &str) -> &'static Regex { cell.get_or_init(|| Regex::new(pat).expect("regex")) }
 macro_rules! rx { ($pat:expr) => {{ static C: OnceLock<Regex> = OnceLock::new(); re(&C, $pat) }}; }

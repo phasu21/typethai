@@ -98,6 +98,11 @@
 - [ ] Off: no completion rows in any of the above; the live conversion row and Space suggestions still work.
 - [ ] Esc on a completion bubble hides it, and no completion comes back for that word even after a pause; the next word gets completions again.
 - [ ] Space or Enter after a word never shows completions, only the usual conversion / spelling rows.
+- [ ] Next-word prediction (on by default, `prefs.json` `"predict"`): type the same short line three or four times, ending each with Enter — e.g. `ship the zqorbit` then Enter, twice. On a new line type `zqor` and stop: the bubble offers `zqorbit` (a word no dictionary has, learned from the lines you finished) as the first row, and Tab completes it to `zqorbit`. The same works in Thai for a phrase you type: type `สวัสดีครับ` + Enter, then on a new line type `สวัสดีครั` and stop — the row keeps the whole run (`สวัสดีครับ`).
+- [ ] Next-word prediction off (Settings → Word suggestions → Predict the next word): the rows above disappear, and `<state dir>/ngram.snapshot` is not touched at all (no file is written while it stays off). Turning it back on brings the rows back from what is already in the snapshot.
+- [ ] Forget learned words: the predicted rows stop being offered (the model was cleared with `words.json`), and typing a line again re-learns it.
+- [ ] While typing (not only after a pause) the predicted row can appear one keystroke after the one that asked for it — it must never move under your fingers: keep typing into a predicted word and the rest of it stays visible until what you type diverges from it.
+- [ ] `--simulate` (no model needed for the row itself, but the model file is): `printf '<EN>ship the zqorbit\n<EN>ship the zqorbit\n<EN>ship the zqor<Idle><Idle>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` prints a `[bubble: >zqorbit | …]` line.
 
 ## Horizontal bubble (agent-verified with --demo-bubble --screenshot on the Mac, dark and light; not run live)
 - [x] `--demo-bubble --items "ภาษา|ภาษี|ภาษาอังกฤษ" --screenshot x.png`: one strip of three buttons, an outlined `Tab` keycap on the first and filled `2` / `3` on the others; the self-check lines say OK and the panel matches the layout.
@@ -110,3 +115,16 @@
 - [ ] ⌃⌥R on a selection, and AI rewrite presets, "Rewriting…" and the result, are always rows.
 - [ ] Settings → Word suggestions → Bubble layout: Vertical gives the old rows on the next bubble and survives a restart (`prefs.json` has `"bubble_layout": "vertical"`); an older prefs.json opens as Horizontal.
 - [ ] Windows (Notepad, 100% and 150% scaling): the strip window is exactly the panel, nothing is clipped, and clicks hit the right button.
+
+## Input-language preview on focus (agent-verified with --demo-badge --pin; the live look at focus is not run)
+- [x] `--demo-badge --pin --secs 2` keeps the pill up for the whole 2 s (`still up … true`), where `--demo-badge --secs 2` hides it after `SHOW_FOR` (1.2 s).
+- [x] `--simulate`: `ab<Focus>x<Idle>y<Idle><Blur>` prints `Badge(true)` on `<Focus>`, `Badge(false)` on the key, `Badge(true)` after the pause; inside a bubble the pause shows completions instead and no `Badge`.
+- [ ] Make sure focus is in a text field (TextEdit, Safari search box, a chat box) and click into it: the pill shows over the caret within ~40 ms and stays. It must sit clear of the caret line and of macOS's own input-source indicator.
+- [ ] Type: the pill goes on the first keystroke, and does not come back while typing.
+- [ ] Stop typing for ~2 s while still in the field: the pill comes back and stays until the next keystroke.
+- [ ] Settings → Word suggestions → Show it again after: pick 5 s, stop typing in the same field: the pill stays away until ~5 s. Quit and relaunch: the choice is kept (prefs.json `"badge_idle_ms": 5000`), and an older prefs.json opens at 2 s.
+- [ ] Click on a page, a canvas or another app: the pill goes (no pill where there is no text field, and none in a password field).
+- [ ] Clicking a second field in the same window moves it to the new caret.
+- [ ] The pill never takes focus and clicks pass through it (macOS).
+- [ ] ⌃⌥P (or the tray menu) while the pill is up: it goes, and does not come back until typeThai is unpaused.
+- [ ] Windows (Notepad): the same, including a click from the browser into Notepad and back.

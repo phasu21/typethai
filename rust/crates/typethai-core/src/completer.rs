@@ -434,7 +434,7 @@ impl Bigrams {
     }
 }
 /// Re-applies the typed prefix's Latin case to a lowercase completion: "HEL" -> "HELP", "Hel" -> "Help".
-fn recase(w: &str, prefix: &str) -> String {
+pub fn recase(w: &str, prefix: &str) -> String {
     if !prefix.starts_with(|c: char| c.is_ascii_uppercase()) { return w.to_string() }
     if prefix.len() >= 2 && !prefix.chars().any(|c| c.is_ascii_lowercase()) { return w.to_ascii_uppercase() }
     w[..1].to_ascii_uppercase() + &w[1..]

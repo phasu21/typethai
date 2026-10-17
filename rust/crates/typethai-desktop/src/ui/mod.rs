@@ -329,8 +329,22 @@ impl BadgeWin {
         BadgeWin { handle, view, native, shown: badge::Shown::default(), at: None }
     }
     fn changed(&mut self, lang: InputLang, anchor: Anchor, cx: &mut App) { let c = self.shown.changed(lang, Instant::now()); self.run(c, Some(anchor), cx) }
+    /// Focus landed in a text field nothing has been typed in yet: show and stay.
+    fn pinned(&mut self, lang: InputLang, anchor: Anchor, cx: &mut App) { let c = self.shown.pinned(lang); self.run(c, Some(anchor), cx) }
+    fn unpin(&mut self, cx: &mut App) { let c = self.shown.unpin(); self.run(c, None, cx) }
     fn bubble(&mut self, visible: bool, cx: &mut App) { let c = self.shown.bubble(visible); self.run(c, None, cx) }
     fn clicked(&mut self, cx: &mut App) { let c = self.shown.clicked(); self.run(c, None, cx) }
+    /// The caret moved under a badge that is up: follow it. Nothing is done while no badge is on screen (the offer may
+    /// have been refused, or a keystroke took it down since), and a spot that has not changed is left alone.
+    fn move_to(&mut self, anchor: Anchor, cx: &mut App) {
+        let Some(cur) = self.at else { return };
+        let w = self.view.read(cx).label_w;
+        let Some(p) = badge::place(&anchor, w, &native::monitors()) else { return };
+        if p.rect == cur.rect { return }
+        let n = self.native.clone();
+        cx.foreground_executor().spawn(async move { native::show(&n, p.rect) }).detach();
+        *bridge::BADGE_AT.lock().unwrap() = Some(p.rect); self.at = Some(p);
+    }
     fn tick(&mut self, cx: &mut App) {
         let c = self.shown.tick(Instant::now()); self.run(c, None, cx);
         // the hold indicator fills on the UI's own ticks
@@ -396,7 +410,9 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Show { items, layout, anchor } => { badge.bubble(true, cx); ui.show(items, layout, anchor, cx); }
                         UiMsg::Move(a) => { ui.reanchor(a, cx); }
                         UiMsg::Hide => { ui.hide(cx); badge.bubble(false, cx) }
-                        UiMsg::Badge { lang, anchor } => badge.changed(lang, anchor, cx),
+                        UiMsg::Badge { lang, anchor, pin } => if pin { badge.pinned(lang, anchor, cx) } else { badge.changed(lang, anchor, cx) },
+                        UiMsg::UnpinBadge => badge.unpin(cx),
+                        UiMsg::MoveBadge(anchor) => badge.move_to(anchor, cx),
                         UiMsg::HideBadge => badge.clicked(cx),
                         // over the bubble: on its Tab key; otherwise the pill in the badge window
                         UiMsg::Hold { hold, anchor } => { let over = hold.is_some() && ui.visible;
@@ -404,9 +420,9 @@ pub fn run(rx: Receiver<UiMsg>) {
                             badge.hold(hold.filter(|_| !over), anchor, cx) }
                         UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
-                        UiMsg::Paused(p) => if let Some(t) = &tray { t.set_paused(p) },
+                        UiMsg::Paused(p) => { if p { badge.clicked(cx) } if let Some(t) = &tray { t.set_paused(p) } },
                         UiMsg::Stopped => stop = true,
-                        UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
+                        UiMsg::Settings(snap) => { if !snap.input_badge { badge.unpin(cx) } settings::apply_snapshot(&mut settings_win, snap, cx) },
                     } }
                     ui.reconcile(cx); badge.tick(cx);
                     if ui.visible && ui.view.read(cx).hold.is_some() { ui.view.update(cx, |_, cx| cx.notify()) }
@@ -528,9 +544,10 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
 }
 
 /// `--demo-badge`: the input-language badge under a fake 18-unit caret at each point (no points: the main monitor's
-/// centre), as on a switch: up 1.2 s, then down; `secs` per point, languages taking turns from `lang`. With `shot`, shows
-/// it once, captures its window to `shot` (PNG) and quits. `backdrop` as in `demo`.
-pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang: InputLang, light: bool, backdrop: Option<bool>) {
+/// centre), as on a switch: up 1.2 s, then down; `secs` per point, languages taking turns from `lang`. `pin`: show it
+/// as the text-field preview instead (it stays for the whole `secs`, however long). With `shot`, shows it once, captures
+/// its window to `shot` (PNG) and quits. `backdrop` as in `demo`.
+pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang: InputLang, pin: bool, light: bool, backdrop: Option<bool>) {
     app().run(move |cx| {
         setup(cx);
         if light { Theme::change(gpui_kit::component::ThemeMode::Light, None, cx); }
@@ -546,7 +563,7 @@ pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang
             for (i, (x, y)) in pts.iter().copied().enumerate() {
                 let l = if i % 2 == 0 { lang } else if lang == InputLang::Thai { InputLang::Latin } else { InputLang::Thai };
                 let anchor = Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None };
-                cx.update(|cx| b.changed(l, anchor, cx));
+                cx.update(|cx| if pin { b.pinned(l, anchor, cx) } else { b.changed(l, anchor, cx) });
                 eprintln!("demo-badge {i}: {l:?} caret ({x},{y}) -> {:?}", b.at);
                 if let Some(path) = &shot {
                     cx.background_executor().timer(Duration::from_millis(400)).await;
@@ -559,6 +576,7 @@ pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang
                     cx.background_executor().timer(Duration::from_millis(20)).await;
                     cx.update(|cx| { let was = b.shown.up(); b.tick(cx); if was && !b.shown.up() { eprintln!("demo-badge {i}: hidden") } });
                 }
+                cx.update(|_| eprintln!("demo-badge {i}: still up after {secs}s: {}", b.shown.up()));
             }
             cx.update(|cx| cx.quit());
         }).detach();
@@ -676,7 +694,10 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         completion: crate::engine::CompleteMode::default(),
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS), tab_hold: crate::engine::TAB_HOLD,
         learn_words: true,
-        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true, bubble: bridge::BubbleLayout::default(),
+        predict: true,
+        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true,
+        badge_idle: std::time::Duration::from_millis(crate::engine::BADGE_IDLE_DEFAULT_MS),
+        bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,

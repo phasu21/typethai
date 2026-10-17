@@ -22,8 +22,13 @@ pub enum UiMsg {
     Stopped,
     /// Current don't-translate list and learned words, for the Settings window.
     Settings(SettingsSnap),
-    /// The input source just changed to `lang`: the badge at the caret (`badge::anchor_for`: no mouse fallback).
-    Badge { lang: InputLang, anchor: Anchor },
+    /// The input-language preview at the caret (`badge::anchor_for`: no mouse fallback): `pin` when focus just landed
+    /// in a text field nothing has been typed in yet (it stays), else an input-source change (it goes after a moment).
+    Badge { lang: InputLang, anchor: Anchor, pin: bool },
+    /// A key was typed, or focus left the text field: a pinned preview goes. (No-op on one that goes by itself.)
+    UnpinBadge,
+    /// The caret moved while a badge is up (the preview tracks the caret as the app lays it out): re-place the window.
+    MoveBadge(Anchor),
     /// A click on the badge (Windows, where it is not click-through): take it down.
     HideBadge,
     /// Tab held towards opening the ⌃⌥R rows (None: released, or they opened). `anchor`: where the caret is when no

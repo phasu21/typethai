@@ -1,0 +1,10 @@
+[package]
+name = "typethai-predict"
+version = "0.1.0"
+edition = "2024"
+description = "typeThai ghost-text completion: personal word n-gram model, ported from oh-my-pi's pi-predict"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+zstd = "0.14"
