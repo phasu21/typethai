@@ -27,8 +27,9 @@ die() { echo "release-local: $*" >&2; exit 1; }
 [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag must look like v1.2.3"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/crates/typethai-desktop/Cargo.toml | head -1)
 [ "v$version" = "$tag" ] || die "Cargo.toml says $version, not ${tag#v}: bump the version first"
-# untracked files are not in the commit the PC clones from GitHub, so they cannot affect the build
-[ -z "$(git status --porcelain --untracked-files=no)" ] || die "the working tree has changes: commit them first"
+# The release ships $sha, not the tree: this checkout is also where work in progress lives, so a dirty tree is worth
+# saying out loud but must not block a release of the commit (untracked files are not in it either way).
+[ -z "$(git status --porcelain --untracked-files=no)" ] || echo "release-local: the working tree has uncommitted changes; this release ships $sha and NOT them" >&2
 git fetch -q origin
 [ -n "$(git branch -r --contains HEAD)" ] || die "HEAD is not on GitHub: push it first (the PC builds it from there)"
 sha=$(git rev-parse HEAD)
@@ -79,17 +80,22 @@ step "Windows build on $win (log: $out/windows.log)"
 ) > "$out/windows.log" 2>&1 &
 winjob=$!
 
-# ---------- macOS, here ----------
+# ---------- macOS, here, from the commit ----------
+# The Windows PC builds $sha from GitHub; the tests and the macOS build run in a throwaway worktree at the same commit,
+# sharing the everyday target dir so the caches stay warm. Work in progress in the checkout cannot leak into a release.
+src="$out/src"; rm -rf "$src"; git worktree add -q --detach "$src" "$sha"
+trap 'git worktree remove --force "$src" 2>/dev/null || true' EXIT
 if [ $tests = 1 ]; then
   step "tests"
   # debug build: it shares the cache of everyday `cargo test`; the release binary is checked from the DMG below
-  (cd rust && TYPETHAI_MODEL="$model" cargo test -q -p typethai-core -p typethai-desktop > "$out/tests.log" 2>&1) || { grep -E "FAILED|panicked" "$out/tests.log" >&2; die "tests failed (log: $out/tests.log)"; }
+  (cd "$src/rust" && CARGO_TARGET_DIR="$root/rust/target" TYPETHAI_MODEL="$model" cargo test -q -p typethai-core -p typethai-desktop > "$out/tests.log" 2>&1) || { grep -E "FAILED|panicked" "$out/tests.log" >&2; die "tests failed (log: $out/tests.log)"; }
   grep -E "^test result: ok. [1-9]" "$out/tests.log" | sed 's/; 0 measured.*//'
 fi
 step "macOS universal build"
 export MACOSX_DEPLOYMENT_TARGET=12.0
-for t in aarch64-apple-darwin x86_64-apple-darwin; do (cd rust && cargo build -q --release -p typethai-desktop --target $t); done
+for t in aarch64-apple-darwin x86_64-apple-darwin; do (cd "$src/rust" && CARGO_TARGET_DIR="$root/rust/target" cargo build -q --release -p typethai-desktop --target $t); done
 MACOS_SIGN_P12="$keys/codesign.p12" MACOS_SIGN_P12_PASSWORD=$(cat "$keys/codesign.p12.password") scripts/package-macos.sh "$tag" "$model" "$out/macos" >/dev/null
+git worktree remove --force "$src"
 mv "$out/macos/typeThai-$tag-macos-universal.dmg" "$out/macos/typeThai-$tag-macos-universal.zip" "$out/"; rm -rf "$out/macos"
 step "macOS smoke test (from the DMG)"
 mnt=$(mktemp -d); hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$out/typeThai-$tag-macos-universal.dmg" >/dev/null
@@ -128,7 +134,7 @@ fi
 # A draft has no tag yet; publishing it creates the tag, and the release workflow then finds the files and skips.
 step "publishing $tag"
 pre=""; case $tag in *-*) pre=--prerelease;; esac
-gh release view "$tag" -R "$repo" >/dev/null 2>&1 || gh release create "$tag" -R "$repo" --draft $pre --target "$sha" --title "typeThai $tag" --notes-file .github/release-notes.md
+gh release view "$tag" -R "$repo" >/dev/null 2>&1 || { git show "$sha:.github/release-notes.md" > "$out/notes.md"; gh release create "$tag" -R "$repo" --draft $pre --target "$sha" --title "typeThai $tag" --notes-file "$out/notes.md"; }
 gh release upload "$tag" -R "$repo" --clobber "$out"/*.dmg "$out"/*.zip "$out"/*-setup.exe "$out"/*.sig "$out/typethai.ttm"
 gh release edit "$tag" -R "$repo" --draft=false
 git fetch -q origin --tags
