@@ -2,15 +2,15 @@
 # typeThai certificate, a Windows installer and zip, each with the model. Every package the updater installs gets an
 # ed25519 signature (`<asset>.sig`) made with UPDATE_SIGNING_KEY.
 # Secrets: MACOS_SIGN_P12 (base64 .p12), MACOS_SIGN_P12_PASSWORD, UPDATE_SIGNING_KEY (ed25519 private key, PEM).
-# The model is not in git: it is a pinned asset of the `model-v3` release (sha256 checked).
+# The model is not in git: it is a pinned asset of the `model-v4` release (sha256 checked).
 name: release
 on:
   push: { tags: ["v*"] }
   workflow_dispatch:
 permissions: { contents: write }
 env:
-  MODEL_TAG: model-v3
-  MODEL_SHA256: 1cb60240059d93166923105a93c44764e4841c7928625c1abb18387485b64e0c
+  MODEL_TAG: model-v4
+  MODEL_SHA256: 0f1fda0572839d6ba557b989e0fcb0f0f23bf2ce8c3f8c06281a8df0bb991250
   GH_TOKEN: ${{ github.token }}
 jobs:
   # scripts/release-local.sh publishes a finished release (signed updater packages included) and only then creates the
