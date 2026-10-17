@@ -2,7 +2,7 @@
 //! Stored beside `personal.json` so a learning reset does not clear them, and so `personal.json`
 //! stays compatible with the TypeScript app.
 use crate::bridge::BubbleLayout;
-use crate::engine::{AcceptKeys, Action, CompleteMode, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS};
+use crate::engine::{AcceptKeys, Action, CompleteMode, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS, TAB_HOLD_CHOICES_MS, TAB_HOLD_DEFAULT_MS};
 use crate::rewrite;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -18,6 +18,8 @@ pub enum SettingsCmd {
     ResetLearning,
     SetCompletion(CompleteMode),
     SetCompleteIdle(Duration),
+    /// How long a held Tab takes to open the ⌃⌥R rows.
+    SetTabHold(Duration),
     SetLearnWords(bool),
     SetAccept(AcceptKeys),
     SetPickCtrl(bool),
@@ -32,7 +34,7 @@ pub enum SettingsCmd {
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_))
     }
 }
 
@@ -43,6 +45,7 @@ pub struct SettingsSnap {
     pub completion: CompleteMode,
     /// How long a pause brings up completions in `CompleteMode::Pause`.
     pub complete_idle: Duration,
+    pub tab_hold: Duration,
     pub learn_words: bool,
     pub accept: AcceptKeys,
     pub pick_ctrl: bool,
@@ -67,9 +70,9 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool }
+pub struct Prefs { pub never: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true } }
 }
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
@@ -92,7 +95,7 @@ impl Prefs {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
         let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -110,6 +113,7 @@ fn parse(text: &str) -> Option<Prefs> {
     };
     let c = v.get("completion").and_then(|c| c.as_str());
     let completion = COMPLETION.iter().find(|(_, s)| Some(*s) == c).map_or(CompleteMode::default(), |(m, _)| *m);
+    let tab_hold = v.get("tab_hold_ms").and_then(serde_json::Value::as_u64).filter(|ms| TAB_HOLD_CHOICES_MS.contains(ms)).unwrap_or(TAB_HOLD_DEFAULT_MS);
     let complete_idle = v.get("complete_idle_ms").and_then(serde_json::Value::as_u64).filter(|ms| COMPLETE_IDLE_CHOICES_MS.contains(ms)).unwrap_or(COMPLETE_IDLE_DEFAULT_MS);
     let learn_words = v.get("learn_words").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let a = v.get("accept_with").and_then(|a| a.as_str());
@@ -120,7 +124,7 @@ fn parse(text: &str) -> Option<Prefs> {
     let b = v.get("bubble_layout").and_then(|b| b.as_str());
     let bubble = BUBBLE.iter().find(|(_, s)| Some(*s) == b).map_or(BubbleLayout::default(), |(l, _)| *l);
     let check_updates = v.get("check_updates").and_then(serde_json::Value::as_bool).unwrap_or(true);
-    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), learn_words, accept, pick_ctrl, pick_arrows, input_badge, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates })
+    Some(Prefs { never, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, accept, pick_ctrl, pick_arrows, input_badge, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -181,6 +185,22 @@ mod tests {
         assert_eq!(Prefs::load(path), p);
     }
     #[test]
+    fn tab_hold_round_trips_and_an_odd_value_is_the_default() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-h-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        let slow = Prefs { tab_hold: Duration::from_millis(1000), ..Prefs::default() };
+        slow.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["tab_hold_ms"], 1000);
+        assert_eq!(Prefs::load(&path), slow);
+        std::fs::write(&path, r#"{"never":[],"tab_hold_ms":123}"#).unwrap();
+        assert_eq!(Prefs::load(&path).tab_hold, Duration::from_millis(TAB_HOLD_DEFAULT_MS), "a value Settings never offers");
+        std::fs::write(&path, r#"{"never":[]}"#).unwrap();
+        assert_eq!(Prefs::load(&path).tab_hold, Duration::from_millis(TAB_HOLD_DEFAULT_MS), "file from before the setting");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn completion_mode_round_trips_and_defaults_to_pause() {
         let dir = std::env::temp_dir().join(format!("typethai-prefs-c-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -222,7 +242,7 @@ mod tests {
     }
     #[test]
     fn pick_with_arrows_round_trips_and_an_old_file_leaves_it_off() {
-        let dir = std::env::temp_dir().join(format!("typethai-prefs-a-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-w-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("prefs.json");
         let on = Prefs { pick_arrows: true, ..Prefs::default() };
@@ -312,6 +332,8 @@ mod tests {
         assert_eq!(Prefs::load(&path), fast);
         std::fs::write(&path, r#"{"never":["ok"],"completion":"pause","learn_words":true}"#).unwrap();
         assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "file from before the setting");
+        let fastest = Prefs { complete_idle: Duration::from_millis(50), ..Prefs::default() };
+        fastest.save(&path); assert_eq!(Prefs::load(&path), fastest, "the fastest choice");
         std::fs::write(&path, r#"{"never":[],"complete_idle_ms":7}"#).unwrap();
         assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "a value Settings never offers");
         let _ = std::fs::remove_dir_all(&dir);

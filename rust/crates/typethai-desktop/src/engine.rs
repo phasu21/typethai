@@ -214,6 +214,8 @@ pub struct Options {
     /// Word completion: `Typing` shows it on a keystroke when the top word's share of the prefix's frequency is at
     /// least `complete_conf`; `Pause` shows it, ungated, once no key came for `complete_idle`.
     pub complete: CompleteMode, pub complete_conf: f64, pub complete_idle: Duration,
+    /// How long Tab is held on its own to open the ⌃⌥R rows (`TAB_HOLD_CHOICES_MS`).
+    pub tab_hold: Duration,
     /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
     pub learn_words: bool,
     pub accept: AcceptKeys,
@@ -231,10 +233,11 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
-/// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
-/// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
-pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+/// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default, 250 ms, is above the
+/// gap between keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms; the shorter ones
+/// are for who wants the bubble sooner and does not mind it flashing.
+pub const COMPLETE_IDLE_CHOICES_MS: [u64; 6] = [50, 100, 150, 250, 400, 600];
 pub const COMPLETE_IDLE_DEFAULT_MS: u64 = 250;
 /// When word completions appear in the bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
@@ -270,7 +273,10 @@ pub const REV_LIVE: f64 = 0.98;
 /// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
 pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 /// Tab held this long on its own opens the ⌃⌥R rows, like the hotkey: the selection, or the word before the caret.
-pub const TAB_HOLD: Duration = Duration::from_millis(500);
+/// `Options::tab_hold` is one of the choices Settings offers; this is the default.
+pub const TAB_HOLD_CHOICES_MS: [u64; 4] = [350, 500, 750, 1000];
+pub const TAB_HOLD_DEFAULT_MS: u64 = 500;
+pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -668,6 +674,7 @@ impl Engine {
             SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
             SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
+            SettingsCmd::SetTabHold(d) => { let changed = self.opts.tab_hold != d; self.opts.tab_hold = d; changed }
             SettingsCmd::SetLearnWords(on) => { let changed = self.opts.learn_words != on; self.opts.learn_words = on; changed }
             SettingsCmd::SetAccept(a) => { let changed = self.opts.accept != a; self.opts.accept = a; changed }
             SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
@@ -680,7 +687,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -751,18 +758,18 @@ impl Engine {
     /// Esc / Dismiss: hide the bubble; completions stay away until the word ends.
     fn dismiss(&mut self, acts: &mut Vec<Action>) { self.comp_muted = !self.word.is_empty(); self.show(vec![], acts) }
     /// Pause mode: the first timer tick at least `complete_idle` after a key in a word offers its completions.
-    /// A Tab held `TAB_HOLD` on its own opens the ⌃⌥R rows; held past a tap (`TAB_CHORD_MIN`), its indicator shows.
+    /// A Tab held `Options::tab_hold` on its own opens the ⌃⌥R rows; held past a tap (`TAB_CHORD_MIN`), its indicator shows.
     pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
         let mut acts = vec![];
         if self.paused { return acts }
         if let Some(t) = self.tab_at.filter(|_| self.tab_down()) {
             let held = now.saturating_duration_since(t);
-            if held >= TAB_HOLD {
+            if held >= self.opts.tab_hold {
                 // starting it lets Tab go: keep it Spent so the repeats and the release type nothing
                 let mut a: Vec<Action> = self.hold_off().into_iter().collect();
                 let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; a.extend(o.actions); return a
             }
-            if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + TAB_HOLD }))) }
+            if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + self.opts.tab_hold }))) }
         }
         if self.opts.complete != CompleteMode::Pause { return acts }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
@@ -2479,6 +2486,15 @@ mod tests {
         let t = Instant::now(); let h = Hold { from: t + TAB_CHORD_MIN, full: t + TAB_HOLD };
         assert_eq!((h.progress(t), h.progress(t + TAB_CHORD_MIN), h.progress(t + TAB_HOLD), h.progress(t + TAB_HOLD * 2)), (0.0, 0.0, 1.0, 1.0));
         assert!((h.progress(t + (TAB_CHORD_MIN + TAB_HOLD) / 2) - 0.5).abs() < 1e-6);
+    }
+    #[test] fn the_hold_follows_its_setting() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false; e.opts.tab_hold = Duration::from_millis(1000);
+        e.on_key(Key::Tab); let t = e.tab_at.unwrap();
+        let a = tick_after(&mut e, TAB_CHORD_MIN);
+        assert_eq!(holds(&a), [&Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + Duration::from_millis(1000) }))], "fills towards the setting");
+        assert!(!tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(_))), "not at the default");
+        assert!(tick_after(&mut e, Duration::from_millis(1000)).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
     }
     #[test] fn a_tab_tap_is_still_a_tab() {
         let Some(mut e) = engine() else { return };

@@ -1,7 +1,7 @@
 //! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, AI rewrite and
 //! updates, one sidebar page each.
 use crate::bridge::{self, BubbleLayout};
-use crate::engine::{AcceptKeys, CompleteMode, COMPLETE_IDLE_CHOICES_MS};
+use crate::engine::{AcceptKeys, CompleteMode, COMPLETE_IDLE_CHOICES_MS, TAB_HOLD_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::{rewrite, update};
 use crate::ui::thai_font;
@@ -377,6 +377,12 @@ impl SettingsView {
         bridge::push_settings(SettingsCmd::SetPickArrows(on));
         cx.notify();
     }
+    fn set_tab_hold(&mut self, ms: u64, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.tab_hold = std::time::Duration::from_millis(ms);
+        bridge::push_settings(SettingsCmd::SetTabHold(self.snap.tab_hold));
+        cx.notify();
+    }
     fn set_complete_idle(&mut self, ms: u64, cx: &mut Context<Self>) {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.complete_idle = std::time::Duration::from_millis(ms);
@@ -391,6 +397,11 @@ impl SettingsView {
     }
     fn rewrite_page(&self, view: &Entity<Self>) -> SettingPage {
         let hotkey = if cfg!(windows) { "Ctrl+Alt+R" } else { "Ctrl+Option+R" };
+        let hold = { let (read, write) = (view.clone(), view.clone());
+            let options = TAB_HOLD_CHOICES_MS.iter().map(|&ms| (delay_label(ms), delay_label(ms))).collect();
+            SettingField::dropdown(options,
+                move |cx| delay_label(read.read(cx).snap.tab_hold.as_millis() as u64),
+                move |label, cx| if let Some(&ms) = TAB_HOLD_CHOICES_MS.iter().find(|&&ms| delay_label(ms) == label) { write.update(cx, |v, cx| v.set_tab_hold(ms, cx)) }) };
         let key_note = match &self.key_state {
             KeyState::Checking => "Checking for a saved key…".to_string(),
             KeyState::Missing => "No key saved yet.".to_string(),
@@ -409,7 +420,9 @@ impl SettingsView {
         page("AI rewrite", IconName::Bot,
             format!("Select text and hold Tab, or press {hotkey}: the bubble offers it in the other layout and with typos fixed, worked out on this computer. With AI rewrite on and a key saved, Fix typos and Translate TH↔EN follow; only those send the text to the service below. With nothing selected, it offers fixes for the word before the caret."),
             keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", "selection", "selected", "hold", "tab", "layout", "spelling", "word", hotkey], std::iter::empty()),
-            vec![SettingItem::new("Offer AI rewrite", enabled), SettingItem::new("API key", key).description(key_note),
+            vec![SettingItem::new("Offer AI rewrite", enabled),
+                SettingItem::new("Hold Tab for", hold).description("How long to hold Tab to open these options. Shorter is quicker; longer leaves more room for a slow Tab."),
+                SettingItem::new("API key", key).description(key_note),
                 SettingItem::new("Model", draft_field(view, |v| v.model.clone(), |v, s| v.model = s)),
                 SettingItem::new("Base URL", draft_field(view, |v| v.base_url.clone(), |v, s| v.base_url = s)),
                 SettingItem::new("Instructions", instructions).layout(Axis::Vertical).description("Added to both Fix typos and Translate."), save])
