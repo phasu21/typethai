@@ -1,5 +1,11 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.6**
+- Suggestions show again in Electron apps (terminals, chat and editor apps built on Electron) when they hide their
+  text fields from macOS: 0.5.5 took that for "no text field" and offered nothing.
+- When an app does not tell macOS where the cursor is, the bubble appears where you last clicked in that window
+  instead of at the mouse pointer.
+
 **New in 0.5.5**
 - **Pick with the arrow keys.** Turn on Settings → Word suggestions → *Pick with arrow keys*: while the bubble is up,
   press Up to move into it, Left or Right to choose, and Up again or Enter to apply. Down or Esc leaves. Until you press
