@@ -2488,7 +2488,7 @@ mod tests {
         e.on_key(Key::Tab); let t = e.tab_at.unwrap();
         assert!(holds(&tick_after(&mut e, TAB_CHORD_MIN - Duration::from_millis(1))).is_empty(), "a tap shows nothing");
         assert_eq!(holds(&tick_after(&mut e, TAB_CHORD_MIN)), [&hold_from(t)], "filling from now until the rows open");
-        assert!(holds(&tick_after(&mut e, TAB_CHORD_MIN + Duration::from_millis(50))).is_empty(), "shown once");
+        assert!(holds(&tick_after(&mut e, (TAB_CHORD_MIN + TAB_HOLD) / 2)).is_empty(), "shown once");
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat keeps it");
         let a = tick_after(&mut e, TAB_HOLD);
         assert_eq!(a.first(), Some(&Action::Hold(None)), "gone as the rewrite starts: {a:?}");
@@ -2757,7 +2757,7 @@ mod tests {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Pause);
         let o = typ(&mut e, "hel"); assert!(o.iter().all(|x| x.actions.is_empty()));
-        assert_eq!(idle(&mut e, 100), vec![]);
+        assert_eq!(idle(&mut e, COMPLETE_IDLE_DEFAULT_MS - 10), vec![]);
         let o = idle(&mut e, 600);
         assert_eq!(o.len(), 1); assert_eq!(bubble_items(&Outcome { swallow: false, actions: o }).unwrap().iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["help", "hello", "helmet"]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![], "shown once per pause");
@@ -3140,7 +3140,7 @@ mod tests {
         assert!(!e.bubble_visible(), "stab scores under the live bar while typing");
         idle(&mut e, 600);
         assert_eq!(labels(&e), ["stab"], "the English word, not ฟิวเจอร์");
-        assert_eq!(replaced(&[e.on_key(Key::Tab)]), ["stab"]);
+        assert_eq!(replaced(&[tab(&mut e)]), ["stab"]);
         e.reset(); typ_th(&mut e, "หะฟิ ");
         assert_eq!(labels(&e), ["stab"], "offered after Space too");
         e.reset(); typ_th(&mut e, "ฟิ"); idle(&mut e, 600);
