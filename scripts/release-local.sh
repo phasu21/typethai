@@ -27,7 +27,8 @@ die() { echo "release-local: $*" >&2; exit 1; }
 [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag must look like v1.2.3"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/crates/typethai-desktop/Cargo.toml | head -1)
 [ "v$version" = "$tag" ] || die "Cargo.toml says $version, not ${tag#v}: bump the version first"
-[ -z "$(git status --porcelain)" ] || die "the working tree has changes: commit them first"
+# untracked files are not in the commit the PC clones from GitHub, so they cannot affect the build
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die "the working tree has changes: commit them first"
 git fetch -q origin
 [ -n "$(git branch -r --contains HEAD)" ] || die "HEAD is not on GitHub: push it first (the PC builds it from there)"
 sha=$(git rev-parse HEAD)
