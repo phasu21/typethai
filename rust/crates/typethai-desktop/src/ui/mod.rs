@@ -82,10 +82,13 @@ impl Render for BubbleView {
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
         { let mut tb = self.text_bounds.borrow_mut(); tb.clear(); tb.resize(self.items.len(), None); }
         // a fixed label column; the inner text box shrinks to the rendered text so the self-check can measure it
+        // a label laid out on one line never wraps: the line wrapper counts Thai marks (ั ิ ์) as if they took room, so
+        // a word that fits shaped (ประวัติศาสตร์) would break before its last cluster
         let column = |i: usize, o: &Opt| { let tb = self.text_bounds.clone(); let w = px(l.label_w[i] as f32);
+            let one_line = l.kind == BubbleLayout::Horizontal || l.cells.get(i).is_some_and(|c| c.h <= ROW_H);
             div().w(w).flex_none().flex().text_size(px(FONT_PX as f32))
                 .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
-                .child(div().max_w(w).whitespace_normal().child(o.label.clone())) };
+                .child(if one_line { div().whitespace_nowrap() } else { div().max_w(w).whitespace_normal() }.child(o.label.clone())) };
         // The window is borderless and transparent: the rows' panel, or the strip's groups, and the badges are all that is
         // drawn. Their laid-out bounds are recorded every frame and `Ui::reconcile` resizes / re-places the window and
         // refreshes the click cells.
@@ -676,7 +679,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         completion: crate::engine::CompleteMode::default(),
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS), tab_hold: crate::engine::TAB_HOLD,
         learn_words: true,
-        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true, bubble: bridge::BubbleLayout::default(),
+        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true, next_word: true, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,
