@@ -16,13 +16,15 @@ word lists, word frequencies, word pair counts, and logistic-regression weights.
 | FrequencyWords `en_50k` (OpenSubtitles 2018), https://github.com/hermitdave/FrequencyWords | English word frequencies for word completion (section 11, 46,676 words) | CC BY-SA 4.0 |
 | scb-mt-en-th-2020 v1.0 (AIResearch / VISTEC / SCB), https://github.com/vistec-AI/dataset-releases/releases/tag/scb-mt-en-th-2020_v1.0. Only the `task_master_1`, `generated_reviews_translator`, `generated_reviews_crowd` and `mozilla_common_voice` subsets | Thai and English word pair counts (sections 12, 13). The English side of `task_master_1` is Google's Taskmaster-1 dialogs (CC BY 4.0); the English reviews are machine-generated and only their Thai translations are used | CC BY-SA 4.0; the Common Voice pairs CC0 1.0 |
 | Tatoeba sentences, English and Thai per-language exports (weekly export, downloaded 2026-10-15), https://tatoeba.org/en/downloads | Word pair counts | CC BY 2.0 FR (part CC0 1.0). Sentences © Tatoeba contributors |
+| VISTEC-TP-TH-2021 (VISTEC and Chiang Mai University), https://github.com/mrpeerat/OSKut/tree/main/VISTEC-TP-TH-2021. The raw tweets only; its segmentation and tags are not used | Thai word pair counts (chat-style Thai: slang, netspeak) | CC BY-SA 3.0 (adapted under CC BY-SA 4.0, as its section 4(b) allows). Text from Twitter, 2017–2019 |
 | Wikipedia via the `wikimedia/wikipedia` 2023-11-01 dump (Hugging Face), one parquet shard per language | Word pair counts | CC BY-SA 4.0. Text © Wikipedia contributors |
 | A hand-written brand list (`data/brands_hand.txt`) | Words to keep as English | MIT (this project) |
 | Source code, lines without Thai | English character n-grams and "code" negatives for the classifier (aggregate counts and weights only; no code text or identifiers are in the model) | Used only as statistics. The original files are not distributed |
 
 Because the model is derived from Wikipedia text, `typethai.ttm` is distributed under **CC BY-SA 4.0**. Attribution:
 "Wikipedia contributors; PyThaiNLP; Wisesight; FrequencyWords (Hermit Dave); scb-mt-en-th-2020
-(AIResearch, VISTEC, SCB), including Taskmaster-1 (Google LLC); Tatoeba contributors". The code that uses it stays MIT.
+(AIResearch, VISTEC, SCB), including Taskmaster-1 (Google LLC); Tatoeba contributors; VISTEC-TP-TH-2021 (VISTEC,
+Chiang Mai University)". The code that uses it stays MIT.
 
 ## Bundled font
 

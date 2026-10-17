@@ -230,7 +230,7 @@ pub struct Options {
     pub pick_arrows: bool,
     /// The input-language badge at the caret when the input source changes; read by the platform layer.
     pub input_badge: bool,
-    /// A pause after a word and a space offers the words likely to follow it (with completion on).
+    /// A pause after a word (after a space in English) offers the word likely to follow it (with completion on).
     pub next_word: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
@@ -803,24 +803,50 @@ impl Engine {
         // English on the Thai layout below the live bar: its reverse row, which also keeps Thai completions away
         if self.opts.live && self.thai_active && !self.live_visible() && self.rev_suggestable(&self.word) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
-        if self.opts.complete != CompleteMode::Off && self.opts.next_word && self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
+        if self.opts.complete != CompleteMode::Off && self.opts.next_word {
+            if self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
+            // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
+            // completions of that word
+            else if self.thai_active && !self.word.is_empty() && self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Complete { .. })) {
+                let rows = self.thai_next_rows();
+                if !rows.is_empty() {
+                    let mut items = rows;
+                    for c in self.completions_up() { if items.len() < 3 && !items.contains(&c) { items.push(c) } }
+                    if items != self.bubble { self.show(items, &mut acts) }
+                }
+            }
+        }
         acts
     }
-    /// The words likely to follow the last one, when the caret sits after it and a space: the corpus pairs after it
-    /// in the input language, each at least `NEXT_WORD_SHARE` of them (`thank` → you; nothing after `you`, where no
-    /// word stands out). Applied like a completion of nothing. None at the start of a line.
+    /// The words likely to follow `prev` in `lang`: the corpus pairs after it, each at least `NEXT_WORD_SHARE` of them
+    /// (`thank` → you; nothing after `you`, where no word stands out).
+    fn next_words(&self, prev: &str, lang: InputLang) -> Vec<String> {
+        let comp = match lang { InputLang::Thai => &self.thai_comp, InputLang::Latin => &self.en_comp };
+        let Some(comp) = comp else { return vec![] };
+        let cx = self.context(Some(prev), lang);
+        let (Some(_), Some(b)) = (cx.prev, cx.bigrams) else { return vec![] };
+        // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
+        let mass = b.mass(prev);
+        b.followers(prev).take(3).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass)
+            .filter(|(w, _)| comp.knows(w) && !self.blocked(w)).map(|(w, _)| w.to_string()).collect()
+    }
+    /// The next words when the caret sits after a word and a space, in the input language. Applied like a completion
+    /// of nothing. None at the start of a line.
     fn next_word_rows(&self) -> Vec<BubbleItem> {
         if self.comp_muted || !self.line.last().is_some_and(|c| c.after().ends_with(' ')) { return vec![] }
         let Some(prev) = self.word_before(self.line.len()).map(|w| w.to_lowercase()) else { return vec![] };
-        let (lang, comp) = if self.thai_active { (InputLang::Thai, &self.thai_comp) } else { (InputLang::Latin, &self.en_comp) };
-        let Some(comp) = comp else { return vec![] };
-        let cx = self.context(Some(&prev), lang);
-        let (Some(_), Some(b)) = (cx.prev, cx.bigrams) else { return vec![] };
-        // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
-        let mass = b.mass(&prev);
-        b.followers(&prev).take(3).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass)
-            .filter(|(w, _)| comp.knows(w) && !self.blocked(w))
-            .map(|(w, _)| BubbleItem { label: w.to_string(), kind: BubbleKind::Complete { typed: String::new(), insert: w.to_string() } }).collect()
+        let lang = if self.thai_active { InputLang::Thai } else { InputLang::Latin };
+        self.next_words(&prev, lang).into_iter().map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }).collect()
+    }
+    /// The next words after the Thai run being typed, when its last word is a dictionary word (`แซ่บ` → มาก). Applied
+    /// like a completion of the run, labelled with the next word only.
+    fn thai_next_rows(&self) -> Vec<BubbleItem> {
+        if self.comp_muted || self.blocked(&self.word) { return vec![] }
+        let run = en_to_th(&self.word);
+        let d = &self.det.th_dict;
+        let Some(last) = d.segment(&run).last().map(|w| w.to_string()).filter(|w| d.has(w)) else { return vec![] };
+        self.next_words(&last, InputLang::Thai).into_iter()
+            .map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{run}{w}") } }).collect()
     }
     /// The completion rows on the bubble now.
     fn completions_up(&self) -> Vec<BubbleItem> { self.bubble.iter().filter(|b| matches!(b.kind, BubbleKind::Complete { .. })).cloned().collect() }
@@ -2820,6 +2846,19 @@ mod tests {
         e.reset(); e.opts.complete = CompleteMode::Pause;
         assert!(e.apply_settings(SettingsCmd::SetNextWord(false))); assert!(!e.settings_snapshot().next_word);
         typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+    }
+    #[test] fn a_pause_after_a_thai_word_offers_the_next_one_without_a_space() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause); e.opts.live = false;
+        e.thai_comp = Some(Completer::new([("แซ่บ", 10.0), ("มาก", 50.0), ("ของ", 40.0)].map(|(w, f)| (w.to_string(), f))));
+        e.thai_bigrams = Some(Bigrams::new([("แซ่บ", "มาก", 9.0), ("แซ่บ", "ของ", 1.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        typ_th(&mut e, "แซ่บ"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["มาก"], "only the clear favourite, labelled with the next word");
+        assert_eq!(e.bubble[0].kind, BubbleKind::Complete { typed: keys("แซ่บ"), insert: "แซ่บมาก".into() });
+        assert_eq!(tab(&mut e).actions[0], Action::Replace { delete: 0, insert: "มาก".into(), then: None });
+        // a run that does not end on a dictionary word offers no next word, nor does the setting turned off
+        e.reset(); typ_th(&mut e, "แซ่"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
+        e.reset(); e.opts.next_word = false; typ_th(&mut e, "แซ่บ"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
     }
     fn complete(typed: &str, insert: &str) -> BubbleItem { BubbleItem { label: insert.into(), kind: BubbleKind::Complete { typed: typed.into(), insert: insert.into() } } }
     #[test] fn a_key_with_pause_rows_up_updates_them_in_place() {
