@@ -184,6 +184,9 @@ fn is_chromium_browser(bundle: &str) -> bool {
     ["com.google.Chrome", "org.chromium", "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser", "com.vivaldi", "com.operasoftware"].iter().any(|b| bundle.starts_with(b))
 }
 static ENABLED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+/// Pids whose AX tree is built on request: Electron (took AXManualAccessibility) and Chromium browsers.
+static LAZY: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+fn lazy_tree(pid: i32) -> bool { LAZY.lock().unwrap().contains(&pid) }
 /// Chromium / Electron build their accessibility tree only on request: set AXManualAccessibility (Electron: Slack,
 /// VS Code, Discord, …; ignored by native apps) and, for Chromium browsers only, AXEnhancedUserInterface
 /// (it changes window animations elsewhere, so not set for every app). Once per pid.
@@ -194,6 +197,7 @@ unsafe fn enable_ax_tree(app: AXUIElementRef, pid: i32, bundle: &str) {
     let t = CFBoolean::true_value();
     let r1 = AXUIElementSetAttributeValue(app, CFString::new("AXManualAccessibility").as_concrete_TypeRef(), t.as_CFTypeRef());
     let r2 = if is_chromium_browser(bundle) { AXUIElementSetAttributeValue(app, CFString::new("AXEnhancedUserInterface").as_concrete_TypeRef(), t.as_CFTypeRef()) } else { 1 };
+    if r1 == 0 || is_chromium_browser(bundle) { let mut l = LAZY.lock().unwrap(); l.push(pid); if l.len() > 64 { l.remove(0); } }
     eprintln!("typethai: AX tree enable pid {pid} {bundle}: AXManualAccessibility={} AXEnhancedUserInterface={}", r1 == 0, if is_chromium_browser(bundle) { (r2 == 0).to_string() } else { "n/a".into() });
 }
 /// The app's AX element (release it), with a short messaging timeout and its AX tree switched on.
@@ -210,9 +214,9 @@ unsafe fn focus_check() -> (bool, Field) {
         let r = match focused_element(Some(app)) {
             Some(f) => {
                 let fe = f.as_CFTypeRef() as AXUIElementRef; let role = s(fe, "AXRole").unwrap_or_default();
-                (s(fe, "AXSubrole").as_deref() == Some("AXSecureTextField"), field::ax(Some(&role), ax_attr(fe, "AXSelectedTextRange").is_some(), true))
+                (s(fe, "AXSubrole").as_deref() == Some("AXSecureTextField"), field::ax(Some(&role), ax_attr(fe, "AXSelectedTextRange").is_some(), true, lazy_tree(pid)))
             }
-            None => (false, field::ax(None, false, ax_attr(app, "AXFocusedWindow").is_some())),
+            None => (false, field::ax(None, false, ax_attr(app, "AXFocusedWindow").is_some(), lazy_tree(pid))),
         };
         CFRelease(app as CFTypeRef);
         let f = if field::known_text_app(&bundle) { Field::Text } else if fresh && r.1 != Field::Text { Field::Unknown } else { r.1 };
@@ -290,6 +294,12 @@ pub fn caret_anchor() -> (Anchor, String) {
                 if crate::placement::plausible_caret(c, a.field, &mons) { a.caret = Some(c); how = h } else { how = "caret-implausible" }
             }
         }
+        // nothing to go by (Electron with its tree off): the click that focused the input, if it was in this window
+        if a.caret.is_none() && a.field.is_none() {
+            let win = app.and_then(|e| ax_attr(e, "AXFocusedWindow")).and_then(|w| { let w = w.as_CFTypeRef() as AXUIElementRef;
+                let (p, sz) = (ax_attr(w, "AXPosition").and_then(|v| ax_point(&v))?, ax_attr(w, "AXSize").and_then(|v| ax_size(&v))?); Some(Rect::new(p.x, p.y, sz.width, sz.height)) });
+            a.mouse = crate::placement::pointer_at(*LAST_CLICK.lock().unwrap(), win, a.mouse);
+        }
         if let Some(e) = app { CFRelease(e as CFTypeRef); }
         let src = crate::placement::source_of(&a, &crate::placement::Opts::default()).map(|s| s.name()).unwrap_or("none");
         (a, format!("app={appname} source={src} ({how}) caret={:?} field={:?} mouse={:?}", a.caret, a.field, a.mouse))
@@ -302,6 +312,8 @@ unsafe fn anchor() -> Anchor {
     with(|st| if st.last_src != src { st.last_src = src; eprintln!("typethai: bubble anchor {info}"); });
     a
 }
+/// Where the last click outside the bubble landed (global top-left points).
+static LAST_CLICK: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
 fn mouse_location() -> Option<(f64, f64)> {
     let s = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?; let e = CGEvent::new(s).ok()?; let p = e.location(); Some((p.x, p.y))
 }
@@ -399,7 +411,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             match bridge::geom().and_then(|g| g.hit(p.x, p.y)) {
                 // on the bubble: swallow so the click never reaches (or focuses) it; left click on a row accepts
                 Some(row) => { if let (CGEventType::LeftMouseDown, Some(i)) = (ty, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
-                None => { st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
+                None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
         CGEventType::KeyDown | CGEventType::KeyUp => {

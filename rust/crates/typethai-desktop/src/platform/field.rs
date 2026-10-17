@@ -45,13 +45,14 @@ pub fn uia(control_type: i32, text: bool, value: bool, read_only: bool) -> Field
     if t { Field::Text } else { Field::NotText }
 }
 /// AX focused element (`role` None: nothing answered). No focused element in an app that has a focused window
-/// (games, canvases) is not text.
-pub fn ax(role: Option<&str>, has_range: bool, has_window: bool) -> Field {
+/// (games, canvases) is not text, unless the app builds its tree on request (`lazy`: Electron, Chromium), where a
+/// text view often reports no focused element at all.
+pub fn ax(role: Option<&str>, has_range: bool, has_window: bool, lazy: bool) -> Field {
     match role {
         Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField") => Field::Text,
         Some(_) if has_range => Field::Text,
         Some(_) => Field::NotText,
-        None => if has_window { Field::NotText } else { Field::Unknown },
+        None => if has_window && !lazy { Field::NotText } else { Field::Unknown },
     }
 }
 /// Apps that take text without exposing a caret or an editable element (GPU terminals).
@@ -139,13 +140,17 @@ mod tests {
         assert_eq!(uia(50000, false, false, false), Field::NotText);           // Button
     }
     #[test] fn ax_rules() {
-        for r in ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] { assert_eq!(ax(Some(r), false, true), Field::Text, "{r}"); }
-        assert_eq!(ax(Some("AXGroup"), true, true), Field::Text);              // custom text view with a selection range
-        assert_eq!(ax(Some("AXWindow"), false, true), Field::NotText);         // game: focus rests on the window
-        assert_eq!(ax(Some("AXOutline"), false, true), Field::NotText);        // Finder list type-select
-        assert_eq!(ax(Some("AXWebArea"), false, true), Field::NotText);        // web page, no field focused
-        assert_eq!(ax(None, false, true), Field::NotText);                     // app answers, nothing focused
-        assert_eq!(ax(None, false, false), Field::Unknown);                    // app does not answer AX
+        for r in ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] { assert_eq!(ax(Some(r), false, true, false), Field::Text, "{r}"); }
+        assert_eq!(ax(Some("AXGroup"), true, true, false), Field::Text);              // custom text view with a selection range
+        assert_eq!(ax(Some("AXWindow"), false, true, false), Field::NotText);         // game: focus rests on the window
+        assert_eq!(ax(Some("AXOutline"), false, true, false), Field::NotText);        // Finder list type-select
+        assert_eq!(ax(Some("AXWebArea"), false, true, false), Field::NotText);        // web page, no field focused
+        assert_eq!(ax(None, false, true, false), Field::NotText);                     // native app answers, nothing focused
+        assert_eq!(ax(None, false, false, false), Field::Unknown);                    // app does not answer AX
+        // Electron / Chromium build their tree on request and often report no focused element in a text view
+        // (Orca's terminal): not knowing is not "not text"
+        assert_eq!(ax(None, false, true, true), Field::Unknown);
+        assert_eq!(ax(Some("AXWindow"), false, true, true), Field::NotText, "an element that answers still decides");
     }
     #[test] fn known_apps() {
         assert!(known_text_app("io.alacritty") && known_text_app("net.kovidgoyal.kitty") && !known_text_app("com.valvesoftware.steam"));

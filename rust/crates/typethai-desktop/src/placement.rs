@@ -92,6 +92,11 @@ pub fn plausible_caret(c: Rect, field: Option<Rect>, monitors: &[Monitor]) -> bo
         None => true,
     }
 }
+/// The pointer fallback for an app that exposes no caret or field: the last click when it landed in the window being
+/// typed in (that click put the focus there), else where the mouse is now.
+pub fn pointer_at(click: Option<(f64, f64)>, window: Option<Rect>, mouse: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    match (click, window) { (Some(c), Some(w)) if w.contains(c.0, c.1) => Some(c), _ => mouse }
+}
 /// Which source `place` would use for this anchor (logging).
 pub fn source_of(a: &Anchor, o: &Opts) -> Option<Source> {
     if a.caret.is_some_and(|r| r.is_valid()) { Some(Source::Caret) }
@@ -274,6 +279,13 @@ mod tests {
         assert!(!plausible_caret(Rect::new(5.0, 5.0, 1.0, 18.0), f, &[MAC]), "element-relative rect");
         assert!(!plausible_caret(Rect::new(3000.0, 105.0, 1.0, 18.0), None, &[MAC]), "off screen");
         assert!(!plausible_caret(Rect::new(0.0, 0.0, 0.0, 0.0), None, &[MAC]));
+    }
+    #[test] fn the_last_click_in_the_window_stands_in_for_the_caret() {
+        let w = Some(Rect::new(100.0, 100.0, 800.0, 600.0));
+        assert_eq!(pointer_at(Some((300.0, 650.0)), w, Some((5.0, 5.0))), Some((300.0, 650.0)), "the click that focused the input");
+        assert_eq!(pointer_at(Some((50.0, 50.0)), w, Some((5.0, 5.0))), Some((5.0, 5.0)), "a click outside the window: the mouse");
+        assert_eq!(pointer_at(None, w, Some((5.0, 5.0))), Some((5.0, 5.0)));
+        assert_eq!(pointer_at(Some((300.0, 650.0)), None, Some((5.0, 5.0))), Some((5.0, 5.0)), "no window frame: the mouse");
     }
     #[test] fn field_fallback_then_mouse() {
         let a = Anchor { caret: None, field: Some(Rect::new(200.0, 400.0, 600.0, 30.0)), mouse: Some((10.0, 10.0)) };
