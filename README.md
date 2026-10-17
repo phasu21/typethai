@@ -107,10 +107,10 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
-| **↑**, then **← / →**, then **↑** or **Enter** (Pick with arrow keys on) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. On by default; until ↑ the arrow keys move the cursor |
+| **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | While the bubble is up, ←/→ pick (no ↑ needed first), then ↑ or Enter applies; ↓, Esc or typing leaves. On by default; with no bubble the arrow keys move the cursor |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
-| **Ctrl+1 / 2 / 3** (Pick with Ctrl+1–3 on) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
+| **Ctrl+1 / 2 / 3** (Pick with: Ctrl+1–3) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
 | **⌃⌥Z** | Undo the last conversion |
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
@@ -122,8 +122,8 @@ on the others. Options are numbered from the left in the strip and from the top 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
-default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
-(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows over the
+default, or Vertical; prefs.json `"bubble_layout"`), which keys pick a row
+(**Pick with**: Arrow keys by default, Ctrl+1–3, or both; prefs.json `"pick_with_arrows"` and `"pick_with_ctrl"`), whether the input language shows over the
 caret when it switches (**Show the input language**, on by default; prefs.json `"input_badge": false` turns it off), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
