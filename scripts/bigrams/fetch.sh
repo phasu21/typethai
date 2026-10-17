@@ -4,7 +4,7 @@
 # usage: scripts/bigrams/fetch.sh <data dir>
 set -eu
 D=$1
-mkdir -p "$D/scb" "$D/wisesight" "$D/tatoeba" "$D/wiki"
+mkdir -p "$D/scb" "$D/wisesight" "$D/tatoeba" "$D/wiki" "$D/vistec"
 get() {
   [ -s "$2" ] && return 0
   curl -fsSL --retry 5 --retry-all-errors --speed-limit 10000 --speed-time 30 -o "$2.part" "$1"
@@ -30,6 +30,11 @@ HF=https://huggingface.co/datasets/wikimedia/wikipedia/resolve/b04c8d1ceb2f5cd45
 get "$HF/20231101.th/train-00002-of-00003.parquet" "$D/wiki/th.parquet"
 get "$HF/20231101.en/train-00040-of-00041.parquet" "$D/wiki/en.parquet"
 
+# VISTEC-TP-TH-2021 (CC BY-SA 3.0): Thai tweets 2017-2019, pinned commit of the OSKut repository.
+VT=be9e16ac2dc94e2a4bdae562347cc8ecb38ae125
+get "https://raw.githubusercontent.com/mrpeerat/OSKut/$VT/VISTEC-TP-TH-2021/VISTEC-TP-TH-2021.csv" "$D/vistec/VISTEC-TP-TH-2021.csv"
+
 # scripts/bigrams/SHA256SUMS holds the files the shipped pairs were built from (downloaded 2026-10-15).
-(cd "$D" && shasum -a 256 scb/*.zip wisesight/*.txt tatoeba/*.bz2 wiki/*.parquet) > "$D/SHA256SUMS"
+sum=$(command -v sha256sum || echo "shasum -a 256")
+(cd "$D" && $sum scb/*.zip wisesight/*.txt tatoeba/*.bz2 wiki/*.parquet vistec/*.csv) > "$D/SHA256SUMS"
 cat "$D/SHA256SUMS"

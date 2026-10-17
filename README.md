@@ -55,6 +55,12 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   or a word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on
   by default: **Settings… → Word suggestions → Predict the next word** turns it off, and **Forget learned words**
   clears it.
+- **Next word.** Pause after a word and the bubble offers the word that usually follows it, from the built-in word
+  pairs in the input language: after a space in English (`thank ` → you, `going ` → to), and in Thai as soon as the
+  run ends on a dictionary word, with no space (`แซ่บ` → มาก, `ขอบคุณ` → ค่ะ). Only a clear favourite is offered (at
+  least a fifth of the pairs after the word), so nothing comes up after words like `you` or `the`. Tab, the arrow keys
+  or a click types it. **Settings… → Word suggestions → Suggest the next word** turns it off (prefs.json
+  `"next_word": false`); it is also off while **Show suggestions** is Off.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
@@ -118,10 +124,10 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
-| **↑**, then **← / →**, then **↑** or **Enter** (Pick with arrow keys on) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. On by default; until ↑ the arrow keys move the cursor |
+| **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | While the bubble is up, ←/→ pick (no ↑ needed first), then ↑ or Enter applies; ↓, Esc or typing leaves. On by default; with no bubble the arrow keys move the cursor |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
-| **Ctrl+1 / 2 / 3** (Pick with Ctrl+1–3 on) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
+| **Ctrl+1 / 2 / 3** (Pick with: Ctrl+1–3) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
 | **⌃⌥Z** | Undo the last conversion |
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
@@ -133,8 +139,8 @@ on the others. Options are numbered from the left in the strip and from the top 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
-default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
-(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows over the
+default, or Vertical; prefs.json `"bubble_layout"`), which keys pick a row
+(**Pick with**: Arrow keys by default, Ctrl+1–3, or both; prefs.json `"pick_with_arrows"` and `"pick_with_ctrl"`), whether the input language shows over the
 caret (**Show the input language**, on by default: when it switches, and while focus sits in a text field nothing has
 been typed in yet; prefs.json `"input_badge": false` turns it off), how long a pause brings it back
 (**Show it again after**), list words that stay as you type
@@ -223,7 +229,7 @@ cd rust
 TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
-gh release download model-v3 -R phasu21/typethai -p typethai.ttm -D target/release
+gh release download model-v4 -R phasu21/typethai -p typethai.ttm -D target/release
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
@@ -254,7 +260,7 @@ script prints the `.ttm` size and held-out top-3 completion hit rates per level.
 ```sh
 scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DATA/SHA256SUMS
 python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
-PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v3 ships 3:all
+PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v4 ships 3:all (its Thai pairs; English as in model-v3)
 ```
 
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The

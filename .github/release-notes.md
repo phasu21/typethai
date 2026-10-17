@@ -9,12 +9,21 @@
   from the words around it, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or
   a word you misspell the same way twice). It learns from the lines you finish and stays on your machine. Settings →
   Word suggestions → *Predict the next word* turns it off; *Forget learned words* clears it.
-- Settings → Word suggestions now shows how long a pause brings the input language back, next to the switch for it.
+- **Suggest the next word.** Pause after a word and the bubble offers the word that usually follows it, from the
+  built-in word pairs of the input language: after a space in English (`thank ` → you, `going ` → to), and in Thai as
+  soon as the run ends on a dictionary word, with no space (`แซ่บ` → มาก, `ขอบคุณ` → ค่ะ). Only a clear favourite is
+  offered, so nothing comes up after a word like `you` or `the`. The pairs now include the VISTEC-TP-TH-2021 tweets:
+  466,754 Thai pairs, was 368,545.
+- **A better model (model-v4)** behind the conversions and those pairs — held-out Thai top-3 with the word before,
+  79.3% → 80.2%.
+- **Pick a suggestion with ← / →**, without pressing ↑ first, and **Pick with** is now one setting: Arrow keys (the
+  default), Ctrl+1–3, or both (prefs.json `"pick_with_arrows"` and `"pick_with_ctrl"`).
 
 **Fixed in 0.5.9**
 - The input-language flag is placed where the caret really is. Right after Enter in a terminal it used to land a line
   off (the caret is read before the app lays the new line out), and it stayed on the old spot when you moved to another
   text field. It now waits for the caret to settle and follows it.
+- A long Thai bubble label stays on one line instead of wrapping under itself in the strip.
 
 **New in 0.5.8**
 - **Pick with arrow keys is on by default.** With the bubble up, ↑ moves into it, ←/→ choose, ↑ again or Enter

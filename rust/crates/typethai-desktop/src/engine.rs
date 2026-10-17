@@ -71,8 +71,8 @@ pub enum Key {
     /// Ctrl+1..3 (Control alone): applies that row while the bubble is up and `Options::pick_ctrl` is on, otherwise
     /// navigation.
     PickRow(usize),
-    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Up moves into a visible bubble, then
-    /// Left/Right move the selection, Up again applies it and Down leaves.
+    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Left/Right move the selection of a visible
+    /// bubble (and move into it, like Up), Up or Enter in it applies and Down leaves.
     Arrow(Arrow),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,8 +241,9 @@ pub struct Options {
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
-    /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
-    /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
+    /// The arrow keys can pick from the bubble, like Windows text suggestions but without Up first: while it shows,
+    /// Left/Right pick (Up moves into it too), Enter or Up then applies, Down / Esc / typing leave. Off: plain arrows
+    /// are always navigation.
     pub pick_arrows: bool,
     /// The input-language badge at the caret when the input source changes; read by the platform layer. The badge also
     /// pins while focus sits in a text field nothing has been typed in yet, and comes back after `badge_idle`.
@@ -250,6 +251,8 @@ pub struct Options {
     /// How long a typing pause brings the input-language preview back (`Engine::on_idle`); the platform's timer ticks
     /// every 25 ms, and Settings offers `BADGE_IDLE_CHOICES_MS`.
     pub badge_idle: Duration,
+    /// A pause after a word (after a space in English) offers the word likely to follow it (with completion on).
+    pub next_word: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
@@ -257,7 +260,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
 live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Duration::from_millis(BADGE_IDLE_DEFAULT_MS), slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Duration::from_millis(BADGE_IDLE_DEFAULT_MS), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
 /// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
 /// 250 ms or more keeps it away until a real pause.
@@ -311,6 +314,8 @@ pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 pub const TAB_HOLD_CHOICES_MS: [u64; 6] = [200, 250, 350, 500, 750, 1000];
 pub const TAB_HOLD_DEFAULT_MS: u64 = TAB_HOLD_CHOICES_MS[0];
 pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
+/// The least share of the pairs after a word that a next word needs to be offered.
+const NEXT_WORD_SHARE: f64 = 0.2;
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -505,9 +510,9 @@ impl Engine {
             || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
             || (self.bubble_visible() && self.is_arrow_key(k))
     }
-    /// Up while the bubble can be entered; every arrow and Enter once in it.
+    /// Up, Left and Right while the bubble can be entered; every arrow and Enter once in it.
     fn is_arrow_key(&self, k: &Key) -> bool {
-        (self.opts.pick_arrows && *k == Key::Arrow(Arrow::Up)) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
+        (self.opts.pick_arrows && matches!(k, Key::Arrow(Arrow::Up | Arrow::Left | Arrow::Right))) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -668,6 +673,8 @@ impl Engine {
     fn on_arrow(&mut self, a: Arrow) -> Outcome {
         if !self.bubble_visible() || !self.is_arrow_key(&Key::Arrow(a)) { return self.on_key_inner(Key::Nav) }
         let acts = match (self.in_bubble, a) {
+            (false, Arrow::Left) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.prev())] }
+            (false, Arrow::Right) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.next())] }
             (false, _) => { self.in_bubble = true; vec![Action::Focus(true)] }
             (true, Arrow::Up) => return self.accept_held(self.sel.idx),
             (true, Arrow::Left) => vec![Action::Select(self.sel.prev())],
@@ -778,6 +785,7 @@ impl Engine {
             SettingsCmd::SetPickArrows(on) => { let changed = self.opts.pick_arrows != on; self.opts.pick_arrows = on; changed }
             SettingsCmd::SetInputBadge(on) => { let changed = self.opts.input_badge != on; self.opts.input_badge = on; changed }
             SettingsCmd::SetBadgeIdle(d) => { let changed = self.opts.badge_idle != d; self.opts.badge_idle = d; changed }
+            SettingsCmd::SetNextWord(on) => { let changed = self.opts.next_word != on; self.opts.next_word = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); if let Some(p) = &self.predict { p.forget() } self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.events_since_save += 1; true }
             SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; changed }
@@ -786,7 +794,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -890,7 +898,50 @@ impl Engine {
         // pause too, not only at the word boundary.
         if self.opts.live && self.thai_active && !self.live_visible() && (self.rev_wanted(&self.word) || self.rev_suggestable(&self.word)) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
+        if self.opts.complete != CompleteMode::Off && self.opts.next_word {
+            if self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
+            // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
+            // completions of that word
+            else if self.thai_active && !self.word.is_empty() && self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Complete { .. })) {
+                let rows = self.thai_next_rows();
+                if !rows.is_empty() {
+                    let mut items = rows;
+                    for c in self.completions_up() { if items.len() < 3 && !items.contains(&c) { items.push(c) } }
+                    if items != self.bubble { self.show(items, &mut acts) }
+                }
+            }
+        }
         acts
+    }
+    /// The words likely to follow `prev` in `lang`: the corpus pairs after it, each at least `NEXT_WORD_SHARE` of them
+    /// (`thank` → you; nothing after `you`, where no word stands out).
+    fn next_words(&self, prev: &str, lang: InputLang) -> Vec<String> {
+        let comp = match lang { InputLang::Thai => &self.thai_comp, InputLang::Latin => &self.en_comp };
+        let Some(comp) = comp else { return vec![] };
+        let cx = self.context(Some(prev), lang);
+        let (Some(_), Some(b)) = (cx.prev, cx.bigrams) else { return vec![] };
+        // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
+        let mass = b.mass(prev);
+        b.followers(prev).take(3).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass)
+            .filter(|(w, _)| comp.knows(w) && !self.blocked(w)).map(|(w, _)| w.to_string()).collect()
+    }
+    /// The next words when the caret sits after a word and a space, in the input language. Applied like a completion
+    /// of nothing. None at the start of a line.
+    fn next_word_rows(&self) -> Vec<BubbleItem> {
+        if self.comp_muted || !self.line.last().is_some_and(|c| c.after().ends_with(' ')) { return vec![] }
+        let Some(prev) = self.word_before(self.line.len()).map(|w| w.to_lowercase()) else { return vec![] };
+        let lang = if self.thai_active { InputLang::Thai } else { InputLang::Latin };
+        self.next_words(&prev, lang).into_iter().map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }).collect()
+    }
+    /// The next words after the Thai run being typed, when its last word is a dictionary word (`แซ่บ` → มาก). Applied
+    /// like a completion of the run, labelled with the next word only.
+    fn thai_next_rows(&self) -> Vec<BubbleItem> {
+        if self.comp_muted || self.blocked(&self.word) { return vec![] }
+        let run = en_to_th(&self.word);
+        let d = &self.det.th_dict;
+        let Some(last) = d.segment(&run).last().map(|w| w.to_string()).filter(|w| d.has(w)) else { return vec![] };
+        self.next_words(&last, InputLang::Thai).into_iter()
+            .map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{run}{w}") } }).collect()
     }
     /// The completion rows on the bubble now.
     fn completions_up(&self) -> Vec<BubbleItem> { self.bubble.iter().filter(|b| matches!(b.kind, BubbleKind::Complete { .. })).cloned().collect() }
@@ -1165,7 +1216,8 @@ impl Engine {
     }
     fn on_boundary(&mut self, b: Boundary) -> Outcome {
         self.tab_pending = false;
-        self.live_streak = 0; self.comp_muted = false; self.last_key = None;
+        // a pause after a space may offer the next word
+        self.live_streak = 0; self.comp_muted = false; self.last_key = (b == Boundary::Space).then(Instant::now);
         let typed = std::mem::take(&mut self.word);
         let mut acts = vec![]; let mut swallow = false;
         if typed.is_empty() {
@@ -1756,12 +1808,17 @@ mod tests {
         assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Up)));
         let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]); assert_eq!(e.buffer(), "");
     }
+    #[test] fn left_right_pick_without_up_first() {
+        let Some((mut e, n)) = railed() else { return };
+        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Down)));
+        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true), Action::Select(1 % n)]);
+        assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "Enter applies once an arrow picked");
+        // Down is still navigation outside the bubble
+        let Some((mut e, _)) = railed() else { return };
+        assert!(!e.on_key(Key::Arrow(Arrow::Down)).swallow); assert!(!e.bubble_visible());
+    }
     #[test] fn up_enters_the_bubble_and_left_right_move() {
         let Some((mut e, n)) = railed() else { return };
-        // before Up, Left/Right move the caret: the word ends, the bubble goes
-        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Up))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
-        let o = e.on_key(Key::Arrow(Arrow::Left)); assert!(!o.swallow); assert!(!e.bubble_visible());
-        let Some((mut e, _)) = railed() else { return };
         let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true)]);
         assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
         let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Select(1 % n)]);
@@ -1769,7 +1826,7 @@ mod tests {
         // Down leaves; the bubble and the word stay
         let o = e.on_key(Key::Arrow(Arrow::Down)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(false)]);
         assert!(e.bubble_visible()); assert_eq!(e.buffer(), "l;ylfu");
-        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(!o.swallow); assert!(!e.bubble_visible());
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "out again: Enter is an ordinary Enter");
     }
     #[test] fn up_again_applies() {
         let Some((mut e, _)) = railed() else { return };
@@ -1792,15 +1849,14 @@ mod tests {
         let Some((mut e, _)) = railed() else { return };
         e.on_key(Key::Arrow(Arrow::Up));
         let o = e.on_key(Key::Char('a')); assert!(!o.swallow); assert_eq!(o.actions.first(), Some(&Action::Focus(false)));
-        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)));
-        assert!(!e.on_key(Key::Arrow(Arrow::Left)).swallow);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)));
     }
     #[test] fn tab_still_applies_inside_the_bubble() {
         let Some((mut e, n)) = railed() else { return };
         if n < 2 { return }
-        e.on_key(Key::Arrow(Arrow::Up)); e.on_key(Key::Arrow(Arrow::Right));
+        e.on_key(Key::Arrow(Arrow::Right));
         let o = tab(&mut e); assert!(o.swallow); assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. }))); assert!(!e.bubble_visible());
-        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "a new bubble starts outside");
+        assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "no bubble: Left moves the caret");
     }
     #[test] fn suggestion_shows_before_space() {
         let Some(mut e) = engine() else { return };
@@ -2943,6 +2999,40 @@ mod tests {
         // a boundary takes them away and offers nothing for the finished word
         let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    #[test] fn a_pause_after_a_space_offers_the_next_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.set_thai_active(false);
+        e.en_comp = Some(Completer::new([("you", 50.0), ("can", 20.0), ("are", 30.0), ("zebra", 90.0)].map(|(w, f)| (w.to_string(), f))));
+        e.en_bigrams = Some(Bigrams::new([("you", "can", 9.0), ("you", "are", 5.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        typ(&mut e, "You "); e.show(vec![], &mut vec![]);
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["can", "are"], "the pairs after `you`, whatever its case");
+        let o = tab(&mut e); assert_eq!(o.actions[0], Action::Replace { delete: 0, insert: "can".into(), then: None });
+        // a word the pairs do not know offers nothing, nor one with no clear favourite after it, nor Off
+        e.reset(); typ(&mut e, "zebra "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        e.en_bigrams = Some(Bigrams::new(["can", "are", "zebra", "you", "x", "y"].map(|n| ("you".to_string(), n.to_string(), 1.0))));
+        e.reset(); typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        e.en_bigrams = Some(Bigrams::new([("you", "can", 9.0), ("you", "are", 5.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        e.reset(); e.opts.complete = CompleteMode::Off; typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        // nor the setting turned off
+        e.reset(); e.opts.complete = CompleteMode::Pause;
+        assert!(e.apply_settings(SettingsCmd::SetNextWord(false))); assert!(!e.settings_snapshot().next_word);
+        typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+    }
+    #[test] fn a_pause_after_a_thai_word_offers_the_next_one_without_a_space() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause); e.opts.live = false;
+        e.thai_comp = Some(Completer::new([("แซ่บ", 10.0), ("มาก", 50.0), ("ของ", 40.0)].map(|(w, f)| (w.to_string(), f))));
+        e.thai_bigrams = Some(Bigrams::new([("แซ่บ", "มาก", 9.0), ("แซ่บ", "ของ", 1.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        typ_th(&mut e, "แซ่บ"); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["มาก"], "only the clear favourite, labelled with the next word");
+        assert_eq!(e.bubble[0].kind, BubbleKind::Complete { typed: keys("แซ่บ"), insert: "แซ่บมาก".into() });
+        assert_eq!(tab(&mut e).actions[0], Action::Replace { delete: 0, insert: "มาก".into(), then: None });
+        // a run that does not end on a dictionary word offers no next word, nor does the setting turned off
+        e.reset(); typ_th(&mut e, "แซ่"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
+        e.reset(); e.opts.next_word = false; typ_th(&mut e, "แซ่บ"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
     }
     fn complete(typed: &str, insert: &str) -> BubbleItem { BubbleItem { label: insert.into(), kind: BubbleKind::Complete { typed: typed.into(), insert: insert.into() } } }
     /// One English letter is enough: after the pause the frequency list ranks `h` to its top words, and Tab applies the
