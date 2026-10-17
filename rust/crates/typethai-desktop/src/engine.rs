@@ -273,8 +273,9 @@ pub const REV_LIVE: f64 = 0.98;
 /// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
 pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 /// Tab held this long on its own opens the ⌃⌥R rows, like the hotkey: the selection, or the word before the caret.
-/// `Options::tab_hold` is one of the choices Settings offers; this is the default.
-pub const TAB_HOLD_CHOICES_MS: [u64; 4] = [350, 500, 750, 1000];
+/// `Options::tab_hold` is one of the choices Settings offers; this is the default. The quickest stays past
+/// `TAB_CHORD_MIN`: a tap is shorter, and the indicator needs a moment to fill.
+pub const TAB_HOLD_CHOICES_MS: [u64; 6] = [200, 250, 350, 500, 750, 1000];
 pub const TAB_HOLD_DEFAULT_MS: u64 = 500;
 pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
@@ -2512,6 +2513,11 @@ mod tests {
         assert_eq!(holds(&a), [&Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + Duration::from_millis(1000) }))], "fills towards the setting");
         assert!(!tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(_))), "not at the default");
         assert!(tick_after(&mut e, Duration::from_millis(1000)).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+    }
+    #[test] fn the_quickest_hold_still_lets_a_tap_through() {
+        // a tap is under the indicator's start, and the quickest hold is past it
+        assert!(TAB_HOLD_CHOICES_MS.iter().all(|&ms| Duration::from_millis(ms) > TAB_CHORD_MIN));
+        assert_eq!(TAB_HOLD_CHOICES_MS[0], 200);
     }
     #[test] fn a_tab_tap_is_still_a_tab() {
         let Some(mut e) = engine() else { return };

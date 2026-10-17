@@ -194,6 +194,8 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["tab_hold_ms"], 1000);
         assert_eq!(Prefs::load(&path), slow);
+        let quick = Prefs { tab_hold: Duration::from_millis(200), ..Prefs::default() };
+        quick.save(&path); assert_eq!(Prefs::load(&path), quick, "the quickest choice");
         std::fs::write(&path, r#"{"never":[],"tab_hold_ms":123}"#).unwrap();
         assert_eq!(Prefs::load(&path).tab_hold, Duration::from_millis(TAB_HOLD_DEFAULT_MS), "a value Settings never offers");
         std::fs::write(&path, r#"{"never":[]}"#).unwrap();
