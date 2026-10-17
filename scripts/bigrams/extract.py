@@ -47,6 +47,13 @@ for lang, code in [("en", "eng"), ("th", "tha")]:
             if len(parts) == 3:
                 emit("tatoeba", lang, parts[2], parts[2])
 
+# VISTEC-TP-TH-2021: the raw tweet (questionText); the linguists' segmentation is not used, the text is segmented
+# over the model's dictionary like every other source.
+csv.field_size_limit(1 << 24)
+with open(os.path.join(data, "vistec/VISTEC-TP-TH-2021.csv"), encoding="utf-8", newline="") as f:
+    for row in csv.DictReader(f):
+        emit("vistec", "th", row["questionText"], row["questionText"])
+
 import pyarrow.parquet as pq
 
 for lang in ["th", "en"]:
