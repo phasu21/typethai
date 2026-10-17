@@ -127,6 +127,18 @@ completion frequencies).
   the ~1 ms the macOS tap allows. The µs query fits the key hook, the ms persist does not, which is why the model
   lives on its own thread.
 
+## One next-word feature, and the model behind the word you type
+
+- 0.5.9 shipped main's *Suggest the next word* (built-in corpus pairs, offered when nothing is being typed); the local
+  work added the personal word n-gram (`typethai-predict`). They look like two features because both were called
+  "next word": the model's `complete` is prefix-constrained (its `Query::prefix` is at least 2 letters of the word being
+  typed, and `Engine::predicted` refuses an empty tail), so it *cannot* answer "what word comes next".
+- Merged as one story with two names that say what they do: **Suggest the next word** (the pairs; unchanged) and
+  **Finish words from my typing** (the model, renamed from "Predict the next word").
+- To have the model also propose the *next* word, `typethai-predict` needs a `next_word(&Query)`-style call over its
+  trigram (`Model::top_k` / `followers_of` are private to the completion path today); then the pairs become the
+  fallback. Not done: it is a change to the ported crate, with its own confidence semantics.
+
 ## Input-language preview while a field is untouched
 
 - The badge (🇹🇭 ไทย / 🇺🇸 EN over the caret) now also shows when focus lands in a text field nothing has been typed in

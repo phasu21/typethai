@@ -50,10 +50,10 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   learned words** clears it. One letter or one Thai key is enough once you pause — `t` offers *the / to / that*, the
   way a code editor's ghost text does. Typing English keys on the Thai layout also offers that English back as the
   first row (notably `ok` ≈ `นา`), with the Thai words under it.
-- **Next-word prediction.** Beside the dictionary completions, a small model of *your own* typing finishes the word
-  from the words around it, in Thai or English, and can offer words the built-in lists do not have (a name, jargon,
-  or a word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on
-  by default: **Settings… → Word suggestions → Predict the next word** turns it off, and **Forget learned words**
+- **Finish words from my typing.** Beside the dictionary completions, a small model of *your own* typing finishes the
+  word you are typing, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or a
+  word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on by
+  default: **Settings… → Word suggestions → Finish words from my typing** turns it off, and **Forget learned words**
   clears it.
 - **Next word.** Pause after a word and the bubble offers the word that usually follows it, from the built-in word
   pairs in the input language: after a space in English (`thank ` → you, `going ` → to), and in Thai as soon as the
@@ -196,9 +196,10 @@ in between) to run the guess-convert on the current or last word instead of usin
 - With **Learn from my typing** on (the default), the words you finish and which word came before each are counted in
   `words.json`, next to `personal.json`, to rank word suggestions. Text in password fields is never seen. Turn the
   setting off to stop counting, and use **Forget learned words** or delete the file to clear it.
-- **Next-word prediction** counts the same lines in `ngram.snapshot`, next to `words.json`: a word n-gram of the words
-  you type, with no other data in it. It starts with your first finished lines, so it is strongest once you have typed
-  for a while. **Predict the next word** off (Word suggestions) stops the model and touches no state file at all;
+- **Finish words from my typing** counts the same lines in `ngram.snapshot`, next to `words.json`: a word n-gram of the
+  words you type, with no other data in it. It starts with your first finished lines, so it is strongest once you have
+  typed for a while. **Finish words from my typing** off (Word suggestions) stops the model and touches no state file at
+  all;
   **Forget learned words** clears the snapshot too. Deleting the file resets it.
 
 ## Accuracy (measured on held-out data; summary)

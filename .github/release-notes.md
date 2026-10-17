@@ -5,10 +5,11 @@
   stays until your first key, so the language you are about to type is in sight; it comes back on its own after a pause
   in typing. Settings → Word suggestions → *Show it again after* chooses the pause (1 to 10 seconds, 2 by default).
   As before, it keeps out of password fields, non-text fields and the bubble's way.
-- **Next-word prediction.** Beside the dictionary completions, a small model of *your own* typing finishes the word
-  from the words around it, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or
-  a word you misspell the same way twice). It learns from the lines you finish and stays on your machine. Settings →
-  Word suggestions → *Predict the next word* turns it off; *Forget learned words* clears it.
+- **Finish words from my typing.** Beside the dictionary completions, a small model of *your own* typing finishes the
+  word you are typing, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or a word
+  you misspell the same way twice). It learns from the lines you finish and stays on your machine. Settings → Word
+  suggestions → *Finish words from my typing* turns it off; *Forget learned words* clears it. The *next* word after a
+  pause still comes from the built-in word pairs (*Suggest the next word*, in 0.5.9).
 
 **Fixed in 0.5.10**
 - The input-language flag is placed where the caret really is. Right after Enter in a terminal it used to land a line
