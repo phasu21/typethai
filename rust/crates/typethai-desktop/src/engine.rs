@@ -230,6 +230,8 @@ pub struct Options {
     pub pick_arrows: bool,
     /// The input-language badge at the caret when the input source changes; read by the platform layer.
     pub input_badge: bool,
+    /// A pause after a word and a space offers the words likely to follow it (with completion on).
+    pub next_word: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
@@ -237,7 +239,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
 /// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
 /// 250 ms or more keeps it away until a real pause.
@@ -287,6 +289,8 @@ pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 pub const TAB_HOLD_CHOICES_MS: [u64; 6] = [200, 250, 350, 500, 750, 1000];
 pub const TAB_HOLD_DEFAULT_MS: u64 = TAB_HOLD_CHOICES_MS[0];
 pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
+/// The least share of the pairs after a word that a next word needs to be offered.
+const NEXT_WORD_SHARE: f64 = 0.2;
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -701,6 +705,7 @@ impl Engine {
             SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
             SettingsCmd::SetPickArrows(on) => { let changed = self.opts.pick_arrows != on; self.opts.pick_arrows = on; changed }
             SettingsCmd::SetInputBadge(on) => { let changed = self.opts.input_badge != on; self.opts.input_badge = on; changed }
+            SettingsCmd::SetNextWord(on) => { let changed = self.opts.next_word != on; self.opts.next_word = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
@@ -708,7 +713,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, next_word: self.opts.next_word, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -798,7 +803,24 @@ impl Engine {
         // English on the Thai layout below the live bar: its reverse row, which also keeps Thai completions away
         if self.opts.live && self.thai_active && !self.live_visible() && self.rev_suggestable(&self.word) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
+        if self.opts.complete != CompleteMode::Off && self.opts.next_word && self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
         acts
+    }
+    /// The words likely to follow the last one, when the caret sits after it and a space: the corpus pairs after it
+    /// in the input language, each at least `NEXT_WORD_SHARE` of them (`thank` → you; nothing after `you`, where no
+    /// word stands out). Applied like a completion of nothing. None at the start of a line.
+    fn next_word_rows(&self) -> Vec<BubbleItem> {
+        if self.comp_muted || !self.line.last().is_some_and(|c| c.after().ends_with(' ')) { return vec![] }
+        let Some(prev) = self.word_before(self.line.len()).map(|w| w.to_lowercase()) else { return vec![] };
+        let (lang, comp) = if self.thai_active { (InputLang::Thai, &self.thai_comp) } else { (InputLang::Latin, &self.en_comp) };
+        let Some(comp) = comp else { return vec![] };
+        let cx = self.context(Some(&prev), lang);
+        let (Some(_), Some(b)) = (cx.prev, cx.bigrams) else { return vec![] };
+        // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
+        let mass = b.mass(&prev);
+        b.followers(&prev).take(3).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass)
+            .filter(|(w, _)| comp.knows(w) && !self.blocked(w))
+            .map(|(w, _)| BubbleItem { label: w.to_string(), kind: BubbleKind::Complete { typed: String::new(), insert: w.to_string() } }).collect()
     }
     /// The completion rows on the bubble now.
     fn completions_up(&self) -> Vec<BubbleItem> { self.bubble.iter().filter(|b| matches!(b.kind, BubbleKind::Complete { .. })).cloned().collect() }
@@ -998,7 +1020,8 @@ impl Engine {
     }
     fn on_boundary(&mut self, b: Boundary) -> Outcome {
         self.tab_pending = false;
-        self.live_streak = 0; self.comp_muted = false; self.last_key = None;
+        // a pause after a space may offer the next word
+        self.live_streak = 0; self.comp_muted = false; self.last_key = (b == Boundary::Space).then(Instant::now);
         let typed = std::mem::take(&mut self.word);
         let mut acts = vec![]; let mut swallow = false;
         if typed.is_empty() {
@@ -2776,6 +2799,27 @@ mod tests {
         // a boundary takes them away and offers nothing for the finished word
         let o = e.on_key(Key::Boundary(Boundary::Space)); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![]);
+    }
+    #[test] fn a_pause_after_a_space_offers_the_next_word() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.set_thai_active(false);
+        e.en_comp = Some(Completer::new([("you", 50.0), ("can", 20.0), ("are", 30.0), ("zebra", 90.0)].map(|(w, f)| (w.to_string(), f))));
+        e.en_bigrams = Some(Bigrams::new([("you", "can", 9.0), ("you", "are", 5.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        typ(&mut e, "You "); e.show(vec![], &mut vec![]);
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["can", "are"], "the pairs after `you`, whatever its case");
+        let o = tab(&mut e); assert_eq!(o.actions[0], Action::Replace { delete: 0, insert: "can".into(), then: None });
+        // a word the pairs do not know offers nothing, nor one with no clear favourite after it, nor Off
+        e.reset(); typ(&mut e, "zebra "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        e.en_bigrams = Some(Bigrams::new(["can", "are", "zebra", "you", "x", "y"].map(|n| ("you".to_string(), n.to_string(), 1.0))));
+        e.reset(); typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        e.en_bigrams = Some(Bigrams::new([("you", "can", 9.0), ("you", "are", 5.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        e.reset(); e.opts.complete = CompleteMode::Off; typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+        // nor the setting turned off
+        e.reset(); e.opts.complete = CompleteMode::Pause;
+        assert!(e.apply_settings(SettingsCmd::SetNextWord(false))); assert!(!e.settings_snapshot().next_word);
+        typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
     }
     fn complete(typed: &str, insert: &str) -> BubbleItem { BubbleItem { label: insert.into(), kind: BubbleKind::Complete { typed: typed.into(), insert: insert.into() } } }
     #[test] fn a_key_with_pause_rows_up_updates_them_in_place() {
