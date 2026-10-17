@@ -258,6 +258,7 @@ impl Layout {
         self.surfaces.iter().copied().chain(self.badges().into_iter().map(|(_, r)| r)).chain(self.key_hints(sel)).collect()
     }
 }
+pub static SHIFT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 pub fn geom() -> Option<Geom> { GEOM.lock().unwrap().clone() }
 pub fn set_geom(g: Option<Geom>) { *GEOM.lock().unwrap() = g; }

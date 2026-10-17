@@ -332,6 +332,9 @@ unsafe fn service_settings(st: &mut State) {
     let _ = st.tx.send(UiMsg::Settings(snap));
 }
 unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
+    if vk == VK_SHIFT.0 as u32 || vk == VK_LSHIFT.0 as u32 || vk == VK_RSHIFT.0 as u32 {
+        bridge::SHIFT_HELD.store(!up, Ordering::SeqCst);
+    }
     if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x} up={up}"); }
     // every keystroke, whatever becomes of it: typing takes the input-language preview down
     if !up { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }

@@ -52,12 +52,17 @@ pub(crate) fn thai_font() -> Font {
 }
 
 impl Render for BubbleView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The key tap owns the shift state (`bridge::SHIFT_HELD`); the run loop repaints on a change of it (20 ms), so
+        // no window modifier listener is needed here. A listener registered per render also feeds gpui key/modifier
+        // dispatch for a non-activating popup, whose dispatch has no active node: `key_dispatch::active_node_id()`
+        // unwraps None and the app aborts (seen at launch, in `did_finish_launching`).
         if self.marker { return div().size_full().bg(rgb(0xff2d2d)).into_any_element() }
         let t = cx.theme(); let l = &self.layout; let selected = self.selected;
         // the strip's pill is too small for "Enter"
         let (apply_key, apply_pill) = if self.focused { ("Enter", "↵") } else { ("Tab", "Tab") };
         let hold = self.hold.map(|h| h.progress(Instant::now()));
+        let shift = bridge::SHIFT_HELD.load(std::sync::atomic::Ordering::SeqCst) || window.modifiers().shift;
         let dark = t.is_dark();
         let hover = t.list_hover;
         // selected row is a little stronger in dark mode
@@ -106,7 +111,16 @@ impl Render for BubbleView {
                     div().flex().flex_row().items_center().gap(px(bridge::OPT_GAP as f32)).p(px(bridge::GROUP_PAD as f32))
                         .bg(surface).border_1().border_color(edge).rounded(px(bridge::RADIUS as f32)).shadow_md()
                         .on_children_prepainted(move |b, _, _| { let mut rb = rb.borrow_mut(); for (k, b) in b.into_iter().enumerate() { if let Some(s) = rb.get_mut(start + k) { *s = b } } })
-                        .children((run.start..run.start + run.len).map(|i| Button::new(("opt", i)).selected(i == selected).child(column(i, &self.items[i]).mt(px(bridge::LABEL_DROP as f32))))) });
+                        .children((run.start..run.start + run.len).map(|i| {
+                            let label = column(i, &self.items[i]).mt(px(bridge::LABEL_DROP as f32));
+                            let child = if shift {
+                                div().flex().flex_col().items_center().gap(px(2.)).child(label)
+                                    .child(div().flex().flex_row().gap(px(4.))
+                                        .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
+                                        .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.))))
+                            } else { label };
+                            Button::new(("opt", i)).selected(i == selected).child(child)
+                        })) });
                 // the badges and key hints come after all the buttons, so a neighbour never paints over one; filled like
                 // their button and ringed in its border colour, so they read as notched into it
                 let badges = l.badges_of().into_iter().map(|(i, r, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).child(badge(r, if i == selected { btn_sel } else { btn_bg })));
@@ -140,6 +154,9 @@ impl Render for BubbleView {
                             .child(column(i, o))
                             // a row has no corner to hang a badge on: a column before the keys, when any row has one
                             .when(l.reasons.iter().any(Option::is_some), |d| d.child(div().w(px(bridge::BADGE_D as f32)).flex_none().when_some(o.reason, |d, r| d.child(badge(r, if i == selected { row_sel } else { row_bg })))))
+                            .when(shift, |d| d.child(div().flex_none().flex().flex_row().gap(px(4.)).px(px(4.))
+                                .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
+                                .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.)))))
                             // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
                             .child(div().w(px(bridge::HINT_SLOT_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
                                 .child(match hold.filter(|_| i == selected) {
@@ -189,7 +206,7 @@ impl AssetSource for AppAssets {
 }
 
 /// `cells`: the option boxes last published to `bridge::GEOM`.
-struct Ui { last: Option<Rect>, native: native::Native, handle: AnyWindowHandle, view: Entity<BubbleView>, visible: bool, anchor: Option<Anchor>, size: (f64, f64), cells: Vec<Rect> }
+struct Ui { last: Option<Rect>, native: native::Native, handle: AnyWindowHandle, view: Entity<BubbleView>, visible: bool, anchor: Option<Anchor>, size: (f64, f64), cells: Vec<Rect>, shift: bool }
 impl Ui {
     /// Measure labels -> layout (a strip, or rows when the strip does not fit) -> place -> show. The exact row heights
     /// (and widths, if fonts differ) come from the real layout via `reconcile` on the next frames. Returns the initial placement.
@@ -288,7 +305,7 @@ fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut A
 }
 fn open_bubble(cx: &mut App) -> Ui {
     let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false }));
-    Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![] }
+    Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![], shift: false }
 }
 
 /// The input-language badge: a pill like the strip's groups, the language's round flag (as on a conversion's badge)
@@ -428,6 +445,8 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Settings(snap) => { if !snap.input_badge { badge.unpin(cx) } settings::apply_snapshot(&mut settings_win, snap, cx) },
                     } }
                     ui.reconcile(cx); badge.tick(cx);
+                    let sh = bridge::SHIFT_HELD.load(std::sync::atomic::Ordering::SeqCst);
+                    if sh != ui.shift { ui.shift = sh; ui.view.update(cx, |_, cx| cx.notify()); }
                     if ui.visible && ui.view.read(cx).hold.is_some() { ui.view.update(cx, |_, cx| cx.notify()) }
                     if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
                     let tray_cmd = tray.as_ref().and_then(|t| t.poll());

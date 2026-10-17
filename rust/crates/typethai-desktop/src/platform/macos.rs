@@ -437,6 +437,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+            if code == 0x38 || code == 0x3C { bridge::SHIFT_HELD.store(matches!(ty, CGEventType::KeyDown), Ordering::SeqCst); }
             let key = if matches!(ty, CGEventType::KeyUp) {
                 // the only release that matters: Tab, while it is held over the bubble
                 if code != 0x30 || !st.app.engine.is_bubble_key(&Key::TabUp) { return false }
