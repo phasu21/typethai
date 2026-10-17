@@ -1,5 +1,9 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.11**
+- Windows: the mouse no longer stutters while typeThai is running, in games above all. The mouse hook now has a thread
+  of its own, and nothing it does waits on typing, suggestions or a look at the focused field.
+
 **New in 0.5.10**
 - **The input language shows before you type.** Focus a text field and the 🇹🇭 ไทย / 🇺🇸 EN flag sits above the caret and
   stays until your first key, so the language you are about to type is in sight; it comes back on its own after a pause
