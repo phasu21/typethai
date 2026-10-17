@@ -52,6 +52,10 @@ fn suffix(engine: &mut dyn Predictor, before: &str, prefix: &str) -> Option<Stri
 		.map(|hint| hint.suffix)
 }
 
+fn next(engine: &mut dyn Predictor, before: &str) -> Option<String> {
+	engine.next_word(before).map(|hint| hint.suffix)
+}
+
 fn observe_times(engine: &mut dyn Predictor, prompt: &str, times: usize) {
 	for _ in 0..times {
 		engine.observe(prompt);
@@ -156,4 +160,28 @@ fn single_letters_complete_from_context_but_finished_words_stay_bare() {
 	assert_eq!(suffix(engine.as_mut(), "Can you help me figure ", "o").as_deref(), Some("ut"));
 	// `I` is a word of its own: no ghost after the single letter.
 	assert_eq!(suffix(engine.as_mut(), "", "I"), None);
+}
+
+#[test]
+fn next_word_follows_what_was_typed() {
+	let dir = StateDir::new("next-word");
+	let mut engine = dir
+		.open_with(&["thank", "you", "for", "the", "coffee", "and", "money"])
+		.expect("open");
+	observe_times(&mut *engine, "thank you for the coffee", 4);
+	assert_eq!(next(&mut *engine, "thank ").as_deref(), Some("you"), "the only follower");
+	assert_eq!(next(&mut *engine, "coffee ").as_deref(), None, "nothing followed it");
+	assert_eq!(next(&mut *engine, "").as_deref(), Some("thank"), "before anything: the line's own opener");
+	assert_eq!(next(&mut *engine, "the ").as_deref(), Some("coffee"));
+	// the more often a word followed, the likelier it is the one offered
+	observe_times(&mut *engine, "for money", 4);
+	assert_eq!(next(&mut *engine, "for ").as_deref(), Some("money"), "the frequent follower");
+}
+
+#[test]
+fn next_word_keeps_the_casing_it_was_typed_with() {
+	let dir = StateDir::new("next-word-case");
+	let mut engine = dir.open_with(&["สวัสดี", "ครับ"]).expect("open");
+	observe_times(&mut *engine, "สวัสดี ครับ", 4);
+	assert_eq!(next(&mut *engine, "สวัสดี ").as_deref(), Some("ครับ"));
 }

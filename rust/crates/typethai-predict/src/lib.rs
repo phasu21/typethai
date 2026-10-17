@@ -1,8 +1,9 @@
 //! Ghost-text word completion for the typeThai composer.
 //!
 //! The engine answers "what is the rest of the word being typed?" for one
-//! [`Query`] and learns from submitted prompts; only the personal word n-gram
-//! engine is ported here. It is a port of `pi-predict` from oh-my-pi
+//! [`Query`], "what word comes next?" for a line ([`Predictor::next_word`]),
+//! and learns from submitted prompts; only the personal word n-gram engine is
+//! ported here. It is a port of `pi-predict` from oh-my-pi
 //! (`https://github.com/can1357/oh-my-pi`, `crates/pi-predict` at tag
 //! `v18.11.3`, MIT — see `LICENSE-THIRD-PARTY.md`) with the embedded Norvig
 //! web prior removed and word trust injected through [`WordOracle`].
@@ -90,6 +91,11 @@ pub trait Predictor: Send {
 	fn observe(&mut self, prompt: &str);
 	/// Learn from a suggestion the user accepted (Tab) or typed past.
 	fn feedback(&mut self, query: &Query<'_>, suggestion: &str, accepted: bool);
+	/// The word likely to follow `before`, for the moment nothing of a word is typed yet: `suffix` is that whole word,
+	/// already cased. `None` when the last word of `before` was never followed by anything worth offering, so the host
+	/// can fall back to its own word lists (`complete` needs at least two letters of a word and cannot answer this).
+	/// Like [`Predictor::complete`], it must not change learned state; `&mut` is for inference caches only.
+	fn next_word(&mut self, before: &str) -> Option<Suggestion>;
 	/// Flush learned state to [`Config::state_dir`].
 	///
 	/// # Errors

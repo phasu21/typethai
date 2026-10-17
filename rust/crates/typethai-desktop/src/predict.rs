@@ -23,6 +23,8 @@ enum Cmd {
     Learn(String),
     /// Ask for the rest of `prefix`, typed after `before`.
     Ask { key: u64, before: String, prefix: String },
+    /// Ask for the word likely to follow `before`, with nothing typed yet (the same answer channel).
+    NextWord { key: u64, before: String },
     /// Drop everything learned and start over.
     Forget,
     /// Write the snapshot and answer when it is on disk.
@@ -47,6 +49,9 @@ impl Predict {
     }
     pub fn learn(&self, line: String) { let _ = self.tx.send(Cmd::Learn(line)); }
     pub fn ask(&self, key: u64, before: String, prefix: String) { let _ = self.tx.send(Cmd::Ask { key, before, prefix }); }
+    /// Ask for the word likely to follow `before`, with nothing of a word typed yet (the answer arrives on the same
+    /// channel, told apart by the key the caller made).
+    pub fn next_word(&self, key: u64, before: String) { let _ = self.tx.send(Cmd::NextWord { key, before }); }
     pub fn forget(&self) { let _ = self.tx.send(Cmd::Forget); }
     /// The next answer the model gave, if one is waiting: the query it belongs to, the letters it appends, and how
     /// sure it is.
@@ -70,6 +75,11 @@ fn run(dir: &Path, oracle: &Arc<dyn WordOracle>, jobs: &mpsc::Receiver<Cmd>, out
             }
             Ok(Cmd::Ask { key, before, prefix }) => {
                 if let Some(hint) = engine.as_mut().and_then(|e| e.complete(&Query { before: &before, prefix: &prefix })) {
+                    let _ = out.send(Reply::Answer { key, suffix: hint.suffix, confidence: f64::from(hint.confidence) });
+                }
+            }
+            Ok(Cmd::NextWord { key, before }) => {
+                if let Some(hint) = engine.as_mut().and_then(|e| e.next_word(&before)) {
                     let _ = out.send(Reply::Answer { key, suffix: hint.suffix, confidence: f64::from(hint.confidence) });
                 }
             }

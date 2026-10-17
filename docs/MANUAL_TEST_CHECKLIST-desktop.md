@@ -109,6 +109,9 @@
 - [x] `--select 1`: the `Tab` keycap moves to the second button and the strip keeps its width. `--light` looks right.
 - [x] One option over 240 px (`--items "สวัสดีครับ|ภาษาไทย ทดสอบ วรรณยุกต์ ก่ ก้ ก๊ ก๋ ภาษาอังกฤษ|l;ylfu"`) stacks the bubble as rows. `--vertical` stacks short options too.
 - [ ] Live, After a pause: type `hel` and stop. The strip appears with the first label at the caret's x; keep typing `m`: the options update in place without a flash or a jump, and the strip narrows from its left edge.
+- [ ] Next word, model beside pairs: type a line with a rare word pair (a name, jargon) and finish it with Enter twice
+  or three times, then type the first word and pause: the pair rows come from the built-in list and the last row is the
+  model's own follower. Settings → *Finish words from my typing* off: the model's row goes, the built-in rows stay.
 - [ ] Click each button: that option is applied. Click the padding or the gap between two buttons: nothing is applied, the click does not reach the app, and the bubble stays.
 - [ ] Shift+↓ / Shift+↑ move the highlight along the strip; clicks still land on the right button afterwards.
 - [ ] Near the bottom of the screen the strip flips above the caret; near the right edge it stays on screen.

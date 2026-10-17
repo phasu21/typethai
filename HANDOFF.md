@@ -133,11 +133,15 @@ completion frequencies).
   work added the personal word n-gram (`typethai-predict`). They look like two features because both were called
   "next word": the model's `complete` is prefix-constrained (its `Query::prefix` is at least 2 letters of the word being
   typed, and `Engine::predicted` refuses an empty tail), so it *cannot* answer "what word comes next".
-- Merged as one story with two names that say what they do: **Suggest the next word** (the pairs; unchanged) and
-  **Finish words from my typing** (the model, renamed from "Predict the next word").
-- To have the model also propose the *next* word, `typethai-predict` needs a `next_word(&Query)`-style call over its
-  trigram (`Model::top_k` / `followers_of` are private to the completion path today); then the pairs become the
-  fallback. Not done: it is a change to the ported crate, with its own confidence semantics.
+- Merged as one story with two names that say what they do: **Suggest the next word** (the pairs) and **Finish words
+  from my typing** (the model, renamed from "Predict the next word").
+- The model now answers the next word too: `Predictor::next_word(&mut self, before)` (crate) scores the saved word's
+  followers of the line's last word with the completion chain and returns the best one's share; the engine asks once per
+  line state (`ask_next_word`, keyed with `NEXT_WORD_KEY` so an answer is told apart from a completion's) and appends
+  the word to the pair rows when it is not already one of them. The pairs stay the feature (`Suggest the next word`);
+  the model adds what they cannot know (a name, jargon, a habit).
+- The model answers from its own thread, so `offer_next_words` runs twice: below the pause guard (the pairs, once per
+  pause, as before) and above it for a tick where `pred_next_answer` has landed since (`last_key` is already `None`).
 
 ## Input-language preview while a field is untouched
 

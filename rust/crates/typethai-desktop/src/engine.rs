@@ -633,6 +633,9 @@ impl Engine {
                 if let Some(l) = layout_of(insert) { o.actions.push(Action::SwitchInput(l)); }
             }
         }
+        // the line may have changed: ask the predictor for the word that follows it now, so its answer is in hand by the
+        // pause that shows the next-word rows (the model answers from its own thread, a tick later)
+        self.ask_next_word();
         o
     }
     fn on_key_inner(&mut self, k: Key) -> Outcome {
@@ -905,6 +908,12 @@ impl Engine {
             }
             if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + self.opts.tab_hold }))) }
         }
+        // the model answers from its own thread, so the word it adds to the next-word rows can arrive after the pause
+        // tick that offered the pairs: take it on a later tick, once (the row it shows keeps this quiet afterwards)
+        if self.last_key.is_none() && self.word.is_empty() && !self.bubble_visible()
+            && self.pred_next_answer.as_ref().is_some_and(|(key, _, _)| Some(*key) == self.pred_next_ask) {
+            self.offer_next_words(&mut acts);
+        }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
         self.last_key = None;
         // English on the Thai layout: its reverse row, which the words just typed may also get. A word whose keys are
@@ -912,22 +921,29 @@ impl Engine {
         // pause too, not only at the word boundary.
         if self.opts.live && self.thai_active && !self.live_visible() && (self.rev_wanted(&self.word) || self.rev_suggestable(&self.word)) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
-        if self.opts.complete != CompleteMode::Off && self.opts.next_word {
-            self.ask_next_word();
-            self.poll_prediction();
-            if self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
-            // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
-            // completions of that word
-            else if self.thai_active && !self.word.is_empty() && self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Complete { .. })) {
-                let rows = self.thai_next_rows();
-                if !rows.is_empty() {
-                    let mut items = rows;
-                    for c in self.completions_up() { if items.len() < 3 && !items.contains(&c) { items.push(c) } }
-                    if items != self.bubble { self.show(items, &mut acts) }
-                }
+        self.offer_next_words(&mut acts);
+        acts
+    }
+    /// The next-word rows: the built-in pairs after the word just finished, and the personal model's word where it has
+    /// one for this line. The pairs only show once the pause has elapsed (`on_idle` calls this below that guard); an
+    /// answer that lands later brings the rows up on its own tick.
+    fn offer_next_words(&mut self, acts: &mut Vec<Action>) {
+        if self.opts.complete == CompleteMode::Off || !self.opts.next_word { return }
+        self.ask_next_word();
+        self.poll_prediction();
+        if self.word.is_empty() {
+            if !self.bubble_visible() { let rows = self.next_word_rows(); if rows != self.bubble { self.show(rows, acts) } }
+        }
+        // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
+        // completions of that word
+        else if self.thai_active && self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Complete { .. })) {
+            let rows = self.thai_next_rows();
+            if !rows.is_empty() {
+                let mut items = rows;
+                for c in self.completions_up() { if items.len() < 3 && !items.contains(&c) { items.push(c) } }
+                if items != self.bubble { self.show(items, acts) }
             }
         }
-        acts
     }
     /// The words to offer after `prev`: the built-in pairs, and the personal model's word in the last slot when it
     /// has one for this line (the pairs know the language, the model knows this user).
@@ -3293,7 +3309,6 @@ mod tests {
         // then its word follows "zorble ", where the built-in pairs know nothing
         typ(&mut e, "zorble ");
         let got = until_idle(&mut e, |e| labels(e).iter().any(|l| l == "quux"));
-        eprintln!("DBG ask={:?} answer={:?} text={:?} start={} line={} alt={} rows={:?}", e.pred_next_ask, e.pred_next_answer, e.predict_text(e.line.len()), e.line_start, e.line.len(), e.line.last().map(|c| c.after()), labels(&e));
         assert!(got, "the model's word: {:?}", labels(&e));
         // and it keeps the pairs' rows when they have any (they lead, the model's word is the last one)
         assert!(labels(&e).len() <= 3);

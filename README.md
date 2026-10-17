@@ -54,9 +54,10 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   word you are typing, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or a
   word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on by
   default: **Settings… → Word suggestions → Finish words from my typing** turns it off, and **Forget learned words**
-  clears it.
-- **Next word.** Pause after a word and the bubble offers the word that usually follows it, from the built-in word
-  pairs in the input language: after a space in English (`thank ` → you, `going ` → to), and in Thai as soon as the
+  clears it. It also adds its guess to the next-word rows above, beside the built-in pairs.
+- **Next word.** Pause after a word and the bubble offers the word that usually follows it: built-in word pairs in the
+  input language, plus your own model's guess (see `Finish words from my typing` below) when its follower was not
+  already one of them. The pairs: after a space in English (`thank ` → you, `going ` → to), and in Thai as soon as the
   run ends on a dictionary word, with no space (`แซ่บ` → มาก, `ขอบคุณ` → ค่ะ). Only a clear favourite is offered (at
   least a fifth of the pairs after the word), so nothing comes up after words like `you` or `the`. Tab, the arrow keys
   or a click types it. **Settings… → Word suggestions → Suggest the next word** turns it off (prefs.json

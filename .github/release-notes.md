@@ -8,8 +8,8 @@
 - **Finish words from my typing.** Beside the dictionary completions, a small model of *your own* typing finishes the
   word you are typing, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or a word
   you misspell the same way twice). It learns from the lines you finish and stays on your machine. Settings → Word
-  suggestions → *Finish words from my typing* turns it off; *Forget learned words* clears it. The *next* word after a
-  pause still comes from the built-in word pairs (*Suggest the next word*, in 0.5.9).
+  suggestions → *Finish words from my typing* turns it off; *Forget learned words* clears it. It also adds the word it
+  expects next to the *Suggest the next word* rows (0.5.9), beside the built-in pairs.
 
 **Fixed in 0.5.10**
 - The input-language flag is placed where the caret really is. Right after Enter in a terminal it used to land a line

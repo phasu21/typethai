@@ -184,6 +184,46 @@ impl QueryState {
 		out
 	}
 
+	/// The word that follows `before` in what the user typed: the followers of its last word, each scored with the
+	/// same interpolated chain the completions use, and the best one's share of them. `before` is the text in front of
+	/// the caret, with no word being typed; the word comes back whole and cased. `None` when that word was never
+	/// followed by anything suggestible, or when the followers have no mass at all.
+	pub fn next_word(&mut self, model: &Model, before: &str) -> Option<(String, f64)> {
+		self.load(model, before);
+		let ctx = self.context_stats(model);
+		let followers = ctx.followers?;
+		let mut best: Option<(u32, f64)> = None;
+		let mut mass = 0.0f64;
+		for at in 0..followers.ids.len() {
+			let id = followers.ids[at];
+			// the same words the completions may offer: real spellings, words typed often enough, never a slip
+			if !model.eligible(id) {
+				continue;
+			}
+			let c2 = followers.counts[at];
+			let c3 = if ctx.pair != NONE && c2 > 0.0 {
+				model
+					.tri
+					.get(u64::from(ctx.pair) << 32 | u64::from(id))
+					.unwrap_or(0.0)
+			} else {
+				0.0
+			};
+			let cand = Candidate { id, c2, c3, ..Candidate::default() };
+			let score = chain_score(model, &ctx, &cand);
+			if score <= 0.0 {
+				continue;
+			}
+			mass += score;
+			if best.is_none_or(|(_, seen)| score > seen) {
+				best = Some((id, score));
+			}
+		}
+		let (id, score) = best?;
+		let word = model.suffix(id, "", "");
+		(!word.is_empty()).then_some((word, score / mass))
+	}
+
 	fn suffix(&mut self, model: &Model, pick: Pick, typed: &str, key: &str) -> String {
 		case_tail_into(typed, &mut self.tail);
 		let k = typed.chars().count();

@@ -152,6 +152,13 @@ impl Predictor for NgramPredictor {
 		(confidence >= gate).then_some(Suggestion { suffix, confidence })
 	}
 
+	fn next_word(&mut self, before: &str) -> Option<Suggestion> {
+		let (word, confidence) = self.query.next_word(&self.model, before)?;
+		let confidence = confidence as f32;
+		let gate = self.gate.unwrap_or(self.model.params.show_threshold);
+		(confidence >= gate).then_some(Suggestion { suffix: word, confidence })
+	}
+
 	fn observe(&mut self, prompt: &str) {
 		self.model.learn(prompt);
 	}
