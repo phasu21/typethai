@@ -237,11 +237,11 @@ pub struct Options {
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
     complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
-/// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default, 250 ms, is above the
-/// gap between keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms; the shorter ones
-/// are for who wants the bubble sooner and does not mind it flashing.
+/// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
+/// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
+/// 250 ms or more keeps it away until a real pause.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 6] = [50, 100, 150, 250, 400, 600];
-pub const COMPLETE_IDLE_DEFAULT_MS: u64 = 250;
+pub const COMPLETE_IDLE_DEFAULT_MS: u64 = COMPLETE_IDLE_CHOICES_MS[0];
 /// When word completions appear in the bubble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)] pub enum CompleteMode { Off, #[default] Pause, Typing }
 /// What a key or a pause asks of the completion rows.
@@ -281,10 +281,10 @@ pub const REV_SUGGEST_LEN: usize = 4;
 /// How long Tab must be down before R makes Tab+R. Fast typing rolls Tab into the next key in less: that R is typed.
 pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 /// Tab held this long on its own opens the ⌃⌥R rows, like the hotkey: the selection, or the word before the caret.
-/// `Options::tab_hold` is one of the choices Settings offers; this is the default. The quickest stays past
+/// `Options::tab_hold` is one of the choices Settings offers; the default is the quickest. It stays past
 /// `TAB_CHORD_MIN`: a tap is shorter, and the indicator needs a moment to fill.
 pub const TAB_HOLD_CHOICES_MS: [u64; 6] = [200, 250, 350, 500, 750, 1000];
-pub const TAB_HOLD_DEFAULT_MS: u64 = 500;
+pub const TAB_HOLD_DEFAULT_MS: u64 = TAB_HOLD_CHOICES_MS[0];
 pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;

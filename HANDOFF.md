@@ -62,7 +62,7 @@ completion frequencies).
   English frequencies are TTM section 11 (FrequencyWords `en_50k`); older `.ttm` files have none, and then English
   completion is off while Thai still works. `Completions.confidence` counts the prefix itself when it is a word, so
   `you` / `ฉัน` do not read as confident prefixes.
-- Engine: `Options::{complete, complete_conf (0.4), complete_idle (500 ms)}`, `CompleteMode::{Off, Pause, Typing}`
+- Engine: `Options::{complete, complete_conf (0.4), complete_idle (50 ms)}`, `CompleteMode::{Off, Pause, Typing}`
   (default Pause). `completion_rows` picks the text: a Thai layout run or a wrong-layout word under a live row
   completes its last word (`thai_tail`) and keeps the head; otherwise an ASCII word from `en_comp`, topped up by
   `Speller::completions` (NSSpellChecker; none on Windows). English typed on the Thai layout keeps only its reverse
