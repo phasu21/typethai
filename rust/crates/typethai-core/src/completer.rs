@@ -34,6 +34,7 @@ impl Completer {
     fn span(&self, prefix: &str) -> (usize, usize) {
         (self.words.partition_point(|(w, _)| w.as_str() < prefix), self.words.partition_point(|(w, _)| w.as_str() < prefix || w.starts_with(prefix)))
     }
+    pub fn has(&self, word: &str) -> bool { let w = word.to_ascii_lowercase(); self.words.binary_search_by(|(x, _)| x.as_str().cmp(&w)).is_ok() }
     pub fn extends(&self, prefix: &str) -> bool {
         let p = prefix.to_ascii_lowercase();
         self.words.get(self.start(&p)).is_some_and(|(w, _)| w.starts_with(&p))

@@ -194,8 +194,8 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["tab_hold_ms"], 1000);
         assert_eq!(Prefs::load(&path), slow);
-        let quick = Prefs { tab_hold: Duration::from_millis(200), ..Prefs::default() };
-        quick.save(&path); assert_eq!(Prefs::load(&path), quick, "the quickest choice");
+        let mid = Prefs { tab_hold: Duration::from_millis(350), ..Prefs::default() };
+        mid.save(&path); assert_eq!(Prefs::load(&path), mid, "another choice");
         std::fs::write(&path, r#"{"never":[],"tab_hold_ms":123}"#).unwrap();
         assert_eq!(Prefs::load(&path).tab_hold, Duration::from_millis(TAB_HOLD_DEFAULT_MS), "a value Settings never offers");
         std::fs::write(&path, r#"{"never":[]}"#).unwrap();
@@ -333,11 +333,11 @@ mod tests {
         assert_eq!(saved["complete_idle_ms"], 150);
         assert_eq!(Prefs::load(&path), fast);
         std::fs::write(&path, r#"{"never":["ok"],"completion":"pause","learn_words":true}"#).unwrap();
-        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "file from before the setting");
-        let fastest = Prefs { complete_idle: Duration::from_millis(50), ..Prefs::default() };
-        fastest.save(&path); assert_eq!(Prefs::load(&path), fastest, "the fastest choice");
+        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), "file from before the setting");
+        let slow = Prefs { complete_idle: Duration::from_millis(600), ..Prefs::default() };
+        slow.save(&path); assert_eq!(Prefs::load(&path), slow, "the slowest choice");
         std::fs::write(&path, r#"{"never":[],"complete_idle_ms":7}"#).unwrap();
-        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(250), "a value Settings never offers");
+        assert_eq!(Prefs::load(&path).complete_idle, Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), "a value Settings never offers");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

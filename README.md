@@ -37,7 +37,7 @@ unless you press a key.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
   Thai run, or a word typed on the wrong layout, which is converted as it is completed) or an English word. By
-  default completions appear after a short pause in typing (a quarter of a second; choose 150 to 600 ms in Settings), and
+  default completions appear after a short pause in typing (50 ms; choose 50 to 600 ms in Settings), and
 once they are up they follow the word as you keep typing. **Settings… → Word suggestions** switches them to
   **While typing** (shown as you type, only when one word is a clear favourite) or **Off**. **Tab** accepts the
   highlighted word, and **Esc** hides completions until the next word. Completions are ranked by the word before the
@@ -116,7 +116,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
-| **Hold Tab** (half a second; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
+| **Hold Tab** (200 ms; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
 | **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
