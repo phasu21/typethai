@@ -1,5 +1,5 @@
 //! Prefix completion over a frequency-ranked word list, read through the slips a typist makes.
-use crate::{dict::Dict, ngram::Ngram, slip::{Slip, Slips}};
+use crate::{corrector::{DEFAULT_COSTS, key_distance}, dict::Dict, ngram::Ngram, slip::{Slip, Slips}};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
@@ -35,6 +35,11 @@ impl Completer {
         (self.words.partition_point(|(w, _)| w.as_str() < prefix), self.words.partition_point(|(w, _)| w.as_str() < prefix || w.starts_with(prefix)))
     }
     pub fn has(&self, word: &str) -> bool { let w = word.to_ascii_lowercase(); self.words.binary_search_by(|(x, _)| x.as_str().cmp(&w)).is_ok() }
+    /// True when some word the completer knows is within `max_dist` (keyboard-aware) of `word`.
+    pub fn has_near(&self, word: &str, max_dist: f64) -> bool {
+        let w = word.to_ascii_lowercase();
+        self.words.iter().any(|(cw, _)| key_distance(&w, cw, &DEFAULT_COSTS) <= max_dist)
+    }
     pub fn extends(&self, prefix: &str) -> bool {
         let p = prefix.to_ascii_lowercase();
         self.words.get(self.start(&p)).is_some_and(|(w, _)| w.starts_with(&p))

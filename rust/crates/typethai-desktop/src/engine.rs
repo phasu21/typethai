@@ -25,6 +25,9 @@ pub trait Speller {
 }
 /// How much of the line in front of a word the spell checker is given, in bytes.
 const SPELL_CONTEXT: usize = 200;
+/// Marks a next-word query's key: the completion queries never set this bit, so an answer arriving on the shared
+/// channel can be told apart.
+const NEXT_WORD_KEY: u64 = 1 << 63;
 /// How much of the line before a word the predictor is given, in characters (the model reads a recent tail).
 const PREDICT_BEFORE_CHARS: usize = 2000;
 /// The query the predictor is asked for a word: the line, the head kept in front of it, and the word being typed, so
@@ -395,6 +398,8 @@ pub struct Engine {
     /// answer it gave (`key`, its confidence, the whole word), and the word last shown, which stays while the word is
     /// typed through: a ghost must not move under the user's fingers.
     pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String)>,
+    /// The next-word query asked for this line state (its key), and its answer: the key, confidence, word.
+    pred_next_ask: Option<u64>, pred_next_answer: Option<(u64, f64, String)>,
     /// The finished line has been given to the predictor (a line is learned once).
     line_learned: bool,
     /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
@@ -403,7 +408,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -485,6 +490,11 @@ impl Engine {
     pub fn rev_prob(&self, last: &str) -> (f64, bool) {
         self.rev_score(last).map_or((0.0, false), |(p, d)| (p, d.convertible))
     }
+    /// The English text a reverse conversion should insert: the typed keys, or their best spelling when they
+    /// are a typo of a known English word.
+    fn rev_target(&self, typed: &str) -> String {
+        self.en_items("", typed, None).first().map(|i| i.label.clone()).unwrap_or_else(|| typed.to_string())
+    }
     fn rev_score(&self, last: &str) -> Option<(f64, RevDecision)> {
         let r = self.rev.as_ref()?;
         let tail: Vec<&str> = self.line[self.line_start.min(self.line.len())..].iter().rev().take_while(|c| c.rev).take(self.opts.context_words).map(|c| c.typed.as_str()).collect::<Vec<_>>().into_iter().rev().chain([last]).collect();
@@ -494,7 +504,11 @@ impl Engine {
     /// The `rev_suggest` band (see there), for a pause or a boundary.
     fn rev_suggestable(&self, typed: &str) -> bool {
         if self.blocked(typed) || typed.chars().count() < REV_SUGGEST_LEN || !typed.chars().all(|c| c.is_ascii_alphabetic()) { return false }
-        if !self.en_comp.as_ref().is_some_and(|c| c.has(typed)) { return false }
+        // A known English word, a typo of one the spell checker flags, or a typo of one the completer knows.
+        let known = self.en_comp.as_ref().is_some_and(|c| c.has(typed));
+        let near = self.en_comp.as_ref().is_some_and(|c| c.has_near(typed, 1.0));
+        let spell = !self.en_items("", typed, None).is_empty();
+        if !known && !near && !spell { return false }
         self.rev_score(typed).is_some_and(|(p, d)| d.convertible && !d.th_word && p > self.opts.rev_suggest)
     }
     pub fn bubble_visible(&self) -> bool { !self.bubble.is_empty() }
@@ -788,7 +802,7 @@ impl Engine {
             SettingsCmd::SetNextWord(on) => { let changed = self.opts.next_word != on; self.opts.next_word = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); if let Some(p) = &self.predict { p.forget() } self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.events_since_save += 1; true }
-            SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; changed }
+            SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.pred_next_ask = None; self.pred_next_answer = None; changed }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
             SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
         }
@@ -831,7 +845,7 @@ impl Engine {
     /// Show the live bubble for the buffer, replacing also the `prev` committed words before it (reverse phrase).
     fn show_live(&mut self, prev: usize, acts: &mut Vec<Action>) {
         let typed = self.word.clone();
-        let text = if self.thai_active { typed.clone() } else { en_to_th(&typed) };
+        let text = if self.thai_active { self.rev_target(&typed) } else { en_to_th(&typed) };
         let prev = prev.min(self.line.len().saturating_sub(self.line_start.min(self.line.len())));
         let mut label = String::new();
         for c in &self.line[self.line.len() - prev..] { label += &c.typed; label += &c.after(); }
@@ -899,6 +913,8 @@ impl Engine {
         if self.opts.live && self.thai_active && !self.live_visible() && (self.rev_wanted(&self.word) || self.rev_suggestable(&self.word)) { let prev = self.live_prev(); self.show_live(prev, &mut acts); }
         if self.opts.complete == CompleteMode::Pause { self.update_completions(true, &[], &mut acts); }
         if self.opts.complete != CompleteMode::Off && self.opts.next_word {
+            self.ask_next_word();
+            self.poll_prediction();
             if self.word.is_empty() && !self.bubble_visible() { let rows = self.next_word_rows(); self.show(rows, &mut acts) }
             // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
             // completions of that word
@@ -912,6 +928,15 @@ impl Engine {
             }
         }
         acts
+    }
+    /// The words to offer after `prev`: the built-in pairs, and the personal model's word in the last slot when it
+    /// has one for this line (the pairs know the language, the model knows this user).
+    fn next_words_here(&self, prev: &str, lang: InputLang) -> Vec<String> {
+        let mut words = self.next_words(prev, lang);
+        if let Some(w) = self.predicted_next() {
+            if !words.iter().any(|x| *x == w) { words.truncate(2); words.push(w) }
+        }
+        words
     }
     /// The words likely to follow `prev` in `lang`: the corpus pairs after it, each at least `NEXT_WORD_SHARE` of them
     /// (`thank` → you; nothing after `you`, where no word stands out).
@@ -931,7 +956,7 @@ impl Engine {
         if self.comp_muted || !self.line.last().is_some_and(|c| c.after().ends_with(' ')) { return vec![] }
         let Some(prev) = self.word_before(self.line.len()).map(|w| w.to_lowercase()) else { return vec![] };
         let lang = if self.thai_active { InputLang::Thai } else { InputLang::Latin };
-        self.next_words(&prev, lang).into_iter().map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }).collect()
+        self.next_words_here(&prev, lang).into_iter().map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }).collect()
     }
     /// The next words after the Thai run being typed, when its last word is a dictionary word (`แซ่บ` → มาก). Applied
     /// like a completion of the run, labelled with the next word only.
@@ -940,7 +965,7 @@ impl Engine {
         let run = en_to_th(&self.word);
         let d = &self.det.th_dict;
         let Some(last) = d.segment(&run).last().map(|w| w.to_string()).filter(|w| d.has(w)) else { return vec![] };
-        self.next_words(&last, InputLang::Thai).into_iter()
+        self.next_words_here(&last, InputLang::Thai).into_iter()
             .map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{run}{w}") } }).collect()
     }
     /// The completion rows on the bubble now.
@@ -991,6 +1016,7 @@ impl Engine {
         let Some(p) = &self.predict else { return false };
         let mut answered = false;
         while let Some((key, suffix, confidence)) = p.answer() {
+            if key & NEXT_WORD_KEY != 0 { self.pred_next_answer = Some((key, confidence, suffix)); answered = true; continue }
             let Some((asked, tail, thai)) = self.pred_ask.clone() else { continue };
             if asked != key { continue }
             let typed = format!("{tail}{suffix}");
@@ -1000,6 +1026,23 @@ impl Engine {
             answered = true;
         }
         answered
+    }
+    /// Ask the predictor for the word that follows the line, once per line state: the answer is in hand by the pause
+    /// that shows the next-word rows. The context is the line as the model reads it (`predict_text`).
+    fn ask_next_word(&mut self) {
+        if !self.opts.predict || self.predict.is_none() { self.pred_next_ask = None; self.pred_next_answer = None; return }
+        let text = self.predict_text(self.line.len());
+        let key = query_key(&text, "", "", self.thai_active) | NEXT_WORD_KEY;
+        if self.pred_next_ask == Some(key) { return }
+        self.pred_next_ask = Some(key);
+        self.pred_next_answer = None;
+        if let Some(p) = &self.predict { p.next_word(key, text) }
+    }
+    /// The word the predictor offers after the line's last word, when its answer for this line state is in: a name,
+    /// jargon or a habit of this user's that the built-in word pairs do not have.
+    fn predicted_next(&self) -> Option<String> {
+        let (key, _, word) = self.pred_next_answer.as_ref()?;
+        (Some(*key) == self.pred_next_ask && !word.is_empty()).then(|| word.clone())
     }
     /// The row the predictor offers for the word being typed: `(label, insert)`, or None while its answer is on the
     /// way. The query is asked once per state of the word; until the answer arrives the word last shown stays, as long
@@ -1268,8 +1311,9 @@ impl Engine {
     fn on_boundary_rev(&mut self, typed: String, b: Boundary) -> Outcome {
         let mut acts = vec![]; let mut swallow = false; let mut converted = None;
         let thai = en_to_th(&typed);
+        let target = self.rev_target(&typed);
         if self.rev_wanted(&typed) {
-            self.show(vec![BubbleItem { label: typed.clone(), kind: BubbleKind::ConvertPrev { k: 0 } }], &mut acts); self.phrase = 1;
+            self.show(vec![BubbleItem { label: target.clone(), kind: BubbleKind::ConvertPrev { k: 0 } }], &mut acts); self.phrase = 1;
             self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
@@ -1283,17 +1327,17 @@ impl Engine {
             let k = self.rev_prev_count(&typed);
             if self.opts.auto_convert && sure {
                 // legacy (--auto-convert): flip at the boundary
-                swallow = true; converted = Some(typed.clone()); with_prev = k;
+                swallow = true; converted = Some(target.clone()); with_prev = k;
                 let start = self.line.len() - k;
                 let (mut ins, mut was) = (String::new(), String::new());
                 for c in &self.line[start..] { ins += &c.typed; ins += &c.after(); was += &c.orig; was += &c.after(); }
                 for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
-                acts.push(self.replace(&format!("{was}{thai}"), &format!("{ins}{typed}"), Some(b)));
+                acts.push(self.replace(&format!("{was}{thai}"), &format!("{ins}{target}"), Some(b)));
                 self.show(vec![BubbleItem { label: format!("{was}{thai}"), kind: BubbleKind::UndoConversion }], &mut acts);
             } else {
                 let start = self.line.len() - k;
-                let mut label = String::new(); for c in &self.line[start..] { label += &c.typed; label += &c.after(); }
-                label += &typed;
+                let mut label = String::new(); for c in &self.line[start..] { label += &self.rev_target(&c.typed); label += &c.after(); }
+                label += &target;
                 self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
             }
         } else { self.show(vec![], &mut acts); }
@@ -1334,7 +1378,7 @@ impl Engine {
     }
     /// What Guess turns `typed` into: the English keys (reverse), else the Thai reading or its top typo correction.
     fn guess_target(&self, typed: &str, rev: bool) -> String {
-        if rev { return typed.to_string() }
+        if rev { return self.rev_target(typed) }
         let base = en_to_th(typed);
         match self.corrector.as_ref().map(|c| c.suggest(&base, 3, &self.det.thai)) {
             Some(cor) if !cor.in_dict && !cor.suggestions.is_empty() => cor.suggestions[0].word.clone(),
@@ -1425,7 +1469,7 @@ impl Engine {
                     self.commit_glued(typed, target, 0);
                 } else if let Some((shown, c)) = self.last_on_screen() {
                     let c = c.clone(); if c.converted.is_some() { return Outcome { swallow: true, actions: acts } }
-                    let target = if c.rev { c.typed.clone() } else { en_to_th(&c.typed) };
+                    let target = if c.rev { self.rev_target(&c.typed) } else { en_to_th(&c.typed) };
                     acts.push(self.replace(&shown, &format!("{target}{}", c.after()), None));
                     self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Retype); }
                     self.line.push(Committed { converted: Some(target), ..c });
@@ -1531,7 +1575,7 @@ impl Engine {
     /// word as it is and as converted, in the order the boundary bubble uses. A reverse conversion clears a high bar,
     /// so the Thai on screen is not offered fixed next to it; a forward one keeps the English spelling in reach.
     fn word_rows(&self, before: &str, typed: &str, rev: bool, prev: Option<String>) -> Vec<BubbleItem> {
-        let (screen, target) = if rev { (en_to_th(typed), typed.to_string()) } else { (typed.to_string(), en_to_th(typed)) };
+        let (screen, target) = if rev { (en_to_th(typed), self.rev_target(typed)) } else { (typed.to_string(), en_to_th(typed)) };
         let fixes = |text: &str, thai: bool| if thai { self.typo_items(text, prev.as_deref()) } else { self.en_items(before, text, prev.as_deref()) };
         let converts = if rev { self.rev_wanted(typed) || { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_prev } } else { self.guess_anchor_ok(typed, false) };
         let here = if rev && converts { vec![] } else { fixes(&screen, rev) };
@@ -3239,6 +3283,25 @@ mod tests {
         assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "up once per pause");
         assert_eq!(e.on_keystroke(t + e.opts.badge_idle * 2), vec![Action::Badge(false)], "typing again");
         assert_eq!(e.on_idle(t + e.opts.badge_idle * 4), vec![Action::Badge(true)], "and back after the next pause");
+    }
+    #[test] fn the_model_offers_the_next_word_where_the_pairs_have_nothing() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        predictor(&mut e, "next-word", &["zorble", "quux"]);
+        // a line the user finished: the model learns it when the line ends
+        typ(&mut e, "zorble quux"); e.on_key(Key::Boundary(Boundary::Enter));
+        // then its word follows "zorble ", where the built-in pairs know nothing
+        typ(&mut e, "zorble ");
+        let got = until_idle(&mut e, |e| labels(e).iter().any(|l| l == "quux"));
+        eprintln!("DBG ask={:?} answer={:?} text={:?} start={} line={} alt={} rows={:?}", e.pred_next_ask, e.pred_next_answer, e.predict_text(e.line.len()), e.line_start, e.line.len(), e.line.last().map(|c| c.after()), labels(&e));
+        assert!(got, "the model's word: {:?}", labels(&e));
+        // and it keeps the pairs' rows when they have any (they lead, the model's word is the last one)
+        assert!(labels(&e).len() <= 3);
+        // with the model off, only the pairs would be left: none for a word they do not know
+        e.opts.predict = false;
+        e.on_key(Key::Boundary(Boundary::Space));
+        assert!(until_idle(&mut e, |e| !e.bubble_visible()));
+        assert_eq!(labels(&e), Vec::<String>::new());
     }
     #[test] fn the_preview_follows_its_pause_setting() {
         let Some(mut e) = engine() else { return };
