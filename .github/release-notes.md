@@ -1,5 +1,17 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.9**
+- **Next word.** Pause after a word and the bubble offers the word that usually follows it: after a space in English
+  (`thank ` → you), and in Thai as soon as a word ends, no space needed (`แซ่บ` → มาก, `ขอบคุณ` → ค่ะ). Only a clear
+  favourite is offered. Settings → Word suggestions → *Suggest the next word*.
+- **The arrow keys pick right away.** With the bubble up, ←/→ choose without pressing ↑ first; Enter or ↑ applies.
+- **One "Pick with" setting** (Arrow keys, Ctrl+1–3, or both) replaces the two switches. Your saved choice is kept.
+- **Model v4**: Thai word pairs now include Thai tweets (VISTEC-TP-TH-2021), so chat-style Thai is completed better.
+
+**Fixed in 0.5.9**
+- A Thai suggestion with many upper and lower marks (`ประวัติศาสตร์`) no longer breaks onto a second line outside
+  its button.
+
 **New in 0.5.8**
 - **Pick with arrow keys is on by default.** With the bubble up, ↑ moves into it, ←/→ choose, ↑ again or Enter
   applies; until ↑ the arrow keys move the cursor as before.
