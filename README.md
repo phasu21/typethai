@@ -44,6 +44,10 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   one you are typing and by the words you type yourself: a word you use often comes first, and a word the built-in
   list lacks is offered once you have typed it three times. **Learn from my typing** turns this off, and **Forget
   learned words** clears it.
+- **Next word.** Pause after a word and a space and the bubble offers the words that usually follow it (`you ` →
+  can, are, have), from the built-in word pairs and your own typing, in the input language. Tab, the arrow keys or a
+  click types it. **Settings… → Word suggestions → Suggest the next word** turns it off (prefs.json
+  `"next_word": false`); it is also off while **Show suggestions** is Off.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
