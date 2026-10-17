@@ -343,6 +343,7 @@ fn run_actions(st: &mut State, acts: Vec<Action>) {
         }
         Action::HideBubble => { bridge::set_geom(None); send(UiMsg::Hide) }
         Action::Rewrite(job) => st.worker.submit(job),
+        Action::Hold(hold) => { let anchor = hold.filter(|_| !st.app.engine.bubble_visible()).map(|_| unsafe { anchor() }); send(UiMsg::Hold { hold, anchor }) }
     } }
 }
 

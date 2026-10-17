@@ -22,10 +22,10 @@ unless you press a key.
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
-- **Input language under the caret.** When the input source switches between Thai and English (⌘/Ctrl+Space,
-  Win+Space, Alt+Shift, the menu bar, or typeThai after a conversion), a small 🇹🇭 ไทย / 🇺🇸 EN badge shows under the
-  caret for about a second. Not in password fields, not while the bubble is up, and only where the caret or the text
-  field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
+- **Input language at the caret.** When the input source switches between Thai and English (⌘/Ctrl+Space,
+  Win+Space, Alt+Shift, the menu bar, or typeThai after a conversion), a small 🇹🇭 ไทย / 🇺🇸 EN badge shows over the
+  caret for about a second, clear of macOS's own indicator below it. Not in password fields or outside a text field,
+  not while the bubble is up, and only where the caret or the text field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
 - **Why each option is offered.** A badge marks every fix: the flag of the language a wrong-layout word becomes
   (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. Finishing the
   word has no badge. Conversions come first, then typo fixes, then completions, so Tab is the conversion when there is one.
@@ -116,7 +116,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
 | **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
-| **Hold Tab** (half a second) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it |
+| **Hold Tab** (half a second) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
 | **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
@@ -152,7 +152,8 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
-| `--demo-badge [x,y ...] [--en] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge under a fake caret, Thai first, then taking turns (no key capture) |
+| `--demo-badge [x,y ...] [--en] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge at a fake caret, Thai first, then taking turns (no key capture) |
+| `--demo-hold [x,y ...] [--progress P] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the hold-Tab indicator at a fake caret, filling as a real hold does (or stopped at P); `--demo-bubble --hold P` shows it on the bubble's Tab key |
 | `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
 
 ## Privacy

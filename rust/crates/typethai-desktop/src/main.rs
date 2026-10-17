@@ -11,12 +11,13 @@ fn main() {
         // extra debug options: --screenshot PATH (capture the bubble's own window to a PNG, then quit),
         // --items "a|b|c" (custom rows instead of the samples; repeat it to update the bubble in place; a row ending in
         // !th, !en or !typo is offered for that reason), --vertical (ask for rows, not a strip), --light,
-        // --backdrop light|dark (a window of text behind the bubble)
-        let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
+        // --backdrop light|dark (a window of text behind the bubble), --hold P (Tab held over it, P of the way to the rows)
+        let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() {
             if a == "--secs" { secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(3.0); continue }
             if a == "--screenshot" { shot = it.next().cloned(); continue }
+            if a == "--hold" { hold = it.next().and_then(|s| s.parse().ok()); continue }
             if a == "--select" { select = it.next().and_then(|s| s.parse().ok()).unwrap_or(0); continue }
             if a == "--items" { items.extend(it.next().map(|s| s.split('|').map(demo_opt).collect())); continue }
             if a == "--backdrop" { backdrop = match it.next().map(String::as_str) { Some("light") => Some(true), Some("dark") => Some(false), b => { eprintln!("--backdrop: expected light or dark, got {b:?}"); std::process::exit(2) } }; continue }
@@ -26,11 +27,11 @@ fn main() {
             let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-bubble: expected x,y but got {a:?}"); std::process::exit(2) }
         }
-        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, layout, light, backdrop); return }
-        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, hold, layout, light, backdrop); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, hold, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
     }
     // --demo-badge [x,y ...] [--secs N] [--en] [--light] [--backdrop light|dark] [--screenshot PNG]: the input-language
-    // badge under a fake caret at each point (Thai first, then taking turns), no key capture
+    // badge at a fake caret at each point (Thai first, then taking turns), no key capture
     if let Some(i) = args.iter().position(|a| a == "--demo-badge") {
         let mut pts = vec![]; let mut secs = 2.0; let mut shot: Option<String> = None; let mut lang = engine::InputLang::Thai; let mut light = false; let mut backdrop = None;
         let mut it = args[i + 1..].iter();
@@ -45,6 +46,23 @@ fn main() {
         } }
         #[cfg(any(windows, target_os = "macos"))] { ui::demo_badge(pts, secs, shot, lang, light, backdrop); return }
         #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, lang, light, backdrop); eprintln!("--demo-badge needs macOS or Windows"); std::process::exit(2) }
+    }
+    // --demo-hold [x,y ...] [--progress P] [--secs N] [--light] [--backdrop light|dark] [--screenshot PNG]: the hold-Tab
+    // indicator with no bubble up, filling as a real hold does (or stopped at P), no key capture
+    if let Some(i) = args.iter().position(|a| a == "--demo-hold") {
+        let mut pts = vec![]; let mut secs = 1.0; let mut shot: Option<String> = None; let mut progress: Option<f32> = None; let mut light = false; let mut backdrop = None;
+        let mut it = args[i + 1..].iter();
+        while let Some(a) = it.next() { match a.as_str() {
+            "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "--screenshot" => shot = it.next().cloned(),
+            "--progress" => progress = it.next().and_then(|s| s.parse().ok()),
+            "--light" => light = true,
+            "--backdrop" => backdrop = match it.next().map(String::as_str) { Some("light") => Some(true), Some("dark") => Some(false), b => { eprintln!("--backdrop: expected light or dark, got {b:?}"); std::process::exit(2) } },
+            _ => { let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-hold: expected x,y but got {a:?}"); std::process::exit(2) } }
+        } }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo_hold(pts, secs, shot, progress, light, backdrop); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, progress, light, backdrop); eprintln!("--demo-hold needs macOS or Windows"); std::process::exit(2) }
     }
     // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light]: only the Settings window, with sample
     // words and no key capture, prefs or keychain

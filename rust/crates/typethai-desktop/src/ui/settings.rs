@@ -311,7 +311,7 @@ impl SettingsView {
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 Some(SettingItem::new("Bubble layout", layout).description("Horizontal puts the suggestions side by side. Long suggestions and AI rewrite results are always stacked.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
-                Some(SettingItem::new("Show the input language", badge).description("When the keyboard switches between Thai and English, a flag shows under the caret for a moment.")),
+                Some(SettingItem::new("Show the input language", badge).description("When the keyboard switches between Thai and English, a flag shows by the caret for a moment.")),
                 Some(SettingItem::new("Pick with Ctrl+1–3", pick).description("While the bubble is up, Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion. Off, those keys reach the app as usual.")),
                 Some(SettingItem::new("Pick with arrow keys", arrows).description("While the bubble is up, press Up to move into it, Left or Right to choose, and Up again or Enter to apply. Down or Esc leaves. Until you press Up, the arrow keys move the cursor as usual.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),

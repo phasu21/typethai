@@ -186,6 +186,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
         Action::Rewrite(job) => st.worker.submit(job),
+        Action::Hold(hold) => { let an = hold.filter(|_| !st.app.engine.bubble_visible()).map(|_| anchor(st)); let _ = st.tx.send(UiMsg::Hold { hold, anchor: an }); }
     } }
 }
 

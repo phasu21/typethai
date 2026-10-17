@@ -1,4 +1,4 @@
-//! The input-language badge: the language now typed, under the caret for a moment after the keyboard input source
+//! The input-language badge: the language now typed, over the caret for a moment after the keyboard input source
 //! changes (by the user, or by typeThai after a conversion). Pure logic; the platform layers feed it.
 use crate::engine::InputLang;
 use crate::placement::Anchor;
@@ -39,31 +39,44 @@ pub const LABEL_PX: f64 = 13.0;
 pub const CARET_DX: f64 = -(MARGIN + crate::bridge::BORDER + PILL_PX + FLAG / 2.0);
 /// The window for a label `label_w` wide: the pill and the margin around it.
 pub fn size(label_w: f64) -> (f64, f64) { (2.0 * (MARGIN + crate::bridge::BORDER + PILL_PX) + FLAG + GAP + label_w, 2.0 * MARGIN + PILL_H) }
-/// The window's rect under the caret line (above only when there is no room below), for a label `label_w` wide.
+/// The window's rect over the caret line (under it only when there is no room above), for a label `label_w` wide:
+/// macOS draws its own input-source indicator under the caret.
 pub fn place(a: &Anchor, label_w: f64, mons: &[crate::placement::Monitor]) -> Option<crate::placement::Placement> {
-    // lower_fraction 1: never "low on the screen", so below whenever it fits
-    let o = crate::placement::Opts { gap: 4.0, caret_dx: CARET_DX, inset: MARGIN, lower_fraction: 1.0, ..Default::default() };
+    // lower_fraction 0: always "low on the screen", so above whenever it fits
+    let o = crate::placement::Opts { gap: 4.0, caret_dx: CARET_DX, inset: MARGIN, lower_fraction: 0.0, ..Default::default() };
     crate::placement::place(&Anchor { mouse: None, ..*a }, size(label_w), mons, &o)
 }
+/// What the hold indicator says next to its icon: a held Tab opens the ⌃⌥R rows.
+pub const HOLD_LABEL: &str = "Rewrite";
+/// The hold indicator's progress bar along the pill's bottom, inside its padding.
+pub const BAR_H: f64 = 2.0;
+pub const BAR_BOTTOM: f64 = 3.0;
 /// What the badge says next to the flag.
 pub fn label(lang: InputLang) -> &'static str { match lang { InputLang::Thai => "ไทย", InputLang::Latin => "EN" } }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cmd { Show(InputLang), Hide }
-/// UI side: when the badge is up. The bubble wins: no badge while it shows, and it takes the badge down.
+pub enum Cmd { Show(InputLang), Hold, Hide }
+/// UI side: what the badge window shows. The bubble wins: nothing while it shows, and it takes the window down. A
+/// held Tab's indicator (`Cmd::Hold`, no bubble up) replaces the language badge until Tab lets go.
 #[derive(Default)]
-pub struct Shown { until: Option<Instant>, bubble: bool }
+pub struct Shown { until: Option<Instant>, bubble: bool, hold: bool }
 impl Shown {
     pub fn changed(&mut self, lang: InputLang, now: Instant) -> Option<Cmd> {
-        if self.bubble { return None }
+        if self.bubble || self.hold { return None }
         self.until = Some(now + SHOW_FOR); Some(Cmd::Show(lang))
     }
-    pub fn bubble(&mut self, visible: bool) -> Option<Cmd> { self.bubble = visible; (visible && self.until.take().is_some()).then_some(Cmd::Hide) }
+    pub fn bubble(&mut self, visible: bool) -> Option<Cmd> { self.bubble = visible; if visible { self.clicked() } else { None } }
     pub fn tick(&mut self, now: Instant) -> Option<Cmd> { self.until.take_if(|t| now >= *t).map(|_| Cmd::Hide) }
+    /// Tab held (`on`) or let go.
+    pub fn hold(&mut self, on: bool) -> Option<Cmd> {
+        if on && self.bubble { return None }
+        if on { self.until = None; self.hold = true; return Some(Cmd::Hold) }
+        std::mem::take(&mut self.hold).then_some(Cmd::Hide)
+    }
     /// A click on it (Windows; on macOS clicks pass through).
-    pub fn clicked(&mut self) -> Option<Cmd> { self.until.take().map(|_| Cmd::Hide) }
-    /// The badge is up.
-    pub fn up(&self) -> bool { self.until.is_some() }
+    pub fn clicked(&mut self) -> Option<Cmd> { let up = self.up(); (self.until, self.hold) = (None, false); up.then_some(Cmd::Hide) }
+    /// Something is up.
+    pub fn up(&self) -> bool { self.until.is_some() || self.hold }
 }
 
 #[cfg(test)]
@@ -112,19 +125,37 @@ mod tests {
         assert_eq!(size(30.0), (90.0, 46.0));
         assert_eq!(CARET_DX, -27.0, "the flag's centre over the caret");
     }
-    #[test] fn the_badge_sits_under_the_caret_even_low_on_the_screen() {
+    #[test] fn the_badge_sits_over_the_caret_clear_of_the_system_indicator() {
         use crate::placement::Monitor;
         let v = Rect::new(0.0, 0.0, 1000.0, 800.0);
         let mons = [Monitor { frame: v, visible: v, size_scale: 1.0, pixel: 2.0 }];
-        let low = Anchor { caret: Some(Rect::new(300.0, 650.0, 1.0, 18.0)), field: None, mouse: None };
-        let p = place(&low, 30.0, &mons).unwrap();
-        assert!(!p.above, "the bubble would go above here; the badge stays below");
-        // the pill 4 px under the caret, its flag's centre on the caret's x
-        assert_eq!((p.rect.y + MARGIN, p.rect.x - CARET_DX), (650.0 + 18.0 + 4.0, 300.0));
+        let high = Anchor { caret: Some(Rect::new(300.0, 120.0, 1.0, 18.0)), field: None, mouse: None };
+        let p = place(&high, 30.0, &mons).unwrap();
+        assert!(p.above, "macOS draws its indicator under the caret: ours goes over it, even high on the screen");
+        // the pill 4 px over the caret, its flag's centre on the caret's x
+        assert_eq!((p.rect.bottom() - MARGIN, p.rect.x - CARET_DX), (120.0 - 4.0, 300.0));
         assert_eq!((p.rect.w, p.rect.h), size(30.0));
-        let bottom = Anchor { caret: Some(Rect::new(300.0, 770.0, 1.0, 18.0)), ..low };
-        assert!(place(&bottom, 30.0, &mons).unwrap().above, "no room below");
+        let top = Anchor { caret: Some(Rect::new(300.0, 10.0, 1.0, 18.0)), ..high };
+        assert!(!place(&top, 30.0, &mons).unwrap().above, "no room above");
         assert_eq!(place(&Anchor { caret: None, field: None, mouse: Some((5.0, 5.0)) }, 30.0, &mons), None, "never at the mouse");
+    }
+    #[test] fn a_held_tab_replaces_the_language_badge() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        s.changed(Thai, t);
+        assert_eq!(s.hold(true), Some(Cmd::Hold), "the hold indicator takes the window");
+        assert_eq!(s.changed(Latin, t), None, "no language badge over it");
+        assert_eq!(s.tick(t + SHOW_FOR), None, "the badge's time no longer runs");
+        assert!(s.up());
+        assert_eq!(s.hold(false), Some(Cmd::Hide));
+        assert_eq!(s.hold(false), None, "already down");
+        assert!(!s.up());
+        assert_eq!(s.changed(Latin, t), Some(Cmd::Show(Latin)), "badges show again");
+    }
+    #[test] fn the_bubble_or_a_click_takes_the_hold_indicator_down() {
+        let mut s = Shown::default();
+        s.hold(true); assert_eq!(s.bubble(true), Some(Cmd::Hide));
+        assert_eq!(s.hold(true), None, "the bubble shows its own on the Tab key");
+        s.bubble(false); s.hold(true); assert_eq!(s.clicked(), Some(Cmd::Hide)); assert_eq!(s.hold(false), None);
     }
     #[test] fn a_click_takes_the_badge_down() {
         let (mut s, t) = (Shown::default(), Instant::now());

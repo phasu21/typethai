@@ -22,10 +22,13 @@ pub enum UiMsg {
     Stopped,
     /// Current don't-translate list and learned words, for the Settings window.
     Settings(SettingsSnap),
-    /// The input source just changed to `lang`: the badge under the caret (`badge::anchor_for`: no mouse fallback).
+    /// The input source just changed to `lang`: the badge at the caret (`badge::anchor_for`: no mouse fallback).
     Badge { lang: InputLang, anchor: Anchor },
     /// A click on the badge (Windows, where it is not click-through): take it down.
     HideBadge,
+    /// Tab held towards opening the ⌃⌥R rows (None: released, or they opened). `anchor`: where the caret is when no
+    /// bubble is up (the indicator goes in the badge window); over the bubble it fills the highlighted option's Tab key.
+    Hold { hold: Option<crate::engine::Hold>, anchor: Option<Anchor> },
 }
 
 impl UiMsg {

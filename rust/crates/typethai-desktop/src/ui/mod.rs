@@ -6,10 +6,10 @@
 //! one global coordinate space on both OSes. Clicks never reach it: the capture thread hit-tests mouse-downs against the
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
 //!
-//! The input-language badge is a second such window, shown for a moment under the caret when the input source changes
+//! The input-language badge is a second such window, shown for a moment over the caret when the input source changes
 //! (`badge`). On macOS it ignores the mouse; on Windows the mouse hook swallows a click on it and takes it down.
 use crate::badge::{self, Cmd};
-use crate::engine::InputLang;
+use crate::engine::{Hold, InputLang};
 use crate::bridge::{self, BubbleLayout, Geom, Layout, Opt, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::engine::Reason;
 use crate::update;
@@ -32,6 +32,8 @@ pub struct BubbleView {
     pub selected: usize,
     /// The arrow keys are in the bubble: Enter applies the highlighted option too, and its keycap says so.
     pub focused: bool,
+    /// Tab held over the bubble: the accent sweeps across the highlighted option's Tab key as it fills.
+    pub hold: Option<Hold>,
     /// The panel's bounds as actually laid out by gpui in the last frame (logical px, window-relative).
     pub panel: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Each option's laid-out bounds in the last frame (a row, or a strip button) — for the click hit-test.
@@ -55,6 +57,7 @@ impl Render for BubbleView {
         let t = cx.theme(); let l = &self.layout; let selected = self.selected;
         // the strip's pill is too small for "Enter"
         let (apply_key, apply_pill) = if self.focused { ("Enter", "↵") } else { ("Tab", "Tab") };
+        let hold = self.hold.map(|h| h.progress(Instant::now()));
         let dark = t.is_dark();
         let hover = t.list_hover;
         // selected row is a little stronger in dark mode
@@ -110,10 +113,14 @@ impl Render for BubbleView {
                 let key_fg = if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) };
                 // the others grey (the theme's muted keycap colours over the surface, still solid)
                 let keys = l.key_hints(selected).into_iter().enumerate().map(|(i, at)| { let on = i == selected;
-                    div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).w(px(at.w as f32)).h(px(at.h as f32)).rounded(px(bridge::KEY_RADIUS as f32)).bg(surface)
-                        .child(div().size_full().flex().items_center().justify_center().rounded(px(bridge::KEY_RADIUS as f32))
+                    let key = div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).w(px(at.w as f32)).h(px(at.h as f32)).rounded(px(bridge::KEY_RADIUS as f32)).bg(surface);
+                    match hold.filter(|_| on) {
+                        // Tab held: grey, the accent sweeping in as the hold fills
+                        Some(p) => key.child(sweep(at.w, at.h, bridge::KEY_RADIUS, apply_pill, bridge::KEY_FONT_PX, (*cap_bg, cap_fg), (key_bg, key_fg), p)),
+                        None => key.child(div().size_full().flex().items_center().justify_center().rounded(px(bridge::KEY_RADIUS as f32))
                             .bg(if on { key_bg } else { *cap_bg }).text_color(if on { key_fg } else { cap_fg }).text_size(px(bridge::KEY_FONT_PX as f32))
-                            .child(if on { apply_pill.to_string() } else { (i + 1).to_string() })) });
+                            .child(if on { apply_pill.to_string() } else { (i + 1).to_string() })),
+                    } });
                 root.pl(px(l.margin as f32)).pt(px(l.margin as f32))
                     .child(div().flex_none().flex().flex_row().items_start().gap(px(bridge::GROUP_GAP_X as f32)).children(groups))
                     .children(badges).children(keys).into_any_element()
@@ -132,7 +139,12 @@ impl Render for BubbleView {
                             .when(l.reasons.iter().any(Option::is_some), |d| d.child(div().w(px(bridge::BADGE_D as f32)).flex_none().when_some(o.reason, |d, r| d.child(badge(r, if i == selected { row_sel } else { row_bg })))))
                             // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
                             .child(div().w(px(bridge::HINT_SLOT_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
-                                .child(cap(if i == selected { apply_key } else { "Tab" }.into(), bridge::TAB_CAP_W).bg(cap_bg))
+                                .child(match hold.filter(|_| i == selected) {
+                                    Some(p) => { let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
+                                        let fill = (Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 }), if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) });
+                                        sweep(bridge::TAB_CAP_W, bridge::KEYCAP_H, 4.0, apply_key, bridge::KEYCAP_FONT_PX, (*cap_bg, cap_fg), fill, p).flex_none() }
+                                    None => cap(if i == selected { apply_key } else { "Tab" }.into(), bridge::TAB_CAP_W).bg(cap_bg),
+                                })
                                 .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg))))
                     }));
                 root.p(px(l.margin as f32)).child(panel).into_any_element()
@@ -141,6 +153,13 @@ impl Render for BubbleView {
     }
 }
 
+/// A keycap that fills with the accent from the left as a held Tab nears opening the ⌃⌥R rows (`p` 0..1). The label
+/// is drawn twice, in each part's colour, so it reads wherever the edge is.
+fn sweep(w: f64, h: f64, radius: f64, label: &'static str, font_px: f64, (bg, fg): (Hsla, Hsla), (fill, fill_fg): (Hsla, Hsla), p: f32) -> Div {
+    let face = move |c: Hsla| div().absolute().left_0().top_0().w(px(w as f32)).h(px(h as f32)).flex().items_center().justify_center().text_color(c).text_size(px(font_px as f32)).child(label);
+    div().relative().w(px(w as f32)).h(px(h as f32)).rounded(px(radius as f32)).bg(bg).overflow_hidden().child(face(fg))
+        .child(div().absolute().left_0().top_0().h_full().w(px((w * p.clamp(0.0, 1.0) as f64) as f32)).rounded_l(px(radius as f32)).overflow_hidden().bg(fill).child(face(fill_fg)))
+}
 /// Measure each label with the real text system (same font + size as the view, incl. Thai fallbacks).
 fn measure(window: &Window, items: &[Opt]) -> Vec<f64> {
     let f = thai_font();
@@ -150,8 +169,8 @@ fn measure(window: &Window, items: &[Opt]) -> Vec<f64> {
             + bridge::MEASURE_SLACK
     }).collect()
 }
-// the typo badge's icon and the Settings updates page's, which the component icons lack
-gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download]);
+// the typo badge's icon, the Settings updates page's and the hold indicator's, which the component icons lack
+gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download, Sparkles]);
 /// The component icons, the typo badge's icon and the flags on conversion badges (flag-icons, MIT: `flags/LICENSE`).
 struct AppAssets;
 impl AssetSource for AppAssets {
@@ -265,48 +284,70 @@ fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut A
     (handle, view, n)
 }
 fn open_bubble(cx: &mut App) -> Ui {
-    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false }));
+    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false }));
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![] }
 }
 
 /// The input-language badge: a pill like the strip's groups, the language's round flag (as on a conversion's badge)
-/// and its name, sized to the label.
-pub struct BadgeView { lang: InputLang, label_w: f64 }
+/// and its name, sized to the label. Or, while Tab is held with no bubble up, the hold indicator: a sparkle, "Rewrite"
+/// and a thin bar filling in the accent colour.
+pub struct BadgeView { lang: InputLang, label_w: f64, hold: Option<Hold> }
 impl Render for BadgeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme(); let f = |v: f64| px(v as f32);
         let pill_w = badge::size(self.label_w).0 - 2.0 * badge::MARGIN;
-        div().size_full().flex().items_start().justify_start().p(f(badge::MARGIN))
-            .child(div().flex_none().w(f(pill_w)).h(f(badge::PILL_H)).px(f(badge::PILL_PX)).flex().flex_row().items_center().gap(f(badge::GAP))
-                .bg(t.popover).border_1().border_color(t.border).rounded_full().shadow_md()
-                .font(thai_font()).font_weight(FontWeight::MEDIUM).text_size(f(badge::LABEL_PX)).text_color(t.popover_foreground)
-                .child(div().size(f(badge::FLAG)).flex_none().rounded_full().border_1().border_color(t.input).child(img(bridge::flag(self.lang)).size_full().rounded_full()))
-                .child(div().w(f(self.label_w)).flex_none().child(badge::label(self.lang))))
+        let pill = div().flex_none().relative().w(f(pill_w)).h(f(badge::PILL_H)).px(f(badge::PILL_PX)).flex().flex_row().items_center().gap(f(badge::GAP))
+            .bg(t.popover).border_1().border_color(t.border).rounded_full().shadow_md()
+            .font(thai_font()).font_weight(FontWeight::MEDIUM).text_size(f(badge::LABEL_PX)).text_color(t.popover_foreground);
+        let pill = match self.hold {
+            Some(h) => {
+                let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK); let accent = Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 });
+                let bar_w = pill_w - 2.0 * (bridge::BORDER + badge::PILL_PX);
+                pill.child(div().size(f(badge::FLAG)).flex_none().flex().items_center().justify_center()
+                        .child(Icon::new(gpui_kit::assets::IconName::Sparkles).with_size(f(badge::FLAG - 2.0)).text_color(accent)))
+                    .child(div().w(f(self.label_w)).flex_none().child(badge::HOLD_LABEL))
+                    .child(div().absolute().left(f(badge::PILL_PX)).bottom(f(badge::BAR_BOTTOM)).w(f(bar_w)).h(f(badge::BAR_H)).rounded_full().bg(t.foreground.opacity(0.12))
+                        .child(div().h_full().w(f(bar_w * h.progress(Instant::now()) as f64)).rounded_full().bg(accent)))
+            }
+            None => pill.child(div().size(f(badge::FLAG)).flex_none().rounded_full().border_1().border_color(t.input).child(img(bridge::flag(self.lang)).size_full().rounded_full()))
+                .child(div().w(f(self.label_w)).flex_none().child(badge::label(self.lang))),
+        };
+        div().size_full().flex().items_start().justify_start().p(f(badge::MARGIN)).child(pill)
     }
 }
-/// Width of the badge's label as drawn.
-fn label_w(window: &Window, lang: InputLang) -> f64 {
-    let text = badge::label(lang); let mut f = thai_font(); f.weight = FontWeight::MEDIUM;
+/// Width of a badge label as drawn.
+fn label_w(window: &Window, text: &'static str) -> f64 {
+    let mut f = thai_font(); f.weight = FontWeight::MEDIUM;
     let run = TextRun { len: text.len(), font: f, color: black(), background_color: None, underline: None, strikethrough: None };
     window.text_system().shape_line(text.into(), px(badge::LABEL_PX as f32), &[run], None).width().as_f32().ceil() as f64 + 1.0
 }
 struct BadgeWin { handle: AnyWindowHandle, view: Entity<BadgeView>, native: native::Native, shown: badge::Shown, at: Option<Placement> }
 impl BadgeWin {
     fn open(cx: &mut App) -> BadgeWin {
-        let (handle, view, native) = open_popup(80., 46., cx, |cx| cx.new(|_| BadgeView { lang: InputLang::Latin, label_w: 0.0 }));
+        let (handle, view, native) = open_popup(80., 46., cx, |cx| cx.new(|_| BadgeView { lang: InputLang::Latin, label_w: 0.0, hold: None }));
         native::click_through(&native);
         BadgeWin { handle, view, native, shown: badge::Shown::default(), at: None }
     }
     fn changed(&mut self, lang: InputLang, anchor: Anchor, cx: &mut App) { let c = self.shown.changed(lang, Instant::now()); self.run(c, Some(anchor), cx) }
     fn bubble(&mut self, visible: bool, cx: &mut App) { let c = self.shown.bubble(visible); self.run(c, None, cx) }
     fn clicked(&mut self, cx: &mut App) { let c = self.shown.clicked(); self.run(c, None, cx) }
-    fn tick(&mut self, cx: &mut App) { let c = self.shown.tick(Instant::now()); self.run(c, None, cx) }
+    fn tick(&mut self, cx: &mut App) {
+        let c = self.shown.tick(Instant::now()); self.run(c, None, cx);
+        // the hold indicator fills on the UI's own ticks
+        if self.view.read(cx).hold.is_some() && self.at.is_some() { self.view.update(cx, |_, cx| cx.notify()) }
+    }
+    /// Tab held with no bubble up (None: let go).
+    fn hold(&mut self, hold: Option<Hold>, anchor: Option<Anchor>, cx: &mut App) {
+        if hold.is_some() { self.view.update(cx, |v, _| v.hold = hold); }
+        let c = self.shown.hold(hold.is_some()); self.run(c, anchor, cx)
+    }
     fn run(&mut self, cmd: Option<Cmd>, anchor: Option<Anchor>, cx: &mut App) {
         let n = self.native.clone();
         let at = match cmd {
-            Some(Cmd::Show(lang)) => {
-                let w = self.handle.update(cx, |_, window, _| label_w(window, lang)).unwrap_or(24.0);
-                self.view.update(cx, |v, cx| { v.lang = lang; v.label_w = w; cx.notify(); });
+            Some(c @ (Cmd::Show(_) | Cmd::Hold)) => {
+                let text = match c { Cmd::Show(lang) => badge::label(lang), _ => badge::HOLD_LABEL };
+                let w = self.handle.update(cx, |_, window, _| label_w(window, text)).unwrap_or(24.0);
+                self.view.update(cx, |v, cx| { if let Cmd::Show(lang) = c { v.lang = lang; v.hold = None; } v.label_w = w; cx.notify(); });
                 let p = anchor.and_then(|a| badge::place(&a, w, &native::monitors()));
                 if p.is_none() { self.shown.clicked(); }
                 p
@@ -357,6 +398,10 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Hide => { ui.hide(cx); badge.bubble(false, cx) }
                         UiMsg::Badge { lang, anchor } => badge.changed(lang, anchor, cx),
                         UiMsg::HideBadge => badge.clicked(cx),
+                        // over the bubble: on its Tab key; otherwise the pill in the badge window
+                        UiMsg::Hold { hold, anchor } => { let over = hold.is_some() && ui.visible;
+                            ui.view.update(cx, |v, cx| { v.hold = hold.filter(|_| over); cx.notify(); });
+                            badge.hold(hold.filter(|_| !over), anchor, cx) }
                         UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
                         UiMsg::Paused(p) => if let Some(t) = &tray { t.set_paused(p) },
@@ -364,6 +409,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
                     } }
                     ui.reconcile(cx); badge.tick(cx);
+                    if ui.visible && ui.view.read(cx).hold.is_some() { ui.view.update(cx, |_, cx| cx.notify()) }
                     if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
                     let tray_cmd = tray.as_ref().and_then(|t| t.poll());
                     let tray_cmd = if bridge::take(&bridge::REQ_UPDATE_CLICK) { Some(super::platform::tray::TrayCmd::CheckUpdate) } else { tray_cmd };
@@ -437,7 +483,7 @@ pub fn demo_items() -> Vec<Opt> {
 /// while typing. With `shot`, shows once (first point or main-monitor centre), lets it lay out and paint,
 /// prints native vs. laid-out geometry and a per-option self-check, captures the bubble's own window to `shot` (PNG), and quits.
 /// `backdrop` (Some(true): light) opens a window of sample text behind the first point, to see the bubble over an app.
-pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, wanted: BubbleLayout, light: bool, backdrop: Option<bool>) {
+pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, hold: Option<f32>, wanted: BubbleLayout, light: bool, backdrop: Option<bool>) {
     let sets = if sets.is_empty() { vec![demo_items()] } else { sets };
     app().run(move |cx| {
         setup(cx);
@@ -455,7 +501,7 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
                 let anchor = if i % 4 == 3 { Anchor { caret: None, field: None, mouse: Some((x, y)) } }
                     else { Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None } };
                 let kind = if anchor.caret.is_some() { "caret" } else { "mouse" };
-                let pl = cx.update(|cx| { let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; v.focused = focused; cx.notify(); }); p });
+                let pl = cx.update(|cx| { let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; v.focused = focused; v.hold = hold.map(held_at); cx.notify(); }); p });
                 eprintln!("demo {i}: anchor ({x},{y}) {kind} -> {:?}", pl);
                 // let gpui lay out, then fit the window to the real panel (a couple of frames)
                 for _ in 0..10 {
@@ -512,6 +558,51 @@ pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang
                 while Instant::now() < end {
                     cx.background_executor().timer(Duration::from_millis(20)).await;
                     cx.update(|cx| { let was = b.shown.up(); b.tick(cx); if was && !b.shown.up() { eprintln!("demo-badge {i}: hidden") } });
+                }
+            }
+            cx.update(|cx| cx.quit());
+        }).detach();
+    });
+}
+
+/// A hold that stays at `p` of the way for the length of a demo (it moves a thousandth a second).
+fn held_at(p: f32) -> Hold {
+    let (now, d) = (Instant::now(), Duration::from_secs(1000));
+    Hold { from: now.checked_sub(d.mul_f32(p.clamp(0.0, 1.0))).unwrap_or(now), full: now + d.mul_f32(1.0 - p.clamp(0.0, 1.0)) }
+}
+/// `--demo-hold`: the hold-Tab indicator with no bubble up, under a fake 18-unit caret at each point (no points: the main
+/// monitor's centre), filling from a tap's length to `TAB_HOLD` as a real hold does and then gone, `secs` per point; or
+/// stopped at `progress`. With `shot`, shows it once, captures its window to `shot` (PNG) and quits.
+pub fn demo_hold(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, progress: Option<f32>, light: bool, backdrop: Option<bool>) {
+    use crate::engine::{TAB_CHORD_MIN, TAB_HOLD};
+    app().run(move |cx| {
+        setup(cx);
+        if light { Theme::change(gpui_kit::component::ThemeMode::Light, None, cx); }
+        let mut b = BadgeWin::open(cx);
+        let mut pts = points.clone();
+        if pts.is_empty() { if let Some(m) = native::monitors().first() { let v = m.visible; pts.push((v.x + v.w / 2.0, v.y + v.h / 2.0)) } }
+        if let (Some(bright), Some(&(x, y))) = (backdrop, pts.first()) { open_backdrop(x, y, bright, cx) }
+        if shot.is_some() { pts.truncate(1); }
+        let shot = shot.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            for (i, (x, y)) in pts.iter().copied().enumerate() {
+                let anchor = Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None };
+                let now = Instant::now();
+                let h = progress.map(held_at).unwrap_or(Hold { from: now, full: now + (TAB_HOLD - TAB_CHORD_MIN) });
+                cx.update(|cx| b.hold(Some(h), Some(anchor), cx));
+                eprintln!("demo-hold {i}: caret ({x},{y}) -> {:?}", b.at);
+                if let Some(path) = &shot {
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    eprintln!("{}", native::describe(&b.native));
+                    match native::capture(&b.native, path) { Ok(()) => eprintln!("screenshot -> {path}"), Err(e) => eprintln!("screenshot failed: {e}") }
+                    break
+                }
+                let end = Instant::now() + Duration::from_secs_f64(secs);
+                while Instant::now() < end {
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                    // full: the rows would open now, and the indicator goes
+                    cx.update(|cx| { b.tick(cx); if b.shown.up() && Instant::now() >= h.full { b.hold(None, None, cx); eprintln!("demo-hold {i}: full, hidden") } });
                 }
             }
             cx.update(|cx| cx.quit());

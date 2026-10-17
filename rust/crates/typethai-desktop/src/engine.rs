@@ -114,6 +114,18 @@ pub enum Action {
     SwitchInput(InputLang),
     /// Hand to the rewrite worker. Answers come back through `Engine::on_reply`.
     Rewrite(Job),
+    /// Tab is being held towards `TAB_HOLD`: show how far (None: take it down).
+    Hold(Option<Hold>),
+}
+/// A held Tab's progress towards opening the ⌃⌥R rows: shown from `from` (past a tap), full at `full`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hold { pub from: Instant, pub full: Instant }
+impl Hold {
+    /// 0 at `from`, 1 at `full`.
+    pub fn progress(&self, now: Instant) -> f32 {
+        let span = self.full.saturating_duration_since(self.from).as_secs_f32();
+        if span <= 0.0 { return 1.0 } (now.saturating_duration_since(self.from).as_secs_f32() / span).min(1.0)
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct BubbleItem { pub label: String, pub kind: BubbleKind }
@@ -210,7 +222,7 @@ pub struct Options {
     /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
     /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
     pub pick_arrows: bool,
-    /// The input-language badge under the caret when the input source changes; read by the platform layer.
+    /// The input-language badge at the caret when the input source changes; read by the platform layer.
     pub input_badge: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
@@ -278,6 +290,8 @@ pub struct Engine {
     tab: TabChord,
     /// When Tab went down into `Armed` or `Held`.
     tab_at: Option<Instant>,
+    /// The hold indicator is up (`Action::Hold`).
+    hold_up: bool,
     /// The bubble was opened by ⌃⌥R and offers something to apply: Enter applies the highlighted row, like Tab.
     fixing: bool,
     line: Vec<Committed>,
@@ -325,7 +339,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, comp_muted: false, spell_lead: None, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -404,8 +418,16 @@ impl Engine {
     }
     /// A live row still matches the text on screen: the buffer it was offered for, and the `prev` words before it.
     fn live_current(&self, typed: &str, prev: usize) -> bool { self.word == typed && self.line.len() >= prev }
+    /// Tab is held, and may still open the ⌃⌥R rows.
+    fn tab_down(&self) -> bool { matches!(self.tab, TabChord::Armed | TabChord::Held) }
+    /// Take the hold indicator down, if it is up.
+    fn hold_off(&mut self) -> Option<Action> { std::mem::take(&mut self.hold_up).then_some(Action::Hold(None)) }
     /// Focus change, mouse click, secure field, layout change, any non-bubble key during a rewrite: forget everything.
     pub fn reset(&mut self) -> Vec<Action> {
+        let hold = self.hold_off();
+        let mut a = self.reset_inner(); a.splice(0..0, hold); a
+    }
+    fn reset_inner(&mut self) -> Vec<Action> {
         self.settle();
         self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
@@ -481,6 +503,8 @@ impl Engine {
 
     pub fn on_key(&mut self, k: Key) -> Outcome {
         let mut o = self.on_key_inner(k);
+        // the held Tab let go (released, rolled into a key, Tab+R / Tab+digit): its indicator goes first
+        if !self.tab_down() { o.actions.splice(0..0, self.hold_off()); }
         // after inserting text, switch the OS input source to match it (Thai after a conversion, Latin after an undo)
         if self.opts.switch_input {
             if let Some(Action::Replace { insert, .. }) = o.actions.iter().rev().find(|a| matches!(a, Action::Replace { .. })) {
@@ -727,13 +751,18 @@ impl Engine {
     /// Esc / Dismiss: hide the bubble; completions stay away until the word ends.
     fn dismiss(&mut self, acts: &mut Vec<Action>) { self.comp_muted = !self.word.is_empty(); self.show(vec![], acts) }
     /// Pause mode: the first timer tick at least `complete_idle` after a key in a word offers its completions.
-    /// A Tab held `TAB_HOLD` on its own opens the ⌃⌥R rows.
+    /// A Tab held `TAB_HOLD` on its own opens the ⌃⌥R rows; held past a tap (`TAB_CHORD_MIN`), its indicator shows.
     pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
         let mut acts = vec![];
         if self.paused { return acts }
-        if matches!(self.tab, TabChord::Armed | TabChord::Held) && self.tab_at.is_some_and(|t| now.saturating_duration_since(t) >= TAB_HOLD) {
-            // starting it lets Tab go: keep it Spent so the repeats and the release type nothing
-            let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; return o.actions
+        if let Some(t) = self.tab_at.filter(|_| self.tab_down()) {
+            let held = now.saturating_duration_since(t);
+            if held >= TAB_HOLD {
+                // starting it lets Tab go: keep it Spent so the repeats and the release type nothing
+                let mut a: Vec<Action> = self.hold_off().into_iter().collect();
+                let o = self.on_key_inner(Key::Hotkey(Hotkey::Rewrite)); self.tab = TabChord::Spent; a.extend(o.actions); return a
+            }
+            if held >= TAB_CHORD_MIN && !self.hold_up { self.hold_up = true; acts.push(Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + TAB_HOLD }))) }
         }
         if self.opts.complete != CompleteMode::Pause { return acts }
         if self.last_key.is_none_or(|t| now.saturating_duration_since(t) < self.opts.complete_idle) { return acts }
@@ -2405,6 +2434,51 @@ mod tests {
         e.on_key(Key::Tab);
         let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
         assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "no row applied");
+    }
+    fn holds(a: &[Action]) -> Vec<&Action> { a.iter().filter(|a| matches!(a, Action::Hold(_))).collect() }
+    /// The indicator for the Tab that went down at `t`.
+    fn hold_from(t: Instant) -> Action { Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + TAB_HOLD })) }
+    #[test] fn the_hold_indicator_shows_once_tab_is_held_past_a_tap() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        e.on_key(Key::Tab); let t = e.tab_at.unwrap();
+        assert!(holds(&tick_after(&mut e, TAB_CHORD_MIN - Duration::from_millis(1))).is_empty(), "a tap shows nothing");
+        assert_eq!(holds(&tick_after(&mut e, TAB_CHORD_MIN)), [&hold_from(t)], "filling from now until the rows open");
+        assert!(holds(&tick_after(&mut e, TAB_CHORD_MIN + Duration::from_millis(50))).is_empty(), "shown once");
+        assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat keeps it");
+        let a = tick_after(&mut e, TAB_HOLD);
+        assert_eq!(a.first(), Some(&Action::Hold(None)), "gone as the rewrite starts: {a:?}");
+        assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        assert!(holds(&e.on_key(Key::TabUp).actions).is_empty(), "already gone");
+    }
+    #[test] fn the_hold_indicator_goes_on_release_or_another_key() {
+        let Some(mut e) = engine() else { return };
+        e.opts.live = false;
+        e.on_key(Key::Tab); tick_after(&mut e, TAB_CHORD_MIN);
+        let o = e.on_key(Key::TabUp);
+        assert_eq!(o.actions.first(), Some(&Action::Hold(None)), "released early: {:?}", o.actions);
+        assert!(types_only_a_tab(&o), "and the Tab is typed as before");
+        typ(&mut e, "hello"); e.on_key(Key::Tab); tick_after(&mut e, TAB_CHORD_MIN);
+        let o = e.on_key(Key::Char('a')); assert_eq!(o.actions.first(), Some(&Action::Hold(None)), "typed on");
+        hold_tab(&mut e); tick_after(&mut e, TAB_CHORD_MIN);
+        let o = e.on_key(Key::Char('r')); assert_eq!(o.actions.first(), Some(&Action::Hold(None)), "Tab+R"); assert!(captures(&o));
+        e.on_key(Key::TabUp);
+        e.on_key(Key::Tab); tick_after(&mut e, TAB_CHORD_MIN);
+        assert_eq!(e.reset().first(), Some(&Action::Hold(None)), "focus moved");
+        assert!(holds(&e.reset()).is_empty());
+    }
+    #[test] fn the_hold_indicator_shows_over_the_bubble_too() {
+        let Some(mut e) = engine() else { return };
+        typ(&mut e, "l;ylfu"); assert!(e.bubble_visible());
+        e.on_key(Key::Tab); let t = e.tab_at.unwrap();
+        assert_eq!(holds(&tick_after(&mut e, TAB_CHORD_MIN)), [&hold_from(t)]);
+        let o = e.on_key(Key::Char('1')); assert_eq!(o.actions.first(), Some(&Action::Hold(None)), "Tab+1 applies a row");
+        assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. })));
+    }
+    #[test] fn hold_progress_fills_from_the_tap_limit_to_the_hold() {
+        let t = Instant::now(); let h = Hold { from: t + TAB_CHORD_MIN, full: t + TAB_HOLD };
+        assert_eq!((h.progress(t), h.progress(t + TAB_CHORD_MIN), h.progress(t + TAB_HOLD), h.progress(t + TAB_HOLD * 2)), (0.0, 0.0, 1.0, 1.0));
+        assert!((h.progress(t + (TAB_CHORD_MIN + TAB_HOLD) / 2) - 0.5).abs() < 1e-6);
     }
     #[test] fn a_tab_tap_is_still_a_tab() {
         let Some(mut e) = engine() else { return };
