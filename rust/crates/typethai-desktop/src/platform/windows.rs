@@ -24,8 +24,9 @@ const MAGIC: usize = 0x5454_4841;
 const ES_PASSWORD_STYLE: i32 = 0x0020;
 const THAI_KLID: usize = 0x041E;
 
+/// `layouts`: the foreground window's input language as last seen, for the badge.
 struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
-    gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool }
+    gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch }
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; static BUSY: Cell<bool> = const { Cell::new(false) }; }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
@@ -364,6 +365,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
     let m = wp.0 as u32;
     if code == HC_ACTION as i32 && (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN) {
         let pt = (*(lp.0 as *const MSLLHOOKSTRUCT)).pt;
+        // on the badge: swallow (it is not click-through here) and take it down, so the next click reaches the app
+        if bridge::BADGE_AT.lock().unwrap().is_some_and(|r| r.contains(pt.x as f64, pt.y as f64)) {
+            *bridge::BADGE_AT.lock().unwrap() = None;
+            let _ = with(|st| st.tx.send(UiMsg::HideBadge));
+            return LRESULT(1)
+        }
         let swallow = with(|st| match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
             // on the bubble: swallow so it is never clicked/activated; a left click on a row accepts that item
             Some(row) => { if let (WM_LBUTTONDOWN, Some(i)) = (m, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
@@ -375,8 +382,24 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 // ---------- hook thread ----------
+/// Each window's thread has its own layout (Win+Space, Alt+Shift, the taskbar, or our switch after a conversion): a
+/// change in the window in front brings up the badge, unless it is off, typeThai is paused, the bubble is up, the
+/// window is ours, or focus is a password field or no text field. A different window with another layout is not a switch.
+unsafe fn watch_layout(st: &mut State) {
+    let fg = GetForegroundWindow(); if fg.is_invalid() { return }
+    let Some(lang) = st.layouts.see(fg.0 as usize as u64, layout_is_thai(fg)) else { return };
+    let e = &st.app.engine; let on = e.opts.input_badge && !e.paused && !foreground_is_self(fg);
+    // a password field or no text field (a fresh look, by the gate's rule: a caret or a known text app opens)
+    let blocked = || {
+        let gi = gui_info(fg); let (pw, f) = focus_check(st, gi.map(|g| g.hwndFocus).unwrap_or_default());
+        let caret = (if fg == st.last_fg { st.text_app } else { field::known_text_exe(&exe_of(fg)) || field::known_text_class(&class_of(fg)) }) || gi.is_some_and(|g| !g.hwndCaret.is_invalid());
+        pw || !field::Gate::told(f).open(caret, || fullscreen(fg))
+    };
+    if let Some(anchor) = crate::badge::anchor_for(on, e.bubble_visible(), blocked, || anchor(st)) { let _ = st.tx.send(UiMsg::Badge { lang, anchor }); }
+}
 unsafe fn control(st: &mut State) -> bool {
     service_settings(st);
+    watch_layout(st);
     while let Some(r) = st.worker.poll() { let a = st.app.engine.on_reply(r); run_actions(st, a); }
     if bridge::take(&bridge::REQ_TOGGLE_PAUSE) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::TogglePause)); run_actions(st, o.actions); let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
@@ -390,7 +413,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new() }));
         let (Ok(kb), Ok(ms)) = (SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0), SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0)) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return
         };

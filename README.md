@@ -22,6 +22,10 @@ unless you press a key.
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
 - **Input-source switching.** After a conversion the OS input source switches to match: Thai (Kedmanee) after
   converting to Thai, ABC/US after converting to English or undoing.
+- **Input language under the caret.** When the input source switches between Thai and English (⌘/Ctrl+Space,
+  Win+Space, Alt+Shift, the menu bar, or typeThai after a conversion), a small 🇹🇭 ไทย / 🇺🇸 EN badge shows under the
+  caret for about a second. Not in password fields, not while the bubble is up, and only where the caret or the text
+  field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
 - **Why each option is offered.** A badge marks every fix: the flag of the language a wrong-layout word becomes
   (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. Finishing the
   word has no badge. Conversions come first, then typo fixes, then completions, so Tab is the conversion when there is one.
@@ -119,7 +123,8 @@ The menu-bar icon also has **Settings…** (or launch with `--settings` when the
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
 default, or Vertical; prefs.json `"bubble_layout"`), whether **Ctrl+1–3** picks a row
-(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), list words that stay as you type
+(**Pick with Ctrl+1–3**, off by default; prefs.json `"pick_with_ctrl": true`), whether the input language shows under the
+caret when it switches (**Show the input language**, on by default; prefs.json `"input_badge": false` turns it off), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
 **AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
@@ -147,6 +152,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
+| `--demo-badge [x,y ...] [--en] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge under a fake caret, Thai first, then taking turns (no key capture) |
 | `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
 
 ## Privacy

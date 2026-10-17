@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app; mod backspace; mod bridge; mod engine; mod keys; mod placement; mod prefs; mod rewrite;
-mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
+mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
@@ -28,6 +28,23 @@ fn main() {
         }
         #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, layout, light, backdrop); return }
         #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
+    }
+    // --demo-badge [x,y ...] [--secs N] [--en] [--light] [--backdrop light|dark] [--screenshot PNG]: the input-language
+    // badge under a fake caret at each point (Thai first, then taking turns), no key capture
+    if let Some(i) = args.iter().position(|a| a == "--demo-badge") {
+        let mut pts = vec![]; let mut secs = 2.0; let mut shot: Option<String> = None; let mut lang = engine::InputLang::Thai; let mut light = false; let mut backdrop = None;
+        let mut it = args[i + 1..].iter();
+        while let Some(a) = it.next() { match a.as_str() {
+            "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(2.0),
+            "--screenshot" => shot = it.next().cloned(),
+            "--en" => lang = engine::InputLang::Latin,
+            "--light" => light = true,
+            "--backdrop" => backdrop = match it.next().map(String::as_str) { Some("light") => Some(true), Some("dark") => Some(false), b => { eprintln!("--backdrop: expected light or dark, got {b:?}"); std::process::exit(2) } },
+            _ => { let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-badge: expected x,y but got {a:?}"); std::process::exit(2) } }
+        } }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo_badge(pts, secs, shot, lang, light, backdrop); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, lang, light, backdrop); eprintln!("--demo-badge needs macOS or Windows"); std::process::exit(2) }
     }
     // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light]: only the Settings window, with sample
     // words and no key capture, prefs or keychain

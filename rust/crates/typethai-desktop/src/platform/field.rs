@@ -15,6 +15,8 @@ pub const REVERIFY: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub struct Gate { field: Option<Field>, at: Option<Instant>, touched: Option<Instant>, inflight: bool }
 impl Gate {
+    /// Just told `f` (the badge's one-off look at focus, outside the per-key cache).
+    pub fn told(f: Field) -> Gate { Gate { field: Some(f), ..Gate::default() } }
     /// Focus moved to another window / app: nothing known.
     pub fn reset(&mut self) { *self = Gate::default() }
     /// Click, Tab, Enter, Esc or a Nav key: focus may have moved inside the same window.
@@ -70,6 +72,12 @@ mod tests {
     fn ms(t: Instant, n: u64) -> Instant { t + Duration::from_millis(n) }
     fn closed(t: Instant) -> Gate { let mut g = Gate::default(); g.answer(Some(Field::NotText), t); g }
 
+    #[test] fn a_fresh_verdict_opens_as_the_cached_one_would() {
+        assert!(Gate::told(Field::Text).open(false, || true));
+        assert!(!Gate::told(Field::NotText).open(false, || false));
+        assert!(Gate::told(Field::NotText).open(true, || false), "a caret opens");
+        assert!(Gate::told(Field::Unknown).open(false, || false) && !Gate::told(Field::Unknown).open(false, || true), "unknown: open unless fullscreen");
+    }
     #[test] fn unknown_focus_asks_on_any_key() {
         let g = Gate::default();
         assert!(g.must_ask(false, true) && g.must_ask(true, false));

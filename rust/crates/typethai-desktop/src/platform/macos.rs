@@ -98,10 +98,14 @@ unsafe fn tis_sources() -> Vec<(Source, CFType)> {
     }).collect()
 }
 pub fn input_sources() -> Vec<Source> { unsafe { tis_sources().into_iter().map(|(s, _)| s).collect() } }
-/// Main thread only (see `bridge::INPUT_THAI`): make a switch the tap asked for, then publish the current source.
+/// Main thread only (see `bridge::INPUT_THAI`): make a switch the tap asked for, then publish the current source. A
+/// change (the user's or ours) asks the tap thread for the badge, as the caret is read there.
 pub fn sync_input_source() {
+    static WATCH: std::sync::Mutex<crate::badge::Watch> = std::sync::Mutex::new(crate::badge::Watch::new());
     let req = bridge::REQ_SWITCH_INPUT.lock().unwrap().take();
-    unsafe { if let Some(lang) = req { switch_input(lang) } bridge::INPUT_THAI.store(input_source_is_thai(), Ordering::SeqCst); }
+    let thai = unsafe { if let Some(lang) = req { switch_input(lang) } input_source_is_thai() };
+    bridge::INPUT_THAI.store(thai, Ordering::SeqCst);
+    if let Some(lang) = WATCH.lock().unwrap().see(0, thai) { *bridge::REQ_BADGE.lock().unwrap() = Some(lang) }
 }
 /// Switch to the installed source fitting `lang`, unless the current one already fits. Warns once per language if none.
 unsafe fn switch_input(lang: InputLang) {
@@ -474,6 +478,14 @@ fn typing_in_our_window(st: &mut State, target_pid: i64) -> bool {
     }
     true
 }
+/// The input source changed: the badge at the caret, unless it is off, typeThai is paused, the bubble is up, the
+/// Settings window is in front, or focus is a password field or no text field (a fresh look, by the gate's rule).
+fn offer_badge(st: &mut State, lang: InputLang) {
+    let e = &st.app.engine; let ours = key_targets_us(0);
+    let on = e.opts.input_badge && !e.paused && !ours;
+    let blocked = || { let (secure, f) = unsafe { focus_check() }; secure || !field::Gate::told(f).open(false, || false) };
+    if let Some(anchor) = crate::badge::anchor_for(on, e.bubble_visible(), blocked, || unsafe { anchor() }) { send(UiMsg::Badge { lang, anchor }) }
+}
 fn service_settings(st: &mut State) {
     let cmds = bridge::take_settings();
     if cmds.is_empty() && !bridge::take(&bridge::REQ_SETTINGS) { return }
@@ -489,6 +501,7 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         let now = std::time::Instant::now();
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         if st.gate.refresh_due(now, false) { field_refresh(st); }
+        if let Some(lang) = bridge::REQ_BADGE.lock().unwrap().take() { offer_badge(st, lang) }
         // a few AX reads after each key: the first is often still the pre-keystroke caret
         if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
             st.move_due = None; st.last_move = Some(now);

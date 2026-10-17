@@ -51,6 +51,8 @@ pub fn prepare(n: &Native) {
     // gpui gives PopUp windows the utility-window animation, which fades every orderOut / orderFront
     w.setAnimationBehavior(objc2_app_kit::NSWindowAnimationBehavior::None);
 }
+/// The badge: clicks go to the window under it.
+pub fn click_through(n: &Native) { n.win.setIgnoresMouseEvents(true); }
 pub fn show(n: &Native, r: Rect) {
     let ph = primary_h();
     n.win.setFrame_display(NSRect::new(NSPoint::new(r.x, ph - r.y - r.h), NSSize::new(r.w, r.h)), true);

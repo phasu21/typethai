@@ -22,6 +22,10 @@ pub enum UiMsg {
     Stopped,
     /// Current don't-translate list and learned words, for the Settings window.
     Settings(SettingsSnap),
+    /// The input source just changed to `lang`: the badge under the caret (`badge::anchor_for`: no mouse fallback).
+    Badge { lang: InputLang, anchor: Anchor },
+    /// A click on the badge (Windows, where it is not click-through): take it down.
+    HideBadge,
 }
 
 impl UiMsg {
@@ -257,6 +261,10 @@ pub static REQ_QUIT: AtomicBool = AtomicBool::new(false);
 /// the event tap runs on its own thread. The tap reads the last answer and leaves switches here for the UI loop.
 pub static INPUT_THAI: AtomicBool = AtomicBool::new(false);
 pub static REQ_SWITCH_INPUT: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
+/// macOS: the main thread saw the source change to this language; the tap thread looks up the caret and asks for the badge.
+pub static REQ_BADGE: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
+/// Where the badge is on screen while it is up (global units), for the Windows mouse hook.
+pub static BADGE_AT: Mutex<Option<Rect>> = Mutex::new(None);
 /// `--settings`: open the Settings window once the UI is up.
 pub static REQ_OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 /// The Settings window's update button: handled by the UI loop like the tray's update item.

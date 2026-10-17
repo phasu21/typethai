@@ -57,6 +57,10 @@ pub fn prepare(n: &Native) { unsafe {
     let _ = DwmSetWindowAttribute(n.0, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const core::ffi::c_void, std::mem::size_of_val(&square) as u32);
     let _ = DwmSetWindowAttribute(n.0, DWMWA_BORDER_COLOR, &none as *const _ as *const core::ffi::c_void, std::mem::size_of_val(&none) as u32);
 } }
+/// The badge: not click-through, as that needs WS_EX_LAYERED, which gpui's DirectComposition swap chain is not built
+/// for; the mouse hook swallows a click on it (`bridge::BADGE_AT`) and takes it down instead. WS_EX_NOACTIVATE (`prepare`)
+/// keeps the app in front either way.
+pub fn click_through(_: &Native) {}
 /// `rc` is the area gpui draws in. `prepare` removes the frame; should a frame remain, the window rect is grown by it and
 /// moved so that the client area still lands exactly on `rc`, else the bubble is cut off on the right and bottom.
 pub fn show(n: &Native, rc: Rect) { unsafe {

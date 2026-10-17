@@ -1,0 +1,161 @@
+//! The input-language badge: the language now typed, under the caret for a moment after the keyboard input source
+//! changes (by the user, or by typeThai after a conversion). Pure logic; the platform layers feed it.
+use crate::engine::InputLang;
+use crate::placement::Anchor;
+use std::time::{Duration, Instant};
+
+/// How long the badge stays up.
+pub const SHOW_FOR: Duration = Duration::from_millis(1200);
+
+/// Spots the input language changing under the same owner: Windows gives each foreground window's thread a layout of
+/// its own, so a new window is not a switch; macOS has one source (owner 0). The first look is not a change either.
+#[derive(Default)]
+pub struct Watch { last: Option<(u64, bool)> }
+impl Watch {
+    pub const fn new() -> Watch { Watch { last: None } }
+    pub fn see(&mut self, owner: u64, thai: bool) -> Option<InputLang> {
+        let was = self.last.replace((owner, thai));
+        (was.is_some_and(|(o, t)| o == owner && t != thai)).then_some(if thai { InputLang::Thai } else { InputLang::Latin })
+    }
+}
+
+/// Where the badge may go: the caret, else a short field, never the mouse (a badge there is noise). None: don't show,
+/// also with the setting off, while the bubble is up, or when focus is `blocked`: a password field, or not a text field
+/// (the text-field gate). `blocked` and `anchor` are AX / UIA reads, made only when needed.
+pub fn anchor_for(on: bool, bubble: bool, blocked: impl FnOnce() -> bool, anchor: impl FnOnce() -> Anchor) -> Option<Anchor> {
+    if !on || bubble || blocked() { return None }
+    let a = Anchor { mouse: None, ..anchor() };
+    crate::placement::source_of(&a, &crate::placement::Opts::default()).is_some().then_some(a)
+}
+
+// The pill (logical px): [border][pad][flag][gap][label][pad][border], in a transparent margin for its shadow.
+pub const MARGIN: f64 = crate::bridge::SHADOW_M;
+pub const PILL_H: f64 = 26.0;
+pub const PILL_PX: f64 = 8.0;
+pub const FLAG: f64 = 16.0;
+pub const GAP: f64 = 6.0;
+pub const LABEL_PX: f64 = 13.0;
+/// The window's x from the caret's: the flag's centre sits over the caret.
+pub const CARET_DX: f64 = -(MARGIN + crate::bridge::BORDER + PILL_PX + FLAG / 2.0);
+/// The window for a label `label_w` wide: the pill and the margin around it.
+pub fn size(label_w: f64) -> (f64, f64) { (2.0 * (MARGIN + crate::bridge::BORDER + PILL_PX) + FLAG + GAP + label_w, 2.0 * MARGIN + PILL_H) }
+/// The window's rect under the caret line (above only when there is no room below), for a label `label_w` wide.
+pub fn place(a: &Anchor, label_w: f64, mons: &[crate::placement::Monitor]) -> Option<crate::placement::Placement> {
+    // lower_fraction 1: never "low on the screen", so below whenever it fits
+    let o = crate::placement::Opts { gap: 4.0, caret_dx: CARET_DX, inset: MARGIN, lower_fraction: 1.0, ..Default::default() };
+    crate::placement::place(&Anchor { mouse: None, ..*a }, size(label_w), mons, &o)
+}
+/// What the badge says next to the flag.
+pub fn label(lang: InputLang) -> &'static str { match lang { InputLang::Thai => "ไทย", InputLang::Latin => "EN" } }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmd { Show(InputLang), Hide }
+/// UI side: when the badge is up. The bubble wins: no badge while it shows, and it takes the badge down.
+#[derive(Default)]
+pub struct Shown { until: Option<Instant>, bubble: bool }
+impl Shown {
+    pub fn changed(&mut self, lang: InputLang, now: Instant) -> Option<Cmd> {
+        if self.bubble { return None }
+        self.until = Some(now + SHOW_FOR); Some(Cmd::Show(lang))
+    }
+    pub fn bubble(&mut self, visible: bool) -> Option<Cmd> { self.bubble = visible; (visible && self.until.take().is_some()).then_some(Cmd::Hide) }
+    pub fn tick(&mut self, now: Instant) -> Option<Cmd> { self.until.take_if(|t| now >= *t).map(|_| Cmd::Hide) }
+    /// A click on it (Windows; on macOS clicks pass through).
+    pub fn clicked(&mut self) -> Option<Cmd> { self.until.take().map(|_| Cmd::Hide) }
+    /// The badge is up.
+    pub fn up(&self) -> bool { self.until.is_some() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::Rect;
+    use InputLang::{Latin, Thai};
+    const CARET: Anchor = Anchor { caret: Some(Rect::new(100.0, 200.0, 1.0, 18.0)), field: Some(Rect::new(60.0, 194.0, 300.0, 30.0)), mouse: Some((5.0, 5.0)) };
+    #[test] fn a_switch_under_the_same_owner_is_a_change() {
+        let mut w = Watch::default();
+        assert_eq!(w.see(0, false), None, "the first look");
+        assert_eq!(w.see(0, false), None, "unchanged");
+        assert_eq!(w.see(0, true), Some(Thai));
+        assert_eq!(w.see(0, true), None);
+        assert_eq!(w.see(0, false), Some(Latin));
+    }
+    #[test] fn a_new_window_with_its_own_layout_is_not_a_switch() {
+        let mut w = Watch::default();
+        w.see(1, false);
+        assert_eq!(w.see(2, true), None, "another window, already Thai");
+        assert_eq!(w.see(2, false), Some(Latin), "then switched in it");
+        assert_eq!(w.see(1, false), None, "back to the first");
+    }
+    fn at(on: bool, bubble: bool, blocked: bool, a: Anchor) -> Option<Anchor> { anchor_for(on, bubble, || blocked, || a) }
+    #[test] fn the_badge_goes_at_the_caret_or_a_field_never_the_mouse() {
+        assert_eq!(at(true, false, false, CARET), Some(Anchor { mouse: None, ..CARET }));
+        let field = Anchor { caret: None, ..CARET };
+        assert_eq!(at(true, false, false, field), Some(Anchor { mouse: None, ..field }));
+        assert_eq!(at(true, false, false, Anchor { caret: None, field: None, mouse: Some((5.0, 5.0)) }), None, "only the mouse");
+        let tall = Anchor { caret: None, field: Some(Rect::new(0.0, 0.0, 800.0, 600.0)), mouse: Some((5.0, 5.0)) };
+        assert_eq!(at(true, false, false, tall), None, "a document's frame says nothing of the line");
+    }
+    #[test] fn no_badge_when_off_over_the_bubble_or_outside_a_text_field() {
+        assert_eq!(at(false, false, false, CARET), None, "setting off");
+        assert_eq!(at(true, true, false, CARET), None, "the bubble is up");
+        assert_eq!(at(true, false, true, CARET), None, "a password field, or not a text field");
+    }
+    #[test] fn off_or_under_the_bubble_nothing_is_looked_up() {
+        let never = || -> bool { panic!("looked up") };
+        assert_eq!(anchor_for(false, false, never, || -> Anchor { panic!("looked up") }), None);
+        assert_eq!(anchor_for(true, true, never, || -> Anchor { panic!("looked up") }), None);
+        assert_eq!(anchor_for(true, false, || true, || -> Anchor { panic!("looked up") }), None, "blocked: no caret lookup");
+    }
+    #[test] fn the_window_fits_the_pill_and_its_shadow() {
+        // [margin 10][border 1][pad 8][flag 16][gap 6][label][pad 8][border 1][margin 10], 26 tall + margins
+        assert_eq!(size(30.0), (90.0, 46.0));
+        assert_eq!(CARET_DX, -27.0, "the flag's centre over the caret");
+    }
+    #[test] fn the_badge_sits_under_the_caret_even_low_on_the_screen() {
+        use crate::placement::Monitor;
+        let v = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let mons = [Monitor { frame: v, visible: v, size_scale: 1.0, pixel: 2.0 }];
+        let low = Anchor { caret: Some(Rect::new(300.0, 650.0, 1.0, 18.0)), field: None, mouse: None };
+        let p = place(&low, 30.0, &mons).unwrap();
+        assert!(!p.above, "the bubble would go above here; the badge stays below");
+        // the pill 4 px under the caret, its flag's centre on the caret's x
+        assert_eq!((p.rect.y + MARGIN, p.rect.x - CARET_DX), (650.0 + 18.0 + 4.0, 300.0));
+        assert_eq!((p.rect.w, p.rect.h), size(30.0));
+        let bottom = Anchor { caret: Some(Rect::new(300.0, 770.0, 1.0, 18.0)), ..low };
+        assert!(place(&bottom, 30.0, &mons).unwrap().above, "no room below");
+        assert_eq!(place(&Anchor { caret: None, field: None, mouse: Some((5.0, 5.0)) }, 30.0, &mons), None, "never at the mouse");
+    }
+    #[test] fn a_click_takes_the_badge_down() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        assert_eq!(s.clicked(), None, "nothing up");
+        s.changed(Thai, t);
+        assert_eq!(s.clicked(), Some(Cmd::Hide));
+        assert_eq!(s.tick(t + SHOW_FOR), None);
+    }
+    #[test] fn the_badge_shows_at_once_and_hides_after_its_time() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        assert_eq!(s.changed(Thai, t), Some(Cmd::Show(Thai)));
+        assert_eq!(s.tick(t + SHOW_FOR - Duration::from_millis(1)), None);
+        assert_eq!(s.tick(t + SHOW_FOR), Some(Cmd::Hide));
+        assert_eq!(s.tick(t + SHOW_FOR * 2), None, "hidden once");
+    }
+    #[test] fn another_switch_restarts_the_time() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        s.changed(Thai, t);
+        let t2 = t + Duration::from_millis(800);
+        assert_eq!(s.changed(Latin, t2), Some(Cmd::Show(Latin)));
+        assert_eq!(s.tick(t + SHOW_FOR), None, "counted from the second switch");
+        assert_eq!(s.tick(t2 + SHOW_FOR), Some(Cmd::Hide));
+    }
+    #[test] fn the_bubble_takes_the_badge_down_and_keeps_it_off() {
+        let (mut s, t) = (Shown::default(), Instant::now());
+        s.changed(Thai, t);
+        assert_eq!(s.bubble(true), Some(Cmd::Hide));
+        assert_eq!(s.changed(Latin, t), None, "no badge over the bubble");
+        assert_eq!(s.tick(t + SHOW_FOR), None);
+        assert_eq!(s.bubble(false), None, "the bubble going does not bring it back");
+        assert_eq!(s.changed(Latin, t), Some(Cmd::Show(Latin)));
+        assert_eq!(Shown::default().bubble(true), None, "nothing to hide");
+    }
+}

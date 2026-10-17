@@ -5,6 +5,11 @@
 //! It is positioned/shown/hidden natively (see `native_*`) at the rect computed by `placement::place`, so placement uses
 //! one global coordinate space on both OSes. Clicks never reach it: the capture thread hit-tests mouse-downs against the
 //! shared `bridge::GEOM` and swallows them, so the app being typed in keeps focus.
+//!
+//! The input-language badge is a second such window, shown for a moment under the caret when the input source changes
+//! (`badge`). On macOS it ignores the mouse; on Windows the mouse hook swallows a click on it and takes it down.
+use crate::badge::{self, Cmd};
+use crate::engine::InputLang;
 use crate::bridge::{self, BubbleLayout, Geom, Layout, Opt, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::engine::Reason;
 use crate::update;
@@ -236,27 +241,83 @@ impl Ui {
     }
 }
 
-fn open_bubble(cx: &mut App) -> Ui {
+/// A hidden, transparent PopUp that never takes focus, positioned and shown natively (`native::show`): the bubble, the badge.
+fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut App) -> Entity<V>) -> (AnyWindowHandle, Entity<V>, native::Native) {
     let opts = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), size(px(300.), px(80.))))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))))),
         titlebar: None, focus: false, show: false, kind: WindowKind::PopUp,
         is_movable: false, is_resizable: false, is_minimizable: false,
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    let (handle, view) = open_window(opts, cx, |_, cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false })).expect("bubble window");
-    // gpui-kit's Root fills the window with the theme background; only what the bubble draws may show
+    let (handle, view) = open_window(opts, cx, |_, cx| build(cx)).expect("popup window");
+    // gpui-kit's Root fills the window with the theme background; only what the view draws may show
     handle.update(cx, |root, _, cx| if let Ok(root) = root.downcast::<gpui_kit::base::Root>() {
         root.update(cx, |r, _| r.style().background = Some(transparent_black().into()))
-    }).expect("bubble window");
+    }).expect("popup window");
     let n = handle.update(cx, |_, window, _| {
-        let n = native::native(window).expect("native bubble window");
+        let n = native::native(window).expect("native popup window");
         native::prepare(&n);
         // follow the system light/dark appearance
         window.observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx)).detach();
         n
-    }).expect("bubble window");
+    }).expect("popup window");
+    (handle, view, n)
+}
+fn open_bubble(cx: &mut App) -> Ui {
+    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false }));
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![] }
+}
+
+/// The input-language badge: a pill like the strip's groups, the language's round flag (as on a conversion's badge)
+/// and its name, sized to the label.
+pub struct BadgeView { lang: InputLang, label_w: f64 }
+impl Render for BadgeView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme(); let f = |v: f64| px(v as f32);
+        let pill_w = badge::size(self.label_w).0 - 2.0 * badge::MARGIN;
+        div().size_full().flex().items_start().justify_start().p(f(badge::MARGIN))
+            .child(div().flex_none().w(f(pill_w)).h(f(badge::PILL_H)).px(f(badge::PILL_PX)).flex().flex_row().items_center().gap(f(badge::GAP))
+                .bg(t.popover).border_1().border_color(t.border).rounded_full().shadow_md()
+                .font(thai_font()).font_weight(FontWeight::MEDIUM).text_size(f(badge::LABEL_PX)).text_color(t.popover_foreground)
+                .child(div().size(f(badge::FLAG)).flex_none().rounded_full().border_1().border_color(t.input).child(img(bridge::flag(self.lang)).size_full().rounded_full()))
+                .child(div().w(f(self.label_w)).flex_none().child(badge::label(self.lang))))
+    }
+}
+/// Width of the badge's label as drawn.
+fn label_w(window: &Window, lang: InputLang) -> f64 {
+    let text = badge::label(lang); let mut f = thai_font(); f.weight = FontWeight::MEDIUM;
+    let run = TextRun { len: text.len(), font: f, color: black(), background_color: None, underline: None, strikethrough: None };
+    window.text_system().shape_line(text.into(), px(badge::LABEL_PX as f32), &[run], None).width().as_f32().ceil() as f64 + 1.0
+}
+struct BadgeWin { handle: AnyWindowHandle, view: Entity<BadgeView>, native: native::Native, shown: badge::Shown, at: Option<Placement> }
+impl BadgeWin {
+    fn open(cx: &mut App) -> BadgeWin {
+        let (handle, view, native) = open_popup(80., 46., cx, |cx| cx.new(|_| BadgeView { lang: InputLang::Latin, label_w: 0.0 }));
+        native::click_through(&native);
+        BadgeWin { handle, view, native, shown: badge::Shown::default(), at: None }
+    }
+    fn changed(&mut self, lang: InputLang, anchor: Anchor, cx: &mut App) { let c = self.shown.changed(lang, Instant::now()); self.run(c, Some(anchor), cx) }
+    fn bubble(&mut self, visible: bool, cx: &mut App) { let c = self.shown.bubble(visible); self.run(c, None, cx) }
+    fn clicked(&mut self, cx: &mut App) { let c = self.shown.clicked(); self.run(c, None, cx) }
+    fn tick(&mut self, cx: &mut App) { let c = self.shown.tick(Instant::now()); self.run(c, None, cx) }
+    fn run(&mut self, cmd: Option<Cmd>, anchor: Option<Anchor>, cx: &mut App) {
+        let n = self.native.clone();
+        let at = match cmd {
+            Some(Cmd::Show(lang)) => {
+                let w = self.handle.update(cx, |_, window, _| label_w(window, lang)).unwrap_or(24.0);
+                self.view.update(cx, |v, cx| { v.lang = lang; v.label_w = w; cx.notify(); });
+                let p = anchor.and_then(|a| badge::place(&a, w, &native::monitors()));
+                if p.is_none() { self.shown.clicked(); }
+                p
+            }
+            Some(Cmd::Hide) => None,
+            None => return,
+        };
+        // as the bubble: outside gpui's borrow of the window, so it gets the resize
+        match at { Some(p) => cx.foreground_executor().spawn(async move { native::show(&n, p.rect) }).detach(), None => if self.at.is_some() { cx.foreground_executor().spawn(async move { native::hide(&n) }).detach() } }
+        *bridge::BADGE_AT.lock().unwrap() = at.map(|p| p.rect); self.at = at;
+    }
 }
 
 fn app() -> Application { application().with_assets(AppAssets).with_quit_mode(QuitMode::Explicit) }
@@ -280,6 +341,7 @@ pub fn run(rx: Receiver<UiMsg>) {
     app().run(move |cx| {
         setup(cx);
         let mut ui = open_bubble(cx);
+        let mut badge = BadgeWin::open(cx);
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
         #[cfg(windows)] if tray.is_some() { super::platform::tray::promote_on_taskbar() }
         cx.spawn(async move |cx| {
@@ -290,16 +352,18 @@ pub fn run(rx: Receiver<UiMsg>) {
                 let mut stop = false;
                 cx.update(|cx| {
                     while let Ok(m) = rx.try_recv() { match m {
-                        UiMsg::Show { items, layout, anchor } => { ui.show(items, layout, anchor, cx); }
+                        UiMsg::Show { items, layout, anchor } => { badge.bubble(true, cx); ui.show(items, layout, anchor, cx); }
                         UiMsg::Move(a) => { ui.reanchor(a, cx); }
-                        UiMsg::Hide => ui.hide(cx),
+                        UiMsg::Hide => { ui.hide(cx); badge.bubble(false, cx) }
+                        UiMsg::Badge { lang, anchor } => badge.changed(lang, anchor, cx),
+                        UiMsg::HideBadge => badge.clicked(cx),
                         UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
                         UiMsg::Paused(p) => if let Some(t) = &tray { t.set_paused(p) },
                         UiMsg::Stopped => stop = true,
                         UiMsg::Settings(snap) => settings::apply_snapshot(&mut settings_win, snap, cx),
                     } }
-                    ui.reconcile(cx);
+                    ui.reconcile(cx); badge.tick(cx);
                     if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
                     let tray_cmd = tray.as_ref().and_then(|t| t.poll());
                     let tray_cmd = if bridge::take(&bridge::REQ_UPDATE_CLICK) { Some(super::platform::tray::TrayCmd::CheckUpdate) } else { tray_cmd };
@@ -417,6 +481,44 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
     });
 }
 
+/// `--demo-badge`: the input-language badge under a fake 18-unit caret at each point (no points: the main monitor's
+/// centre), as on a switch: up 1.2 s, then down; `secs` per point, languages taking turns from `lang`. With `shot`, shows
+/// it once, captures its window to `shot` (PNG) and quits. `backdrop` as in `demo`.
+pub fn demo_badge(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, lang: InputLang, light: bool, backdrop: Option<bool>) {
+    app().run(move |cx| {
+        setup(cx);
+        if light { Theme::change(gpui_kit::component::ThemeMode::Light, None, cx); }
+        let mut b = BadgeWin::open(cx);
+        let mut pts = points.clone();
+        if pts.is_empty() { if let Some(m) = native::monitors().first() { let v = m.visible; pts.push((v.x + v.w / 2.0, v.y + v.h / 2.0)) } }
+        if let (Some(bright), Some(&(x, y))) = (backdrop, pts.first()) { open_backdrop(x, y, bright, cx) }
+        if shot.is_some() { pts.truncate(1); }
+        let shot = shot.clone();
+        cx.spawn(async move |cx| {
+            // let a backdrop come up first
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            for (i, (x, y)) in pts.iter().copied().enumerate() {
+                let l = if i % 2 == 0 { lang } else if lang == InputLang::Thai { InputLang::Latin } else { InputLang::Thai };
+                let anchor = Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None };
+                cx.update(|cx| b.changed(l, anchor, cx));
+                eprintln!("demo-badge {i}: {l:?} caret ({x},{y}) -> {:?}", b.at);
+                if let Some(path) = &shot {
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    eprintln!("{}", native::describe(&b.native));
+                    match native::capture(&b.native, path) { Ok(()) => eprintln!("screenshot -> {path}"), Err(e) => eprintln!("screenshot failed: {e}") }
+                    break
+                }
+                let end = Instant::now() + Duration::from_secs_f64(secs);
+                while Instant::now() < end {
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                    cx.update(|cx| { let was = b.shown.up(); b.tick(cx); if was && !b.shown.up() { eprintln!("demo-badge {i}: hidden") } });
+                }
+            }
+            cx.update(|cx| cx.quit());
+        }).detach();
+    });
+}
+
 /// A plain window of text around (x, y), under the bubble: an app the bubble floats over.
 fn open_backdrop(x: f64, y: f64, bright: bool, cx: &mut App) {
     struct Backdrop(bool);
@@ -483,7 +585,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         completion: crate::engine::CompleteMode::default(),
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS),
         learn_words: true,
-        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: false, bubble: bridge::BubbleLayout::default(),
+        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: false, input_badge: true, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,

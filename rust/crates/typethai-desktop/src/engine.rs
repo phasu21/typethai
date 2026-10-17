@@ -210,6 +210,8 @@ pub struct Options {
     /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
     /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Off: plain arrows are always navigation.
     pub pick_arrows: bool,
+    /// The input-language badge under the caret when the input source changes; read by the platform layer.
+    pub input_badge: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
     pub slips: Option<Slips>,
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
@@ -217,7 +219,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
     live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), learn_words: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: false, input_badge: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first. The default sits at the second step: above the gap between
 /// keys in fluent typing, so the bubble does not flash mid-word, and half the old 500 ms.
 pub const COMPLETE_IDLE_CHOICES_MS: [u64; 4] = [150, 250, 400, 600];
@@ -646,6 +648,7 @@ impl Engine {
             SettingsCmd::SetAccept(a) => { let changed = self.opts.accept != a; self.opts.accept = a; changed }
             SettingsCmd::SetPickCtrl(on) => { let changed = self.opts.pick_ctrl != on; self.opts.pick_ctrl = on; changed }
             SettingsCmd::SetPickArrows(on) => { let changed = self.opts.pick_arrows != on; self.opts.pick_arrows = on; changed }
+            SettingsCmd::SetInputBadge(on) => { let changed = self.opts.input_badge != on; self.opts.input_badge = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
             SettingsCmd::ForgetWords => { self.words = Arc::default(); self.events_since_save += 1; true }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
@@ -653,7 +656,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, learn_words: self.opts.learn_words, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -2467,6 +2470,14 @@ mod tests {
         typ(&mut e, " helm"); assert_eq!(labels(&e), ["helmet"]);
         assert_eq!(e.on_key(Key::PickRow(2)), SWALLOWED, "past the last row: swallowed, nothing applied");
         assert_eq!((labels(&e), e.buffer()), (vec!["helmet".to_string()], "helm"));
+    }
+    #[test] fn the_input_badge_setting_is_on_until_turned_off() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.opts.input_badge && e.settings_snapshot().input_badge);
+        assert!(e.apply_settings(SettingsCmd::SetInputBadge(false)));
+        assert!(!e.apply_settings(SettingsCmd::SetInputBadge(false)), "same value is not a change");
+        assert!(!e.settings_snapshot().input_badge);
+        assert!(SettingsCmd::SetInputBadge(true).writes_prefs());
     }
     #[test] fn ctrl_digit_passes_through_when_off_or_without_a_bubble() {
         let Some(mut e) = engine() else { return };
