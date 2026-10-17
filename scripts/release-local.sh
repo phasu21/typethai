@@ -27,12 +27,12 @@ die() { echo "release-local: $*" >&2; exit 1; }
 [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag must look like v1.2.3"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/crates/typethai-desktop/Cargo.toml | head -1)
 [ "v$version" = "$tag" ] || die "Cargo.toml says $version, not ${tag#v}: bump the version first"
-# The release ships $sha, not the tree: this checkout is also where work in progress lives, so a dirty tree is worth
-# saying out loud but must not block a release of the commit (untracked files are not in it either way).
-[ -z "$(git status --porcelain --untracked-files=no)" ] || echo "release-local: the working tree has uncommitted changes; this release ships $sha and NOT them" >&2
 git fetch -q origin
 [ -n "$(git branch -r --contains HEAD)" ] || die "HEAD is not on GitHub: push it first (the PC builds it from there)"
 sha=$(git rev-parse HEAD)
+# The release ships $sha, not the tree: this checkout is also where work in progress lives, so a dirty tree is worth
+# saying out loud but must not block a release of the commit (untracked files are not in it either way).
+[ -z "$(git status --porcelain --untracked-files=no)" ] || echo "release-local: the working tree has uncommitted changes; this release ships $sha and NOT them" >&2
 if [ $publish = 1 ] && gh release view "$tag" -R "$repo" --json isDraft -q .isDraft 2>/dev/null | grep -q false; then die "$tag is already published"; fi
 for f in codesign.p12 codesign.p12.password update-ed25519.pem; do [ -f "$keys/$f" ] || die "missing $keys/$f"; done
 pub=$(openssl pkey -in "$keys/update-ed25519.pem" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
