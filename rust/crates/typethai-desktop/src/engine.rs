@@ -932,7 +932,13 @@ impl Engine {
         self.ask_next_word();
         self.poll_prediction();
         if self.word.is_empty() {
-            if !self.bubble_visible() { let rows = self.next_word_rows(); if rows != self.bubble { self.show(rows, acts) } }
+            if !self.bubble_visible() {
+                let rows = self.next_word_rows();
+                if rows != self.bubble { self.show(rows, acts) }
+                // nothing to offer here (the caret is not after a word): the answer is spent, and the next line asks
+                // again. Without this the late-answer tick would rebuild the rows every tick until a key came.
+                else if rows.is_empty() { self.pred_next_answer = None }
+            }
         }
         // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
         // completions of that word
