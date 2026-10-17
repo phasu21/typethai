@@ -35,6 +35,7 @@ extern "C" {
     fn AXUIElementSetMessagingTimeout(e: AXUIElementRef, secs: f32) -> i32;
     fn AXIsProcessTrusted() -> bool;
     fn AXUIElementCopyAttributeValue(e: AXUIElementRef, attr: CFStringRef, value: *mut CFTypeRef) -> i32;
+    fn AXUIElementIsAttributeSettable(e: AXUIElementRef, attr: CFStringRef, settable: *mut u8) -> i32;
     fn AXUIElementCopyParameterizedAttributeValue(e: AXUIElementRef, attr: CFStringRef, param: CFTypeRef, value: *mut CFTypeRef) -> i32;
     fn AXValueGetValue(v: CFTypeRef, ty: u32, out: *mut c_void) -> bool;
     fn AXValueCreate(ty: u32, ptr: *const c_void) -> CFTypeRef;
@@ -69,6 +70,10 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_bor
 unsafe fn ax_attr(e: AXUIElementRef, name: &str) -> Option<CFType> {
     let mut v: CFTypeRef = std::ptr::null(); let n = CFString::new(name);
     if AXUIElementCopyAttributeValue(e, n.as_concrete_TypeRef(), &mut v) == 0 && !v.is_null() { Some(CFType::wrap_under_create_rule(v)) } else { None }
+}
+unsafe fn ax_settable(e: AXUIElementRef, name: &str) -> bool {
+    let mut b = 0u8; let n = CFString::new(name);
+    AXUIElementIsAttributeSettable(e, n.as_concrete_TypeRef(), &mut b) == 0 && b != 0
 }
 unsafe fn focused() -> Option<CFType> { let sys = AXUIElementCreateSystemWide(); let r = ax_attr(sys, "AXFocusedUIElement"); CFRelease(sys as CFTypeRef); r }
 unsafe fn secure_now() -> bool {
@@ -218,9 +223,12 @@ unsafe fn focus_check() -> (bool, Field) {
         let r = match focused_element(Some(app)) {
             Some(f) => {
                 let fe = f.as_CFTypeRef() as AXUIElementRef; let role = s(fe, "AXRole").unwrap_or_default();
-                (s(fe, "AXSubrole").as_deref() == Some("AXSecureTextField"), field::ax(Some(&role), ax_attr(fe, "AXSelectedTextRange").is_some(), true, lazy_tree(pid)))
+                let range = ax_attr(fe, "AXSelectedTextRange").is_some();
+                // two more round trips, only when the role does not decide
+                let editable = range && !field::TEXT_ROLES.contains(&role.as_str()) && (ax_settable(fe, "AXSelectedTextRange") || ax_settable(fe, "AXValue"));
+                (s(fe, "AXSubrole").as_deref() == Some("AXSecureTextField"), field::ax(Some(&role), range, editable, true, lazy_tree(pid)))
             }
-            None => (false, field::ax(None, false, ax_attr(app, "AXFocusedWindow").is_some(), lazy_tree(pid))),
+            None => (false, field::ax(None, false, false, ax_attr(app, "AXFocusedWindow").is_some(), lazy_tree(pid))),
         };
         CFRelease(app as CFTypeRef);
         let f = if field::known_text_app(&bundle) { Field::Text } else if fresh && r.1 != Field::Text { Field::Unknown } else { r.1 };
