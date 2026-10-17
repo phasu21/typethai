@@ -11,7 +11,7 @@
   know. Both sources are one feature with one switch (*Suggest the next word*); the model's own switch decides whether
   the model is used at all.
 
-**Fixed in 0.5.12**
+**Fixed in 0.5.11**
 - Windows: the mouse no longer stutters while typeThai is running, in games above all. The mouse hook now has a thread
   of its own, and nothing it does waits on typing, suggestions or a look at the focused field.
 
