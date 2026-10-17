@@ -1,5 +1,18 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.5**
+- **Pick with the arrow keys.** Turn on Settings → Word suggestions → *Pick with arrow keys*: while the bubble is up,
+  press Up to move into it, Left or Right to choose, and Up again or Enter to apply. Down or Esc leaves. Until you press
+  Up, the arrow keys move the cursor as usual.
+- **Hold Tab for the ⌃⌥R options**, on the selected text or the word before the caret. A quick tap still types a Tab,
+  sent when you release it; holding Tab no longer repeats it. ⌃⌥R and Tab+R still work.
+- **Keys on the corner.** In the strip each button's key sits on its top-left corner, in your accent colour on the
+  highlighted option. The strip no longer shifts when the highlight moves.
+
+**Fixed in 0.5.5**
+- The bubble no longer pops up in games and other windows without a text field: typeThai now checks that you are
+  typing into a text field before it offers anything.
+
 **New in 0.5.4**
 - **English suggestions read the sentence.** Word completions now take their first row from the system's own
   prediction, which looks at the words before: `I wear a hel` offers *helmet*, `can you hel` offers *help*. macOS uses
