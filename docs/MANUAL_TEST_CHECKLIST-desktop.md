@@ -69,7 +69,7 @@
 ## v13
 - [ ] Space/Enter never change text (forward and reverse); the bubble shows for the finished word; Tab converts it, ⌃Z undoes.
 - [ ] Reverse: type `i dont know` on the Thai layout + Enter -> bubble `i dont know`; Tab replaces all three words.
-- [ ] Bubble disappears when typing the next word, on Down or a click; Left / Right pick from it and Up moves into it (Pick with: Arrow keys, the default).
+- [ ] Bubble disappears when typing the next word, on Left / Right / Down or a click; Up moves into it, then Left / Right pick (Pick with: Arrow keys, the default).
 - [ ] `--probe-caret --secs 20` (from a terminal that has Accessibility): red marker on the caret in TextEdit, Notes, Safari, Chrome, Slack, VS Code, Discord, Cursor; log says source=caret.
 - [ ] Bubble's first-row text starts at the caret x; follows the caret while typing without flicker; flips above near the bottom; external monitor.
 - [ ] v13.1: Backspace mid-word updates the bubble without flicker; Backspace over the space re-enters the word (bubble stays); ⌥⌫ drops one word of a reverse phrase; ⌘⌫ closes.
@@ -87,6 +87,25 @@
 - [ ] Cancel: Esc, typing a key, a click elsewhere, or switching apps at the preset rows, while "Rewriting…", and at the result: the bubble closes, the text is unchanged, and a late result never appears.
 - [ ] A clipboard manager (Maccy, Raycast, Paste) does not record the pasted result.
 - [ ] Windows Notepad and Edge: select text, Ctrl+Alt+R, Tab, Tab replaces it; the menu bar is not activated by the Alt release; Win+V history has no entry for the result; the previous clipboard comes back.
+
+## Local sentence completion (⌃⌥R → *Finish sentence locally*; exercised in `--simulate` only, see `docs/research/llm-sentence-completion-in-app.md`)
+- [ ] With no API key saved and **Offer AI rewrite** on, ⌃⌥R on a selection shows *Finish sentence locally* (and no *Fix typos* / *Translate TH↔EN*); with **Offer AI rewrite** off it is gone too.
+- [ ] Settings → AI rewrite: the **Local** / **Cloud** tabs switch the rows below them (Local: model + setup; Cloud: API key, Model, Base URL, Instructions, Save); the switch and Hold Tab rows stay above and apply to both.
+- [ ] Settings → AI rewrite → **Local model** offers Gemma 4 8B (default) and Typhoon 2.5 4B; picking one saves at once (`prefs.json` `"rewrite": {"local_model": …}`) and **Local model setup** re-checks.
+- [ ] Same selection, two models: `It was great catching up with you. Let's keep in` gives `…touch!` with Gemma and `…touch.` with the 4B (both were measured through the settings). A hand-edited `local_model` with a space in it falls back to the default instead of breaking the row.
+- [ ] Hovering an ⓘ on the AI rewrite page opens its card with the row's explanation, and moving off closes it (the one thing the agent could not drive: synthetic hover does not reach the app).
+- [ ] The **Local model setup** button is the state: `Checking…` (spinning) → `Get Ollama` / `Start Ollama` / `Download model` → `Downloading NN%` (spinning, percentage from the pull) → `Ready` (disabled); a failed pull leaves `Try again` with the error under the title.
+- [ ] Ollama installed but not running: **Set up** starts it (menu-bar app on macOS) and finishes the download; the row ends at "… is ready".
+- [ ] Ollama not installed (or `PATH` and the install dirs empty): the row says "Ollama is not installed" and the button is **Get Ollama**, which opens ollama.com/download.
+- [ ] Settings → AI rewrite shows the Ollama note on **Offer AI rewrite**; the Instructions text does not change the local result.
+- [ ] TextEdit: select `Please let me`, ⌃⌥R, *Finish sentence locally* shows "Finishing locally…" and then a continuation; Tab replaces the selection (⌘Z in the app restores the previous text).
+- [ ] Real selections: a partial Thai word (`ขอแสดงความยิน`), a mixed line (`Before merging, ช่วยเช็กว่า`), and a text needing a leading space (`…Let's keep in`) compose into one sentence with no doubled or glued words.
+- [ ] A trap: select `My bank account number is` — the bubble says "The local model has no suggestion for this selection" and nothing is inserted.
+- [ ] Ollama stopped: the same row says "Ollama is not running. Start it, or press Set up in Settings → AI rewrite" and nothing is inserted; starting Ollama and picking the row again works without a restart.
+- [ ] Cold model (after `ollama stop gemma4:latest`): the first request takes seconds; the bubble stays on "Finishing locally…" and the app keeps taking keys.
+- [ ] Esc, typing a key, a click elsewhere or switching apps while "Finishing locally…": the bubble closes, the text is unchanged and a late result never appears.
+- [ ] Chrome/Slack/a terminal: the same read-and-paste path as the cloud rows replaces the selection, and the previous clipboard comes back.
+- [ ] Windows: the same rows, with Ollama on the same machine; not run on Windows yet.
 
 ## Word completion (needs a model with English frequencies for English rows; not run live by the agent)
 - [ ] Settings → Word suggestions shows Off / After a pause / While typing, with the current one highlighted; a click switches it and survives a restart (`prefs.json` has `"completion"`).
@@ -106,15 +125,15 @@
 
 ## Horizontal bubble (agent-verified with --demo-bubble --screenshot on the Mac, dark and light; not run live)
 - [x] `--demo-bubble --items "ภาษา|ภาษี|ภาษาอังกฤษ" --screenshot x.png`: one strip of three buttons, an outlined `Tab` keycap on the first and filled `2` / `3` on the others; the self-check lines say OK and the panel matches the layout.
-- [x] `--select 1`: the `Tab` keycap moves to the second button and the strip keeps its width. `--light` looks right.
+- [x] `--select 1`: the `Tab` keycap moves to the second button, which grows (34 px tall, 16 px label) while the others are 30 px tall and dimmed, all on the same bottom edge and at their slot's width, so every gap between buttons is the same; no box around the buttons, no edge moves sideways and the strip keeps its width. `--light` looks right.
 - [x] One option over 240 px (`--items "สวัสดีครับ|ภาษาไทย ทดสอบ วรรณยุกต์ ก่ ก้ ก๊ ก๋ ภาษาอังกฤษ|l;ylfu"`) stacks the bubble as rows. `--vertical` stacks short options too.
 - [ ] Live, After a pause: type `hel` and stop. The strip appears with the first label at the caret's x; keep typing `m`: the options update in place without a flash or a jump, and the strip narrows from its left edge.
 - [ ] Next word, model beside pairs: type a line with a rare word pair (a name, jargon) and finish it with Enter twice
   or three times, then type the first word and pause: the pair rows come from the built-in list and the last row is the
   model's own follower. Settings → *Finish words from my typing* off: the model's row goes, the built-in rows stay.
-- [ ] Click each button: that option is applied. Click the padding or the gap between two buttons: nothing is applied, the click does not reach the app, and the bubble stays.
+- [ ] Click each button, or just above a smaller one: that option is applied. Click the gap between two buttons: the click reaches the app, as anywhere outside the buttons.
 - [ ] Shift+↓ / Shift+↑ move the highlight along the strip; clicks still land on the right button afterwards.
-- [ ] Near the bottom of the screen the strip flips above the caret; near the right edge it stays on screen.
+- [ ] The strip sits above the caret line (rows stay below); at the top of the screen it drops below the caret; near the right edge it stays on screen.
 - [ ] ⌃⌥R on a selection, and AI rewrite presets, "Rewriting…" and the result, are always rows.
 - [ ] Settings → Word suggestions → Bubble layout: Vertical gives the old rows on the next bubble and survives a restart (`prefs.json` has `"bubble_layout": "vertical"`); an older prefs.json opens as Horizontal.
 - [ ] Windows (Notepad, 100% and 150% scaling): the strip window is exactly the panel, nothing is clipped, and clicks hit the right button.

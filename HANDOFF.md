@@ -161,6 +161,8 @@ completion frequencies).
   suggestions → **Show it again after**: `BADGE_IDLE_CHOICES_MS` 1/2/3/5/10 s, default 2 s, prefs `"badge_idle_ms"`).
   A switch still shows it for `SHOW_FOR` (1.2 s). Everything else that owns the window still wins: the bubble, the hold
   indicator, pause, our own Settings window, a password field.
+- `Options::badge_idle` is an `Option<Duration>`: `Some(pause)` brings the preview back on a pause, `None` ("Off" in
+  Settings, `"badge_idle_ms": 0` in prefs) keeps it to the focus that showed it. A new focus still shows it either way.
 - Policy in the engine (`focus_moved` / `on_keystroke` / `on_idle`, `Action::Badge(bool)`), so it is unit-tested;
   `Engine::reset()` deliberately does *not* touch it (a click re-asks focus a moment later, and hiding first would blink).
   `Shown::pinned` / `unpin` hold the state on the UI side; `UiMsg::Badge { …, pin }` and `UiMsg::UnpinBadge` carry it.
@@ -180,6 +182,65 @@ completion frequencies).
   the two controls on the Word suggestions page.
 - Verified: `cargo test -p typethai-desktop` (245 pass, model-backed), the CI `--simulate` line, `--demo-badge --pin`
   and `--demo-badge` on the Mac. Not verified live: the AX focus look after a real click (see the manual checklist).
+
+## Local sentence completion (⌃⌥R → *Finish sentence locally*, 2026-10-18)
+
+- `completion.rs` is the only module that knows Ollama's `/api/chat`: `think:false`, `stream:false`, temperature 0,
+  `num_predict` 512, a decoding schema for `{decision, full_text}`, 60 s timeout, a 512-character input bound, a 16 KiB
+  response cap, and proxies/redirects off so the selection cannot leave the machine. The endpoint is fixed
+  (`127.0.0.1:11434`); the Ollama tag is `rewrite::Config::local_model`, passed into `completion::run(text, model)`.
+  The system prompt and four few-shot pairs ask for the exact selection back with at most 160 new characters, or an
+  empty-text abstention.
+- Choosing a model (`2026-10-18`, after the 4B/8B comparison): `rewrite::LOCAL_MODELS` is the Settings dropdown
+  (`gemma4:latest` default, `hf.co/typhoon-ai/typhoon2.5-qwen3-4b-gguf:Q4_K_M` the faster one), `with_local_model`
+  validates one tag and `from_json` falls back to the default for a hand-edited `prefs.json`. Nothing else in the app
+  changed for it: the choice lives in the existing `rewrite` config, so `prefs.json` (and the Settings save/key/gate
+  plumbing) needs no new key or command.
+- Setup: `local_setup.rs` finds `ollama` (PATH, then Homebrew/`/Applications/Ollama.app`/Windows install dirs), reads
+  `/api/version` and `/api/tags`, and presses on: `open -a Ollama` on macOS (else `ollama serve`, detached) when the
+  server is down, then `ollama pull <tag>` with its progress lines (stdout+stderr, `\r`-repainted) streamed into the
+  Settings row. `plan`/`has_tag`/`describe` are pure; `check` and `ensure` are the thin live wrappers. The row is
+  **Settings → AI rewrite → Local model setup** (button + live note), and the bubble's failure lines now point there
+  instead of naming a tag.
+- Validation (`rewrite.rs` `Failure::Local*`) refuses everything else: a suffix that is blank, over 160 characters, holds
+  control characters or U+FFFD, contains any numeric character, repeats the selection, or leaves an unbalanced quote.
+  Abstention has its own message. Cloud config is ignored and a failure never falls back to a cloud call
+  (`rewrite::execute` dispatches on `run.preset`); the row is offered without an API key.
+- Engine: `Preset::Finish` is last in `Preset::ALL`, the busy row reads "Finishing locally…", and a reply still lands
+  only while the bubble holds its `Busy(id)`, so Esc or typing during a request inserts nothing.
+- `platform/sim.rs` runs the same `completion::run` for a Finish job, so the path is smoke-testable:
+  `printf '<SEL:Please let me>^R<TabDown>3<TabUp>\n' | TYPETHAI_MODEL=/tmp/ttmodel/typethai.ttm rust/target/debug/typethai-desktop --simulate --state /tmp/ttsim/personal.json`.
+- Exercised 2026-10-18 with that simulator (see `docs/research/llm-sentence-completion-in-app.md` and the transcript
+  beside it): five plausible continuations (English phrase, partial word, Thai, mixed, and the `…keep in` boundary case
+  the raw prompt got wrong), both identifier traps abstained, an unreachable Ollama produced the "Start Ollama…" notice,
+  Tab pasted the result and Esc cancelled it. Warm requests ran about 1.1 s per completion for repeated identical
+  prompts (simulator wall-time difference, not a UI measurement); varying the prefix costs 1,285 ms p50 for the 4B and
+  2,210 ms for `gemma4:latest`, and a cold model 2,645 ms / 5,671 ms
+  (`docs/research/llm-sentence-completion-app-contract.md`, which re-ran the 4B under this same request and kept
+  `gemma4:latest` as the default).
+- Verified after the option and setup landed: `cargo test -p typethai-desktop` (282 pass), the simulator with each tag
+  in `prefs.json` returned that model's own measured answer (`…keep in touch!` for Gemma, `…keep in touch.` for the 4B),
+  `--demo-settings --page 3` showed the real status ("gemma4:latest is ready" with a disabled Ready button), and
+  `cargo test -p typethai-desktop local_setup_live -- --ignored --nocapture` drove a real `ollama pull` of an installed
+  tag to `success`. Not verified live: the Start path (this machine's server was up), the Get Ollama path, and a real
+  multi-GB download's progress rendering in the row.
+- Settings page shape (2026-10-18): the AI rewrite page is split into **Local** and **Cloud** tabs (`RewriteTab`, a
+  `TabBar::segmented` as the first item of the page's second group; the switch and Hold Tab rows stay above it and apply
+  to both, and the Save button lives on the Cloud tab because the local rows apply at once). Each row carries one short
+  line at most; the long explanations sit in a
+  hover card behind the ⓘ (kit `HoverCard`) and the setup control is one stateful button — `Checking…` / `Get Ollama` /
+  `Start Ollama` / `Download model` / `Downloading 42%` (spinning) / `Ready` (disabled) / `Try again`, from
+  `ui::settings::local_face`, which is unit-tested per state. The row shows a note only when setup failed. Hovering
+  could not be driven from an agent shell here (synthetic mouse moves do not reach gpui's hover, and synthetic clicks do
+  not open even the shipped dropdown menus), so the ⓘ card's *opening* is the one part reviewed by hand; its content and
+  every button face were checked in screenshots.
+- Not verified live: the real ⌃⌥R key capture, selection read and paste into another app; Windows; the cold-model wait in
+  the bubble. No user trial, so acceptance, retained text and task time are unmeasured.
+- Reviewing the row without moving Ollama around: `typethai-desktop --demo-settings --page 3 --local-state failed`
+  (`checking`, `install`, `start`, `pull`, `downloading`, `ready`, `failed`; `--local-cycle` walks them every 1.6 s and a
+  click steps, `--screenshot PNG` captures one). The demo never touches Ollama. `--settings --settings-page 3` opens the
+  real app on the AI rewrite page; with `TYPETHAI_FAKE_UNTRUSTED=1` it runs without the event tap, so it can be shown
+  beside an installed copy without both acting on the same keystrokes.
 
 ## Open limitations
 

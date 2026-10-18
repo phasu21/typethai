@@ -21,6 +21,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod settings;
+pub use settings::{demo_local, LocalDemo};
 #[cfg(target_os = "macos")] pub mod native_mac;
 #[cfg(target_os = "macos")] pub use native_mac as native;
 #[cfg(windows)] mod native_win;
@@ -71,60 +72,78 @@ impl Render for BubbleView {
         let (cap_fg, cap_bg) = (t.muted_foreground, t.tokens.muted);
         let cap = move |text: String, w: f64| div().w(px(w as f32)).h(px(bridge::KEYCAP_H as f32)).flex_none().flex().items_center().justify_center()
             .rounded(px(4.)).text_color(cap_fg).text_size(px(bridge::KEYCAP_FONT_PX as f32)).child(text);
-        // why an option is offered, round like gpui-kit's Badge on the option's corner: the flag of the language a
-        // conversion's text becomes, or the typo icon in the danger red on the fill it sits on (its button's, or a row's),
-        // so it reads as notched into the option. Its ring is the button's border colour. gpui-kit's `Badge::icon` tints
-        // its icon one colour and sits inside the corner, so the flag needs this.
+        // why an option is offered: the flag of the language a conversion's text becomes, or the typo icon in the danger
+        // red. A row shows it round like gpui-kit's Badge on the row's fill, ringed in the border colour (`Badge::icon`
+        // tints its icon one colour, so the flag needs this); a strip button carries it faint in its bottom-right corner,
+        // behind the label.
         let (ring, danger) = (t.input, t.danger);
-        let (btn_bg, btn_sel): (Background, Background) = (t.tokens.button.into(), t.tokens.button_active.into());
         let (row_bg, row_sel): (Background, Background) = (t.popover.into(), sel_bg.into());
+        let reason_icon = move |r: Reason, icon_px: f64| match r {
+            Reason::Layout(lang) => img(bridge::flag(lang)).size_full().rounded_full().into_any_element(),
+            Reason::Typo => Icon::new(gpui_kit::assets::IconName::SpellCheck).with_size(px(icon_px as f32)).text_color(danger).into_any_element(),
+        };
         let badge = move |r: Reason, fill: Background| div().size(px(bridge::BADGE_D as f32)).flex_none().rounded_full().border_1().border_color(ring)
-            .bg(fill).flex().items_center().justify_center()
-            .child(match r {
-                Reason::Layout(lang) => img(bridge::flag(lang)).size_full().rounded_full().into_any_element(),
-                Reason::Typo => Icon::new(gpui_kit::assets::IconName::SpellCheck).with_size(px(bridge::BADGE_ICON as f32)).text_color(danger).into_any_element(),
-            });
+            .bg(fill).flex().items_center().justify_center().child(reason_icon(r, bridge::BADGE_ICON));
+        // the flag at 2:1 (`wide_flag`), in a box that clips so nothing past it shows
+        let mark = move |r: Reason| {
+            let (w, h) = match r { Reason::Layout(_) => (bridge::MARK_FLAG_W, bridge::MARK_FLAG_H), Reason::Typo => (bridge::MARK_D, bridge::MARK_D) };
+            div().absolute().right(px(bridge::MARK_INSET as f32)).bottom(px(bridge::MARK_INSET as f32)).w(px(w as f32)).h(px(h as f32))
+                .overflow_hidden().rounded(px(2.)).opacity(bridge::MARK_ALPHA)
+                .child(match r {
+                    Reason::Layout(lang) => img(bridge::wide_flag(lang)).w(px(w as f32)).h(px(h as f32)).flex_none().into_any_element(),
+                    Reason::Typo => reason_icon(r, bridge::MARK_D),
+                })
+        };
         let slot = self.panel.clone(); let rows_slot = self.row_bounds.clone();
         { let mut tb = self.text_bounds.borrow_mut(); tb.clear(); tb.resize(self.items.len(), None); }
         // a fixed label column; the inner text box shrinks to the rendered text so the self-check can measure it
         // a label laid out on one line never wraps: the line wrapper counts Thai marks (ั ิ ์) as if they took room, so
         // a word that fits shaped (ประวัติศาสตร์) would break before its last cluster
-        let column = |i: usize, o: &Opt| { let tb = self.text_bounds.clone(); let w = px(l.label_w[i] as f32);
+        let column = |i: usize, o: &Opt| { let tb = self.text_bounds.clone(); let w = px(l.label_width(i, selected) as f32);
             let one_line = l.kind == BubbleLayout::Horizontal || l.cells.get(i).is_some_and(|c| c.h <= ROW_H);
-            div().w(w).flex_none().flex().text_size(px(FONT_PX as f32))
+            let font = if l.kind == BubbleLayout::Horizontal && i == selected { bridge::SEL_FONT_PX } else { FONT_PX };
+            div().w(w).flex_none().flex().when(l.kind == BubbleLayout::Horizontal, |d| d.justify_center()).text_size(px(font as f32))
                 .on_children_prepainted(move |b, _, _| { if let Some(s) = tb.borrow_mut().get_mut(i) { *s = b.first().copied(); } })
                 .child(if one_line { div().whitespace_nowrap() } else { div().max_w(w).whitespace_normal() }.child(o.label.clone())) };
-        // The window is borderless and transparent: the rows' panel, or the strip's groups, and the badges are all that is
-        // drawn. Their laid-out bounds are recorded every frame and `Ui::reconcile` resizes / re-places the window and
-        // refreshes the click cells.
+        // The window is borderless and transparent: the rows' panel with its badges, or the strip's buttons, and the key
+        // hints are all that is drawn. Their laid-out bounds are recorded every frame and `Ui::reconcile` resizes /
+        // re-places the window and refreshes the click cells.
         let (surface, edge) = (t.popover, t.border);
         let root = div().size_full().relative().flex().items_start().justify_start()
             .font(thai_font()).text_size(px(FONT_PX as f32)).text_color(t.popover_foreground)
             .on_children_prepainted(move |b, _, _| slot.set(b.first().copied()));
         match l.kind {
-            // No panel: a group is a solid box with a shadow around its buttons, so it reads over any app. One gpui-kit
-            // Button per option, its key hint a pill on its top-left corner: Tab (Enter while the arrow keys are in the
-            // bubble) on the highlighted option, the option's number on the others.
+            // No panel: each button stands on a solid backing with a shadow of its own, so it reads over any app. One
+            // gpui-kit Button per option, as wide as its fixed slot: the highlighted one fills it, larger, the others
+            // shorter, dimmed and on its floor, each with its reason mark inside. Its key hint is a pill on its top-left
+            // corner: Tab (Enter while the arrow keys are in the bubble) on the highlighted option, the option's number on
+            // the others.
             BubbleLayout::Horizontal => {
-                { let mut rb = rows_slot.borrow_mut(); rb.clear(); rb.resize(self.items.len(), Bounds::default()); }
-                let groups = l.runs.iter().map(|run| { let (start, rb) = (run.start, rows_slot.clone());
-                    div().flex().flex_row().items_center().gap(px(bridge::OPT_GAP as f32)).p(px(bridge::GROUP_PAD as f32))
-                        .bg(surface).border_1().border_color(edge).rounded(px(bridge::RADIUS as f32)).shadow_md()
-                        .on_children_prepainted(move |b, _, _| { let mut rb = rb.borrow_mut(); for (k, b) in b.into_iter().enumerate() { if let Some(s) = rb.get_mut(start + k) { *s = b } } })
-                        .children((run.start..run.start + run.len).map(|i| {
-                            let label = column(i, &self.items[i]).mt(px(bridge::LABEL_DROP as f32));
-                            let child = if shift {
-                                div().flex().flex_col().items_center().gap(px(2.)).child(label)
-                                    .child(div().flex().flex_row().gap(px(4.))
-                                        .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
-                                        .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.))))
-                            } else { label };
-                            Button::new(("opt", i)).selected(i == selected).child(child)
-                        })) });
-                // the badges and key hints come after all the buttons, so a neighbour never paints over one; filled like
-                // their button and ringed in its border colour, so they read as notched into it
-                let badges = l.badges_of().into_iter().map(|(i, r, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).child(badge(r, if i == selected { btn_sel } else { btn_bg })));
-                // solid in the user's accent colour, so the key reads over the button's border and over any app
+                let radius = t.radius;
+                let buttons = div().flex_none().flex().flex_row().items_end().gap(px(bridge::OPT_GAP as f32))
+                    .on_children_prepainted(move |b, _, _| *rows_slot.borrow_mut() = b)
+                    .children(self.items.iter().enumerate().map(|(i, o)| {
+                        let (slot, b, on) = (l.cells[i], l.button(i, selected), i == selected);
+                        let label = column(i, o).mt(px(bridge::LABEL_DROP as f32));
+                        let child = if shift {
+                            div().flex().flex_col().items_center().gap(px(2.)).child(label)
+                                .child(div().flex().flex_row().gap(px(4.))
+                                    .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
+                                    .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.))))
+                        } else { label };
+                        // the button's own padding would clip the mark: the padding is on this box, sized to the inside of
+                        // the button's border (`size_full` lets the label's line box stretch it past the bottom edge)
+                        let content = div().w(px((b.w - 2.0 * bridge::OPT_BORDER) as f32)).h(px((b.h - 2.0 * bridge::OPT_BORDER) as f32)).flex_none()
+                            .relative().flex().items_center().justify_center()
+                            .px(px((if on { bridge::OPT_SEL_PX } else { bridge::OPT_PX }) as f32))
+                            .when_some(o.reason, |d, r| d.child(mark(r))).child(child);
+                        div().w(px(slot.w as f32)).h(px(slot.h as f32)).flex_none().flex().items_end()
+                            .child(div().flex_none().rounded(radius).bg(surface).shadow_md()
+                                .child(Button::new(("opt", i)).selected(on).w(px(b.w as f32)).h(px(b.h as f32)).px(px(0.))
+                                    .when(!on, |b| b.opacity(bridge::DIM)).child(content)))
+                    }));
+                // the key hints come after all the buttons, so a neighbour never paints over one; solid in the user's
+                // accent colour, so the key reads over the button's border and over any app
                 let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
                 let key_bg = Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 });
                 let key_fg = if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) };
@@ -138,9 +157,8 @@ impl Render for BubbleView {
                             .bg(if on { key_bg } else { *cap_bg }).text_color(if on { key_fg } else { cap_fg }).text_size(px(bridge::KEY_FONT_PX as f32))
                             .child(if on { apply_pill.to_string() } else { (i + 1).to_string() })),
                     } });
-                root.pl(px(l.margin as f32)).pt(px(l.margin as f32))
-                    .child(div().flex_none().flex().flex_row().items_start().gap(px(bridge::GROUP_GAP_X as f32)).children(groups))
-                    .children(badges).children(keys).into_any_element()
+                root.pl(px(l.margin as f32)).pt(px(l.margin as f32)).child(buttons)
+                    .children(keys).into_any_element()
             }
             BubbleLayout::Vertical => {
                 let panel = div().flex_none().p(px(PAD as f32)).flex().w(px((l.w - 2.0 * l.margin) as f32)).flex_col()
@@ -196,7 +214,8 @@ struct AppAssets;
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let flag: Option<&'static [u8]> = match path {
-            "flags/th.svg" => Some(include_bytes!("../../flags/th.svg")), "flags/us.svg" => Some(include_bytes!("../../flags/us.svg")), _ => None };
+            "flags/th.svg" => Some(include_bytes!("../../flags/th.svg")), "flags/us.svg" => Some(include_bytes!("../../flags/us.svg")),
+            "flags/th-wide.svg" => Some(include_bytes!("../../flags/th-wide.svg")), "flags/us-wide.svg" => Some(include_bytes!("../../flags/us-wide.svg")), _ => None };
         if let Some(b) = flag { return Ok(Some(std::borrow::Cow::Borrowed(b))) }
         match BadgeIcons.load(path)? { Some(b) => Ok(Some(b)), None => assets::Assets.load(path) }
     }
@@ -234,7 +253,7 @@ impl Ui {
         if laid.len() != v.layout.cells.len() { return v.layout.cells.clone() }
         laid.iter().map(|b| Rect::new(b.origin.x.as_f32() as f64, b.origin.y.as_f32() as f64, b.size.width.as_f32() as f64, b.size.height.as_f32() as f64)).collect()
     }
-    /// What takes clicks: the rows' panel as laid out, or the layout's surfaces (a strip's are exact), and the badges.
+    /// What takes clicks besides the options: the rows' panel as laid out, the badges and the key hints.
     fn laid_solid(&self, cx: &App) -> Vec<Rect> {
         let v = self.view.read(cx); let mut solid = v.layout.solid(v.selected);
         if let (BubbleLayout::Vertical, Some(b)) = (v.layout.kind, v.panel.get()) {
@@ -246,7 +265,9 @@ impl Ui {
         let anchor = self.anchor?;
         let mons = native::monitors();
         let l = &self.view.read(cx).layout;
-        let opts = Opts { caret_dx: -l.text_x(), inset: l.margin, ..Opts::default() };
+        // the strip sits over the caret line, rows under it; either takes the other side when it does not fit
+        let lower_fraction = if l.kind == BubbleLayout::Horizontal { 0.0 } else { Opts::default().lower_fraction };
+        let opts = Opts { caret_dx: -l.text_x(), inset: l.margin, lower_fraction, ..Opts::default() };
         let p = placement::place(&anchor, size, &mons, &opts)?;
         // run after the current gpui update returns, so gpui isn't borrowed and receives the resulting resize
         let n = self.native.clone(); let r = p.rect;
@@ -308,7 +329,7 @@ fn open_bubble(cx: &mut App) -> Ui {
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![], shift: false }
 }
 
-/// The input-language badge: a pill like the strip's groups, the language's round flag (as on a conversion's badge)
+/// The input-language badge: a solid pill with a shadow, the language's round flag (as on a conversion's badge)
 /// and its name, sized to the label. Or, while Tab is held with no bubble up, the hold indicator: a sparkle, "Rewrite"
 /// and a thin bar filling in the accent colour.
 pub struct BadgeView { lang: InputLang, label_w: f64, hold: Option<Hold> }
@@ -667,40 +688,40 @@ fn open_backdrop(x: f64, y: f64, bright: bool, cx: &mut App) {
     cx.open_window(opts, |_, cx| cx.new(|_| Backdrop(bright))).expect("backdrop window");
 }
 
-/// `--screenshot` self-check, one line per option, one per strip badge and one for the panel: the measured single-line width
+/// `--screenshot` self-check, one line per option, one per strip key hint and one for the panel: the measured single-line width
 /// against the rendered text box (a row must fit or wrap, a strip option must fit on one line, never clip), the insets
-/// around the label column, each strip badge inside the window and on its button alone, and the laid-out panel against
+/// around the label column, each strip key hint inside the window and on its button alone, and the laid-out panel against
 /// the layout the window was sized from.
 fn self_check(v: &BubbleView, measured: &[f64]) -> String {
     let l = &v.layout; let tb = v.text_bounds.borrow(); let rb = v.row_bounds.borrow();
     let pnl = v.panel.get(); let f = |p: Pixels| p.as_f32() as f64;
     let strip = l.kind == BubbleLayout::Horizontal;
     let mut lines: Vec<String> = v.items.iter().enumerate().map(|(i, s)| {
-        let lw = l.label_w[i]; let t = tb.get(i).copied().flatten(); let r = rb.get(i).copied();
+        let lw = l.label_width(i, v.selected); let t = tb.get(i).copied().flatten(); let r = rb.get(i).copied();
         let (tw, th) = t.map_or((-1.0, -1.0), |b| (f(b.size.width), f(b.size.height)));
-        let (lpad, rpad) = match (t, r) { (Some(t), Some(r)) => (f(t.origin.x) - f(r.origin.x), f(r.origin.x) + f(r.size.width) - (f(t.origin.x) + lw)), _ => (-1.0, -1.0) };
+        // a strip label is centred: its text box, not its column, against the slot
+        let tlw = if strip { tw } else { lw };
+        let (lpad, rpad) = match (t, r) { (Some(t), Some(r)) => (f(t.origin.x) - f(r.origin.x), f(r.origin.x) + f(r.size.width) - (f(t.origin.x) + tlw)), _ => (-1.0, -1.0) };
         // rows: the row padding, then the label, the badge column, the gap and the reserved Tab + number slot. Strip: the
-        // button's border and padding.
-        let edge = bridge::OPT_BORDER + bridge::OPT_PX;
-        let badge_col = if l.reasons.iter().any(Option::is_some) { bridge::BADGE_D + bridge::HINT_GAP } else { 0.0 };
-        let expect = if strip { (edge, edge) } else { (ROW_PX, ROW_PX + bridge::HINT_GAP + bridge::HINT_SLOT_W + badge_col) };
-        let wraps = measured[i] > lw;
-        let pad_ok = (lpad - expect.0).abs() < 1.5 && (rpad - expect.1).abs() < 1.5;
-        // the strip never wraps, so its buttons sit where the layout put them (the click cells before the first frame)
+        // text centred in its slot-wide button.
         let cell = l.cells[i];
+        let badge_col = if l.reasons.iter().any(Option::is_some) { bridge::BADGE_D + bridge::HINT_GAP } else { 0.0 };
+        let expect = if strip { ((cell.w - tw) / 2.0, (cell.w - tw) / 2.0) } else { (ROW_PX, ROW_PX + bridge::HINT_GAP + bridge::HINT_SLOT_W + badge_col) };
+        let wraps = measured[i] > l.label_w[i];
+        let pad_ok = (lpad - expect.0).abs() < 1.5 && (rpad - expect.1).abs() < 1.5;
+        // the strip never wraps, so its slots sit where the layout put them (the click cells before the first frame)
         let at_ok = !strip || r.is_some_and(|r| (f(r.origin.x) - cell.x).abs() < 1.0 && (f(r.origin.y) - cell.y).abs() < 1.0 && (f(r.size.width) - cell.w).abs() < 1.0);
         let ok = tw <= lw + 0.5 && (wraps || th < 1.5 * FONT_PX * 1.6) && !(strip && wraps) && pnl.is_some() && pad_ok && at_ok;
         format!("option {i}: chars {} measured {:.1} (incl slack) label_w {lw:.1} rendered {tw:.1}x{th:.1} pad L {lpad:.1} R {rpad:.1} (expect {:.1}/{:.1}) {}{} {}",
             s.label.chars().count(), measured[i], expect.0, expect.1, if wraps { "WRAPS" } else { "fits" }, if at_ok { "" } else { " MOVED" }, if ok { "OK" } else { "CHECK-FAIL" })
     }).collect();
-    let hints = l.key_hints(v.selected).into_iter().enumerate().map(|(i, at)| (format!("key hint {i}"), at));
-    if strip { for (r, at) in l.badges().into_iter().map(|(r, at)| (format!("badge {r:?}"), at)).chain(hints) {
+    if strip { for (i, at) in l.key_hints(v.selected).into_iter().enumerate() {
         // inside the window, and on no other button (the laid-out ones)
         let inside = at.x >= 0.0 && at.y >= 0.0 && at.right() <= l.w && at.bottom() <= l.h;
         let covers = rb.iter().map(|b| Rect::new(f(b.origin.x), f(b.origin.y), f(b.size.width), f(b.size.height)))
             .filter(|c| at.x < c.right() && c.x < at.right() && at.y < c.bottom() && c.y < at.bottom()).count();
         let ok = inside && covers == 1;
-        lines.push(format!("{r} at {:.1},{:.1}: inside the window {inside}, on {covers} button(s) {}", at.x, at.y, if ok { "OK" } else { "CHECK-FAIL" }));
+        lines.push(format!("key hint {i} at {:.1},{:.1}: inside the window {inside}, on {covers} button(s) {}", at.x, at.y, if ok { "OK" } else { "CHECK-FAIL" }));
     } }
     let (py, pw, ph) = pnl.map_or((-1.0, -1.0, -1.0), |b| (f(b.origin.y), f(b.size.width), f(b.size.height)));
     // rows wrap, so only a strip's height is known before layout
@@ -720,7 +741,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         learn_words: true,
         predict: true,
         accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true,
-        badge_idle: std::time::Duration::from_millis(crate::engine::BADGE_IDLE_DEFAULT_MS),
+        badge_idle: Some(std::time::Duration::from_millis(crate::engine::BADGE_IDLE_DEFAULT_MS)),
         next_word: true, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
@@ -731,11 +752,11 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
 /// `--demo-settings`: only the Settings window, filled with sample words and the default rewrite config, on `page`. No key
 /// capture, prefs or keychain. Optionally types `search` into the sidebar search box and forces light mode. With `shot`,
 /// captures the window to a PNG and quits; otherwise stays open `secs` seconds.
-pub fn demo_settings(secs: f64, shot: Option<String>, search: Option<String>, page: usize, light: bool) {
+pub fn demo_settings(secs: f64, shot: Option<String>, search: Option<String>, page: usize, light: bool, local: Option<settings::LocalDemo>) {
     app().run(move |cx| {
         setup(cx);
         if light { Theme::change(gpui_kit::component::ThemeMode::Light, None, cx); }
-        let Some(h) = settings::open_demo(page, demo_snap(), cx).map(|win| win.handle) else { cx.quit(); return };
+        let Some(h) = settings::open_demo(page, demo_snap(), cx, local).map(|win| win.handle) else { cx.quit(); return };
         let shot = shot.clone(); let search = search.clone();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(400)).await;

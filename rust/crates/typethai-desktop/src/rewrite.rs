@@ -1,5 +1,5 @@
-//! AI rewrite of the selected text: presets, config, the OpenAI-compatible wire format, the API key, the clipboard
-//! protocol and the worker threads. The only module that knows the wire format or can read the key.
+//! Selection rewrite presets, provider config, the API key, clipboard protocol and workers.
+//! Cloud rewrites use the OpenAI-compatible format; local sentence completion lives in `completion`.
 use serde_json::{json, Value};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -11,11 +11,11 @@ pub struct ReqId(u64);
 impl ReqId { pub fn next(self) -> ReqId { ReqId(self.0 + 1) } }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preset { Fix, Translate }
+pub enum Preset { Fix, Translate, Finish }
 impl Preset {
-    pub const ALL: [Preset; 2] = [Preset::Fix, Preset::Translate];
-    pub fn label(self) -> &'static str { match self { Preset::Fix => "Fix typos", Preset::Translate => "Translate TH↔EN" } }
-    fn instructions(self) -> &'static str { match self { Preset::Fix => FIX, Preset::Translate => TRANSLATE } }
+    pub const ALL: [Preset; 3] = [Preset::Fix, Preset::Translate, Preset::Finish];
+    pub fn label(self) -> &'static str { match self { Preset::Fix => "Fix typos", Preset::Translate => "Translate TH↔EN", Preset::Finish => "Finish sentence locally" } }
+    fn instructions(self) -> &'static str { match self { Preset::Fix => FIX, Preset::Translate => TRANSLATE, Preset::Finish => unreachable!("local completion uses its own prompt") } }
 }
 const FIX: &str = "You fix spelling and typing mistakes in Thai and English text. Keep the wording, meaning, tone and punctuation exactly the same; change only misspelled words. If there are no mistakes, return the text unchanged. Output only the resulting text. No quotes, no explanation, no preamble.";
 const TRANSLATE: &str = "You translate between Thai and English. Detect the language of the text, then translate Thai into natural English or English into natural Thai. Translate every detail; do not summarize or leave anything out. Do not add ครับ or ค่ะ unless the source text is polite. Output only the translated text. No quotes, no explanation, no preamble.";
@@ -32,26 +32,45 @@ const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
 const TIMEOUT: Duration = Duration::from_secs(20);
 const BAD_URL: &str = "The base URL must start with https:// (http:// only for localhost).";
+pub const DEFAULT_LOCAL_MODEL: &str = "gemma4:latest";
+/// Ollama tags offered in Settings, with the label they show. Both were measured under this app's own prompt; the
+/// labels say what the difference was, not that one is better (docs/research/llm-sentence-completion-app-contract.md).
+pub const LOCAL_MODELS: [(&str, &str); 2] = [
+    (DEFAULT_LOCAL_MODEL, "Gemma 4 8B (default)"),
+    ("hf.co/typhoon-ai/typhoon2.5-qwen3-4b-gguf:Q4_K_M", "Typhoon 2.5 4B (faster)"),
+];
+const BAD_LOCAL_MODEL: &str = "The local model must be one Ollama tag, with no spaces.";
 
 /// Non-secret settings (prefs.json "rewrite"), normalized on construction. `instructions` is the user's own text,
-/// added to every preset's system prompt.
+/// added to cloud preset prompts. `local_model` and `enabled` apply to local completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config { pub enabled: bool, pub base_url: String, pub model: String, pub instructions: String }
-impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into(), instructions: String::new() } } }
+pub struct Config { pub enabled: bool, pub base_url: String, pub model: String, pub instructions: String, pub local_model: String }
+impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into(), instructions: String::new(), local_model: DEFAULT_LOCAL_MODEL.into() } } }
 impl Config {
     /// Settings fields: empty values take the defaults; a URL that would send the key in clear is refused.
     pub fn new(enabled: bool, base_url: &str, model: &str, instructions: &str) -> Result<Config, String> {
-        Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model), instructions: instructions.trim().into() })
+        Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model), instructions: instructions.trim().into(), local_model: DEFAULT_LOCAL_MODEL.into() })
     }
     /// prefs.json: missing or invalid fields fall back to the defaults.
     pub fn from_json(v: Option<&Value>) -> Config {
         let Some(v) = v else { return Config::default() };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
-        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")), instructions: s("instructions").trim().into() }
+        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")), instructions: s("instructions").trim().into(), local_model: local_model_of(s("local_model")).unwrap_or_else(|_| DEFAULT_LOCAL_MODEL.into()) }
     }
-    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model, "instructions": self.instructions }) }
+    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model, "instructions": self.instructions, "local_model": self.local_model }) }
+    /// The same config with another Ollama tag, refused when it is not a single tag.
+    pub fn with_local_model(&self, tag: &str) -> Result<Config, String> {
+        Ok(Config { local_model: local_model_of(tag)?, ..self.clone() })
+    }
 }
 fn model_of(raw: &str) -> String { let m = raw.trim(); if m.is_empty() { DEFAULT_MODEL.into() } else { m.into() } }
+/// One Ollama tag: no whitespace, bounded length. Empty means the default.
+fn local_model_of(raw: &str) -> Result<String, String> {
+    let m = raw.trim();
+    if m.is_empty() { return Ok(DEFAULT_LOCAL_MODEL.into()) }
+    if m.chars().count() > 80 || m.chars().any(char::is_whitespace) { return Err(BAD_LOCAL_MODEL.into()) }
+    Ok(m.into())
+}
 fn base_url_of(raw: &str) -> Result<String, String> {
     let u = raw.trim().trim_end_matches('/');
     if u.is_empty() { return Ok(DEFAULT_BASE_URL.into()) }
@@ -97,7 +116,10 @@ pub enum Reply {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Failure { NoKey, Timeout, Network, Rejected, RateLimited, Status(u16, Option<String>), BadResponse }
+pub enum Failure {
+    NoKey, Timeout, Network, Rejected, RateLimited, Status(u16, Option<String>), BadResponse,
+    LocalUnavailable, LocalTimeout, LocalSetup, LocalInput, LocalAbstained, LocalInvalid, LocalTruncated, LocalNumbers,
+}
 impl Failure {
     /// One short line for the notice row.
     pub fn message(&self) -> String {
@@ -106,6 +128,14 @@ impl Failure {
             Failure::Rejected => "The API key was rejected".into(), Failure::RateLimited => "Rate limited. Try again in a moment".into(),
             Failure::Status(c, Some(m)) => format!("Rewrite failed ({c}): {}", preview(m, 80)), Failure::Status(c, None) => format!("Rewrite failed ({c})"),
             Failure::BadResponse => "Unexpected reply from the model".into(),
+            Failure::LocalUnavailable => "Ollama is not running. Start it, or press Set up in Settings → AI rewrite".into(),
+            Failure::LocalTimeout => "The local model timed out. Check Ollama and try again".into(),
+            Failure::LocalSetup => "Ollama refused the request: set the local model up in Settings → AI rewrite".into(),
+            Failure::LocalInput => "Select unfinished text up to 512 characters for local completion".into(),
+            Failure::LocalAbstained => "The local model has no suggestion for this selection".into(),
+            Failure::LocalInvalid => "The local model returned an invalid continuation; nothing changed".into(),
+            Failure::LocalTruncated => "The local model stopped before finishing; nothing changed".into(),
+            Failure::LocalNumbers => "Local completion refuses continuations containing numbers".into(),
         }
     }
 }
@@ -144,6 +174,12 @@ fn call(run: &Run, key: &secret::ApiKey) -> Result<String, Failure> {
     let mut res = agent.post(&endpoint(&run.cfg)).header("Authorization", &key.bearer()).header("Content-Type", "application/json").send(&body(run)).map_err(fail)?;
     let text = res.body_mut().read_to_string().map_err(fail)?;
     parse(res.status().as_u16(), &text).map(|out| finish(&run.text, &out))
+}
+fn execute(run: &Run) -> Result<String, Failure> {
+    match run.preset {
+        Preset::Finish => crate::completion::run(&run.text, &run.cfg.local_model),
+        Preset::Fix | Preset::Translate => secret::load().ok_or(Failure::NoKey).and_then(|key| call(run, &key)),
+    }
 }
 /// Put the selection's own leading/trailing whitespace back around the model output (a selected line keeps its "\n").
 fn finish(original: &str, out: &str) -> String {
@@ -233,7 +269,7 @@ impl Worker {
         std::thread::Builder::new().name("typethai-desk".into()).spawn(move || { let mut h = make(); for job in jobs { match job {
             Job::Capture(id) => { let sel = capture(&mut h); let has_key = matches!(sel, Captured::Text(_)) && secret::load().is_some(); let _ = tx.send(Reply::Captured { id, sel, has_key }); }
             Job::Paste(text) => paste(&mut h, &text),
-            Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = secret::load().ok_or(Failure::NoKey).and_then(|k| call(&r, &k)); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
+            Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = execute(&r); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
         } } }).expect("desk thread");
         Worker { desk, rx }
     }
@@ -245,6 +281,16 @@ impl Worker {
 mod tests {
     use super::*;
     fn run(base_url: &str) -> Run { Run { req: ReqId::default().next(), preset: Preset::Fix, text: "helo wrld".into(), cfg: Config::new(true, base_url, "m/x", "").unwrap() } }
+    #[test] fn local_completion_is_last_and_ignores_cloud_config() {
+        assert_eq!(Preset::ALL, [Preset::Fix, Preset::Translate, Preset::Finish]);
+        assert_eq!(Preset::Finish.label(), "Finish sentence locally");
+        let local = Run {
+            preset: Preset::Finish, text: " ".into(),
+            cfg: Config::new(true, "https://unused.example", "unused-model", "Rewrite everything").unwrap(),
+            ..run("")
+        };
+        assert_eq!(execute(&local), Err(Failure::LocalInput));
+    }
     #[test] fn openrouter_body_denies_data_collection_and_reasoning() {
         let b: Value = serde_json::from_str(&body(&run(""))).unwrap();
         assert_eq!(b, json!({ "model": "m/x", "temperature": 0.2, "reasoning": { "enabled": false }, "provider": { "data_collection": "deny" },
@@ -264,7 +310,8 @@ mod tests {
         assert_eq!(endpoint(&Config::default()), "https://openrouter.ai/api/v1/chat/completions");
     }
     #[test] fn config_new_trims_defaults_and_refuses_clear_text_urls() {
-        assert_eq!(Config::new(false, "  ", "  ", "  "), Ok(Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into(), instructions: "".into() }));
+        let default = Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into() };
+        assert_eq!(Config::new(false, "  ", "  ", "  "), Ok(default));
         assert_eq!(Config::new(true, "http://127.0.0.1:8080/", " llama ", "").map(|c| (c.base_url, c.model)), Ok(("http://127.0.0.1:8080".into(), "llama".into())));
         assert_eq!(Config::new(true, "HTTP://[::1]:1234/v1", "", "").map(|c| c.base_url), Ok("HTTP://[::1]:1234/v1".into()));
         assert_eq!(Config::new(true, "http://localhost", "", "").map(|c| c.base_url), Ok("http://localhost".into()));
@@ -277,7 +324,21 @@ mod tests {
         assert_eq!(Config::from_json(Some(&c.to_json())), c);
         assert_eq!(Config::from_json(None), Config::default());
         let v = json!({ "enabled": false, "base_url": "http://example.com", "model": "m/y" });
-        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into(), instructions: "".into() });
+        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into() });
+    }
+    #[test] fn the_local_model_is_one_tag_and_falls_back_to_the_default() {
+        let c = Config::default();
+        assert_eq!(c.clone().with_local_model("  ").unwrap().local_model, DEFAULT_LOCAL_MODEL);
+        assert_eq!(c.clone().with_local_model(" hf.co/typhoon-ai/typhoon2.5-qwen3-4b-gguf:Q4_K_M ").unwrap().local_model, "hf.co/typhoon-ai/typhoon2.5-qwen3-4b-gguf:Q4_K_M");
+        for bad in ["two words", "a\tb", &"x".repeat(81)] {
+            assert_eq!(c.clone().with_local_model(bad), Err(BAD_LOCAL_MODEL.to_string()), "{bad:?}");
+            assert_eq!(Config::from_json(Some(&json!({ "local_model": bad }))).local_model, DEFAULT_LOCAL_MODEL, "a hand-edited prefs.json falls back");
+        }
+        let picked = c.clone().with_local_model(LOCAL_MODELS[1].0).unwrap();
+        assert_eq!(Config::from_json(Some(&picked.to_json())), picked, "the choice survives a restart");
+        assert_eq!(picked.to_json()["local_model"], LOCAL_MODELS[1].0);
+        assert_eq!(picked.enabled, c.enabled);
+        assert_eq!(c.with_local_model(LOCAL_MODELS[0].0).unwrap().local_model, DEFAULT_LOCAL_MODEL);
     }
     #[test] fn parse_maps_status_and_content() {
         assert_eq!(parse(200, r#"{"choices":[{"message":{"content":"  hello world\n"}}]}"#), Ok("hello world".into()));

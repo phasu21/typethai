@@ -27,16 +27,20 @@ unless you press a key.
   caret for about a second, clear of macOS's own indicator below it. It also shows when focus lands in a text field
   nothing has been typed in yet, and stays there until you type (so the language about to be typed is in sight), and it
   comes back on its own when typing stops for a moment (Settings → Word suggestions → **Show it again after**:
-  1–10 s, 2 s by default; prefs.json `"badge_idle_ms"`). Not in password fields or outside a text field,
+  1–10 s, 2 s by default, or **Off** to show it once when focus lands in the field and never bring it back on a pause;
+  prefs.json `"badge_idle_ms"`, `0` for Off). Not in password fields or outside a text field,
   not while the bubble is up, and only where the caret or the text field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
-- **Why each option is offered.** A badge marks every fix: the flag of the language a wrong-layout word becomes
-  (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. Finishing the
-  word has no badge. Conversions come first, then typo fixes, then completions, so Tab is the conversion when there is one.
+- **Why each option is offered.** Every fix is marked: the flag of the language a wrong-layout word becomes
+  (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. In the strip the
+  mark sits faint in the button's bottom-right corner, behind the word; stacked rows show it as a small badge.
+  Finishing the word has no mark. Conversions come first, then typo fixes, then completions, so Tab is the conversion
+  when there is one.
 - **Horizontal or vertical bubble.** By default the options sit side by side in one strip, numbered left to right.
   A bubble with a long option (over about 28 letters) or one too wide for the screen is stacked instead, and so are
   ⌃⌥R selection and AI rewrite rows. **Settings… → Word suggestions → Bubble layout: Vertical** always stacks them.
-- **Caret anchoring.** The bubble sits right under the text caret (via Accessibility / UI Automation). It flips above
-  the caret near the bottom of the screen and works across monitors. Chromium/Electron apps are supported.
+- **Caret anchoring.** The bubble sits next to the text caret (via Accessibility / UI Automation): the horizontal strip
+  above the caret line (below it only at the top of the screen), stacked rows under it (above it near the bottom of
+  the screen). It works across monitors. Chromium/Electron apps are supported.
 - **On-device learning.** Undos and manual conversions adjust a small personal model on your machine.
 - **Word completion.** The bubble can finish the word you are typing: a Thai word (also the last word of an unspaced
   Thai run, or a word typed on the wrong layout — from the third key, the point where typeThai is sure enough that you
@@ -70,7 +74,10 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   out on your computer, then the AI rewrite actions. With nothing selected it offers the conversion and spelling
   fixes for the word before the caret, the same rows the bubble shows after Space, also after you dismissed them.
 - **AI rewrite (optional).** The ⌃⌥R bubble adds *Fix typos* and *Translate TH↔EN* for selected text, through an
-  OpenAI-compatible service (OpenRouter by default) with your own API key.
+  OpenAI-compatible service (OpenRouter by default) with your own API key, and *Finish sentence locally*, which
+  continues the selection with a local Ollama model — Gemma 4 8B by default, or the faster Typhoon 2.5 4B — no key,
+  nothing uploaded. Pick the row, review the continuation and confirm with Tab; the row itself says when Ollama is not
+  running or the model has no suggestion.
 - **Password fields are skipped** (macOS secure input / AXSecureTextField, Windows ES_PASSWORD / UIA IsPassword).
 
 ## Download and install
@@ -116,7 +123,8 @@ which opens the release page.
 
 ## Using it
 
-Each bubble option shows the keys that apply it. In the horizontal strip each button wears its key on its top-left
+Each bubble option shows the keys that apply it. In the horizontal strip the highlighted option is drawn a little larger
+and the others dimmed, and each button wears its key on its top-left
 corner: `Tab` on the highlighted option (`↵` once the arrow keys are in the strip) and the others their number (hold Tab
 and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
 on the others. Options are numbered from the left in the strip and from the top in rows.
@@ -128,7 +136,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
-| **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | While the bubble is up, ←/→ pick (no ↑ needed first), then ↑ or Enter applies; ↓, Esc or typing leaves. On by default; with no bubble the arrow keys move the cursor |
+| **↑**, then **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. On by default; until ↑ the arrow keys move the cursor |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
 | **Ctrl+1 / 2 / 3** (Pick with: Ctrl+1–3) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
@@ -136,7 +144,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
-| **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN*; Tab replaces the selection. With nothing selected: options for the word before the caret |
+| **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN* / *Finish sentence locally*; Tab replaces the selection. With nothing selected: options for the word before the caret |
 | **Hold Tab** (200 ms; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
 | **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
@@ -150,13 +158,21 @@ been typed in yet; prefs.json `"input_badge": false` turns it off), how long a p
 (**Show it again after**), list words that stay as you type
 them (`ok` is not offered as `นา`) and review or reset what typeThai has learned.
 
-**AI rewrite setup.** Open **Settings… → AI rewrite**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
+**AI rewrite setup.** The page has two tabs: **Local** (the Ollama model, no key) and **Cloud** (the rows below). Open **Settings… → AI rewrite → Cloud**, paste an API key (an [OpenRouter](https://openrouter.ai) key works
 with the defaults) and press **Save key**. The key is kept in the macOS Keychain or Windows Credential Manager, never in
 a file. Model and base URL can point at any OpenAI-compatible `/chat/completions` server; plain `http://` is accepted
 only for `localhost` (for example Ollama at `http://localhost:11434/v1`). **Instructions** adds your own text to the
-prompt for both actions, for example a preferred tone. Esc, typing, a click elsewhere or switching apps cancels a
-rewrite at any step. Without a key, or with **Offer AI rewrite** off, ⌃⌥R still offers the layout and spelling rows. Long
-selections (over 300 characters) get only the AI actions.
+prompt for both cloud actions, for example a preferred tone; the local sentence completion does not use it.
+*Finish sentence locally* — the **Local** tab — needs no key at all: install [Ollama](https://ollama.com) and run
+`ollama pull gemma4:latest`, or let Settings do it — **Settings… → AI rewrite → Local model setup** starts Ollama if it
+is installed but not running and downloads the chosen model, showing the progress there, and offers **Get Ollama** when
+it is not installed. **Local model** picks the tag: *Gemma 4 8B* (default) or *Typhoon 2.5 4B*, which was about 1.7×
+faster on the same prompt with comparable output; any other Ollama tag can be set by hand in `prefs.json`
+(`"rewrite": {"local_model": "…"}`). The ⓘ beside a row explains it on hover.
+The selection is sent only to that local server, which shows *Finishing locally…* and then the continuation to accept — or says that it has no suggestion, or that Ollama is not running. Esc, typing, a
+click elsewhere or switching apps cancels a rewrite at any step. Without a key, ⌃⌥R still offers the layout and spelling
+rows and *Finish sentence locally*; with **Offer AI rewrite** off, only the layout and spelling rows. Long
+selections (over 300 characters) get only the AI actions, and the local completion accepts up to 512 characters.
 
 When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
 in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
@@ -177,15 +193,18 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
 | `--demo-badge [x,y ...] [--en] [--pin] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge at a fake caret, Thai first, then taking turns (no key capture); `--pin` shows it as the focus preview, which stays up |
 | `--demo-hold [x,y ...] [--progress P] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the hold-Tab indicator at a fake caret, filling as a real hold does (or stopped at P); `--demo-bubble --hold P` shows it on the bubble's Tab key |
-| `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG]` | Show only the Settings window with sample words (no key capture, prefs or keychain) |
+| `--settings [--settings-page N]` | Open the Settings window at launch (0 Word suggestions … 3 AI rewrite), for when the menu-bar icon is hidden |
+| `--demo-settings [--page N] [--search TEXT] [--light] [--screenshot PNG] [--local-state NAME\|--local-cycle]` | Show only the Settings window with sample words (no key capture, prefs or keychain). `--local-state checking\|install\|start\|pull\|downloading\|ready\|failed` (or `--local-cycle` to walk them, a click steps too) draws the **Local model setup** row in that state instead of asking Ollama |
 
 ## Privacy
 
 - **Conversion and learning run locally.** Your typing is never uploaded.
-- **AI rewrite is the one exception, and only when you press ⌃⌥R and pick *Fix typos* or *Translate TH↔EN*.** The
-  layout and spelling rows are worked out on your computer. The selected text is sent to
-  the service set in Settings (OpenRouter by default, with its data collection opt-out set). Nothing is sent without a
-  key, and the feature can be turned off in Settings.
+- **AI rewrite is the one exception, and only when you press ⌃⌥R and pick an AI row.** The
+  layout and spelling rows are worked out on your computer. *Fix typos* and *Translate TH↔EN* send the selected text to
+  the service set in Settings (OpenRouter by default, with its data collection opt-out set); nothing is sent to it
+  without a key. *Finish sentence locally* sends the text only to the Ollama server on your own machine
+  (`127.0.0.1:11434`), with proxies and redirects off, so it cannot leave the device. The whole feature can be turned
+  off in Settings.
 - **Update checks** ask GitHub for the latest typeThai release (the GitHub API and its download servers), at launch
   and every 6 hours. Nothing about you or your typing is sent. Turn it off in Settings → Updates.
 - To work, typeThai reads your keystrokes system-wide. It keeps only the current word and line in memory, and drops

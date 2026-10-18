@@ -74,8 +74,8 @@ pub enum Key {
     /// Ctrl+1..3 (Control alone): applies that row while the bubble is up and `Options::pick_ctrl` is on, otherwise
     /// navigation.
     PickRow(usize),
-    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Left/Right move the selection of a visible
-    /// bubble (and move into it, like Up), Up or Enter in it applies and Down leaves.
+    /// A plain arrow key. Navigation, except with `Options::pick_arrows`: Up moves into a visible bubble, then
+    /// Left/Right move the selection, Up or Enter applies it and Down leaves.
     Arrow(Arrow),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,9 +181,9 @@ impl BubbleItem {
 /// The visible rewrite phases; a bubble holds rows of one phase.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RewriteRow {
-    /// Choosing: one row per `Preset::ALL`, each carrying the captured selection.
+    /// Choosing: available presets, each carrying the captured selection.
     Preset(Preset, String),
-    /// Pending: "Rewriting…" until `Reply::Rewritten` for this id.
+    /// Pending until `Reply::Rewritten` for this id.
     Busy(ReqId),
     /// Result: Tab pastes this full text (the label may be a preview).
     Result(String),
@@ -244,16 +244,17 @@ pub struct Options {
     pub accept: AcceptKeys,
     /// Ctrl+1..3 picks a bubble row.
     pub pick_ctrl: bool,
-    /// The arrow keys can pick from the bubble, like Windows text suggestions but without Up first: while it shows,
-    /// Left/Right pick (Up moves into it too), Enter or Up then applies, Down / Esc / typing leave. Off: plain arrows
-    /// are always navigation.
+    /// The arrow keys can pick from the bubble, like Windows text suggestions: Up while it shows moves into it,
+    /// Left/Right pick, Enter or Up again applies, Down / Esc / typing leave. Until Up the arrows are navigation, and
+    /// off they always are.
     pub pick_arrows: bool,
     /// The input-language badge at the caret when the input source changes; read by the platform layer. The badge also
     /// pins while focus sits in a text field nothing has been typed in yet, and comes back after `badge_idle`.
     pub input_badge: bool,
     /// How long a typing pause brings the input-language preview back (`Engine::on_idle`); the platform's timer ticks
-    /// every 25 ms, and Settings offers `BADGE_IDLE_CHOICES_MS`.
-    pub badge_idle: Duration,
+    /// every 25 ms. None: never — it shows when focus lands in a text field and stays until typing, but a pause does
+    /// not bring it back. Settings offers `Off` and `BADGE_IDLE_CHOICES_MS`.
+    pub badge_idle: Option<Duration>,
     /// A pause after a word (after a space in English) offers the word likely to follow it (with completion on).
     pub next_word: bool,
     /// How the keys typed may differ from the word meant, for completion and spelling rows; None reads them as typed.
@@ -263,7 +264,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
 live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Duration::from_millis(BADGE_IDLE_DEFAULT_MS), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
 /// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
 /// 250 ms or more keeps it away until a real pause.
@@ -385,7 +386,7 @@ pub struct Engine {
     focus: bool,
     /// The preview is up (`Action::Badge(true)`); a key, focus leaving, the bubble or a hold takes it down.
     badge_up: bool,
-    /// The last keystroke (`on_keystroke`): the preview comes back `Options::badge_idle` after it.
+    /// The last keystroke (`on_keystroke`): the preview comes back `Options::badge_idle` after it (never, when None).
     typed_at: Option<Instant>,
     /// Esc / Dismiss: no completions until the next word boundary.
     comp_muted: bool,
@@ -439,7 +440,8 @@ impl Engine {
         if text { vec![] } else { self.hide_badge() }
     }
     /// A keystroke the user made, however the platform then routes it (a converted key, a bypassed one, one of ours):
-    /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field.
+    /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field
+    /// (or not at all, when that is None).
     pub fn on_keystroke(&mut self, now: Instant) -> Vec<Action> {
         if !self.focus { return vec![] }
         self.typed_at = Some(now);
@@ -524,9 +526,9 @@ impl Engine {
             || (*k == Key::Boundary(Boundary::Enter) && self.fixing && self.bubble_visible())
             || (self.bubble_visible() && self.is_arrow_key(k))
     }
-    /// Up, Left and Right while the bubble can be entered; every arrow and Enter once in it.
+    /// Up while the bubble can be entered; every arrow and Enter once in it.
     fn is_arrow_key(&self, k: &Key) -> bool {
-        (self.opts.pick_arrows && matches!(k, Key::Arrow(Arrow::Up | Arrow::Left | Arrow::Right))) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
+        (self.opts.pick_arrows && *k == Key::Arrow(Arrow::Up)) || (self.in_bubble && matches!(k, Key::Arrow(_) | Key::Boundary(Boundary::Enter)))
     }
     /// Ctrl+1..3 applies a row: the setting is on and there is a bubble to pick from.
     fn picks_rows(&self) -> bool { self.opts.pick_ctrl && self.bubble_visible() }
@@ -690,8 +692,6 @@ impl Engine {
     fn on_arrow(&mut self, a: Arrow) -> Outcome {
         if !self.bubble_visible() || !self.is_arrow_key(&Key::Arrow(a)) { return self.on_key_inner(Key::Nav) }
         let acts = match (self.in_bubble, a) {
-            (false, Arrow::Left) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.prev())] }
-            (false, Arrow::Right) => { self.in_bubble = true; vec![Action::Focus(true), Action::Select(self.sel.next())] }
             (false, _) => { self.in_bubble = true; vec![Action::Focus(true)] }
             (true, Arrow::Up) => return self.accept_held(self.sel.idx),
             (true, Arrow::Left) => vec![Action::Select(self.sel.prev())],
@@ -897,7 +897,7 @@ impl Engine {
             else { self.update_completions(true, &[], &mut acts) }
         }
         // typing stopped while focus sits in a text field: the input-language preview comes back
-        if self.focus && self.typed_at.is_some_and(|t| now.saturating_duration_since(t) >= self.opts.badge_idle) { acts.extend(self.badge_show()); }
+        if self.focus && self.opts.badge_idle.is_some_and(|idle| self.typed_at.is_some_and(|t| now.saturating_duration_since(t) >= idle)) { acts.extend(self.badge_show()); }
         if let Some(t) = self.tab_at.filter(|_| self.tab_down()) {
             let held = now.saturating_duration_since(t);
             if held >= self.opts.tab_hold {
@@ -1574,7 +1574,8 @@ impl Engine {
         match r {
             RewriteRow::Preset(preset, text) => {
                 // Enter while it runs is the user confirming, not a newline
-                let id = self.mint(); self.show(vec![row(rewrite::REWRITING, RewriteRow::Busy(id))], &mut a); self.fixing = true;
+                let label = if preset == Preset::Finish { "Finishing locally…" } else { rewrite::REWRITING };
+                let id = self.mint(); self.show(vec![row(label, RewriteRow::Busy(id))], &mut a); self.fixing = true;
                 a.push(Action::Rewrite(Job::Run(Run { req: id, preset, text, cfg: self.rewrite.clone() })));
             }
             RewriteRow::Busy(_) => {}
@@ -1612,8 +1613,11 @@ impl Engine {
     /// Rows for selected text: the local fixes, then the AI presets when they can run. A notice when there is nothing.
     fn selection_offer(&self, text: &str, has_key: bool) -> Vec<BubbleItem> {
         let mut rows = self.selection_rows(text);
-        if self.rewrite.enabled && has_key { rows.extend(Preset::ALL.map(|p| row(p.label(), RewriteRow::Preset(p, text.to_string())))) }
-        if rows.is_empty() { rows.push(row(if self.rewrite.enabled { rewrite::NO_KEY } else { rewrite::NO_SUGGESTIONS }, RewriteRow::Notice)) }
+        if self.rewrite.enabled {
+            rows.extend(Preset::ALL.into_iter().filter(|p| has_key || *p == Preset::Finish)
+                .map(|p| row(p.label(), RewriteRow::Preset(p, text.to_string()))));
+        }
+        if rows.is_empty() { rows.push(row(rewrite::NO_SUGGESTIONS, RewriteRow::Notice)) }
         rows
     }
     /// The selection in the other layout, then with its spelling fixed, each when it changes something. Each row
@@ -1874,14 +1878,12 @@ mod tests {
         assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Up)));
         let o = e.on_key(Key::Arrow(Arrow::Up)); assert!(!o.swallow); assert_eq!(o.actions, vec![Action::HideBubble]); assert_eq!(e.buffer(), "");
     }
-    #[test] fn left_right_pick_without_up_first() {
-        let Some((mut e, n)) = railed() else { return };
-        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Left))); assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Down)));
-        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Focus(true), Action::Select(1 % n)]);
-        assert!(e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "Enter applies once an arrow picked");
-        // Down is still navigation outside the bubble
+    #[test] fn left_right_before_up_move_the_caret() {
         let Some((mut e, _)) = railed() else { return };
-        assert!(!e.on_key(Key::Arrow(Arrow::Down)).swallow); assert!(!e.bubble_visible());
+        assert!(e.is_bubble_key(&Key::Arrow(Arrow::Up)));
+        for a in [Arrow::Left, Arrow::Right, Arrow::Down] { assert!(!e.is_bubble_key(&Key::Arrow(a)), "{a:?}") }
+        let o = e.on_key(Key::Arrow(Arrow::Right)); assert!(!o.swallow); assert!(!e.bubble_visible());
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Enter)), "never entered: Enter is an ordinary Enter");
     }
     #[test] fn up_enters_the_bubble_and_left_right_move() {
         let Some((mut e, n)) = railed() else { return };
@@ -1920,7 +1922,7 @@ mod tests {
     #[test] fn tab_still_applies_inside_the_bubble() {
         let Some((mut e, n)) = railed() else { return };
         if n < 2 { return }
-        e.on_key(Key::Arrow(Arrow::Right));
+        e.on_key(Key::Arrow(Arrow::Up)); e.on_key(Key::Arrow(Arrow::Right));
         let o = tab(&mut e); assert!(o.swallow); assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. }))); assert!(!e.bubble_visible());
         assert!(!e.is_bubble_key(&Key::Arrow(Arrow::Left)), "no bubble: Left moves the caret");
     }
@@ -2411,10 +2413,10 @@ mod tests {
         let Some(mut e) = engine() else { return };
         let id = start(&mut e);
         e.on_reply(captured(id, Captured::Text("helo wrld".into())));
-        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+        assert_eq!(presets(&e), Preset::ALL);
         let o = tab(&mut e); let run = job_run(&o);
-        assert_eq!((run.preset, run.text.as_str(), run.cfg.model.as_str()), (Preset::Fix, "helo wrld", "google/gemma-4-26b-a4b-it"));
-        assert_eq!(labels(&e), ["Rewriting…"]);
+        assert_eq!((run.preset, run.text.as_str()), (Preset::Fix, "helo wrld"));
+        assert!(matches!(e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Busy(id)) if id == run.req));
         e.on_reply(Reply::Rewritten(run.req, Ok("hello world".into())));
         assert_eq!(labels(&e), ["hello world"]);
         let o = tab(&mut e); assert!(o.swallow);
@@ -2460,7 +2462,7 @@ mod tests {
         let id = start(&mut e);
         e.on_reply(captured(id, Captured::Text("two".into())));
         assert_eq!(e.on_reply(Reply::Rewritten(old.req, Ok("ONE".into()))), vec![]);
-        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+        assert_eq!(presets(&e), Preset::ALL);
         let new = job_run(&tab(&mut e));
         assert_eq!(e.on_reply(Reply::Rewritten(old.req, Ok("ONE".into()))), vec![], "a reply for the earlier run never matches the newer one");
         e.on_reply(Reply::Rewritten(new.req, Ok("TWO".into())));
@@ -2475,7 +2477,70 @@ mod tests {
     }
     /// Ctrl+Opt+R and the worker's answer: the labels that come up.
     fn options(e: &mut Engine, sel: Captured) -> Vec<String> { let id = start(e); e.on_reply(captured(id, sel)); labels(e) }
-    const AI: [&str; 2] = ["Fix typos", "Translate TH↔EN"];
+    fn presets(e: &Engine) -> Vec<Preset> {
+        e.bubble.iter().filter_map(|b| match b.kind {
+            BubbleKind::Rewrite(RewriteRow::Preset(p, _)) => Some(p),
+            _ => None,
+        }).collect()
+    }
+    fn selection_options(e: &mut Engine, text: &str, local: &[&str]) {
+        options(e, Captured::Text(text.into()));
+        assert_eq!(presets(e), Preset::ALL);
+        let labels: Vec<_> = e.bubble.iter().filter(|b| b.reason().is_some()).map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, local);
+    }
+    fn pending_finish(e: &mut Engine, text: &str) -> Run {
+        let id = start(e);
+        let actions = e.on_reply(Reply::Captured { id, sel: Captured::Text(text.into()), has_key: false });
+        assert!(!actions.iter().any(|a| matches!(a, Action::Rewrite(_))));
+        assert_eq!(presets(e), [Preset::Finish]);
+        let index = e.bubble.iter().position(|b| matches!(b.kind, BubbleKind::Rewrite(RewriteRow::Preset(Preset::Finish, _)))).unwrap();
+        let run = job_run(&e.on_key(Key::Hotkey(Hotkey::Accept(index))));
+        assert_eq!((run.preset, run.text.as_str()), (Preset::Finish, text));
+        assert!(matches!(e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Busy(id)) if id == run.req));
+        run
+    }
+    #[test] fn finish_requires_an_explicit_request_then_preview_acceptance() {
+        let Some(mut e) = engine() else { return };
+        for enter in [false, true] {
+            let run = pending_finish(&mut e, "hello");
+            assert_eq!(tab(&mut e), Outcome { swallow: true, actions: vec![] });
+            let actions = e.on_reply(Reply::Rewritten(run.req, Ok("hello world.".into())));
+            assert!(!actions.iter().any(|a| matches!(a, Action::Rewrite(_))));
+            assert!(matches!(&e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Result(text)) if text == "hello world."));
+            let accepted = if enter { e.on_key(Key::Boundary(Boundary::Enter)) } else { tab(&mut e) };
+            assert!(accepted.swallow);
+            assert_eq!(accepted.actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste("hello world.".into()))]);
+            assert!(!e.bubble_visible());
+        }
+    }
+    #[test] fn finish_cancellation_ignores_late_replies_and_preserves_new_requests() {
+        let Some(mut e) = engine() else { return };
+        for key in [Some(Key::Esc), Some(Key::Char('x')), Some(Key::Backspace), None] {
+            let old = pending_finish(&mut e, "hello");
+            match key { Some(k) => { e.on_key(k); }, None => { e.reset(); } }
+            assert!(!e.bubble_visible());
+            assert!(e.on_reply(Reply::Rewritten(old.req, Ok("hello world.".into()))).is_empty());
+            let new = pending_finish(&mut e, "hello again");
+            assert_ne!(old.req, new.req);
+            assert!(e.on_reply(Reply::Rewritten(old.req, Ok("hello world.".into()))).is_empty());
+            assert!(matches!(e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Busy(id)) if id == new.req));
+            e.on_reply(Reply::Rewritten(new.req, Ok("hello again friend.".into())));
+            assert!(matches!(&e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Result(text)) if text == "hello again friend."));
+            e.reset();
+        }
+    }
+    #[test] fn disabled_ai_never_offers_finish_with_or_without_a_key() {
+        let Some(mut e) = engine() else { return };
+        e.rewrite.enabled = false;
+        for has_key in [false, true] {
+            let id = start(&mut e);
+            e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key });
+            assert!(presets(&e).is_empty());
+            assert!(matches!(e.bubble.as_slice(), [BubbleItem { kind: BubbleKind::Rewrite(RewriteRow::Notice), .. }]));
+            e.reset();
+        }
+    }
     #[test] fn nothing_selected_offers_the_word_being_typed() {
         let Some(mut e) = engine_typo() else { return };
         let mut log = vec![];
@@ -2561,34 +2626,34 @@ mod tests {
     }
     #[test] fn a_selection_typed_on_the_wrong_layout_is_offered_converted() {
         let Some(mut e) = engine_typo() else { return };
-        assert_eq!(options(&mut e, Captured::Text("l;ylfu".into())), ["สวัสดี", AI[0], AI[1]]);
+        selection_options(&mut e, "l;ylfu", &["สวัสดี"]);
         let o = tab(&mut e);
         assert_eq!(o, Outcome { swallow: true, actions: vec![Action::HideBubble, Action::Rewrite(Job::Paste("สวัสดี".into()))] });
-        assert_eq!(options(&mut e, Captured::Text(en_to_th("i dont know"))), ["i dont know", AI[0], AI[1]]);
+        selection_options(&mut e, &en_to_th("i dont know"), &["i dont know"]);
         e.on_key(Key::Esc);
-        assert_eq!(options(&mut e, Captured::Text("l;ylfu world\n".into())), ["สวัสดี world\n", AI[0], AI[1]], "only the wrong words flip, spacing stays");
+        selection_options(&mut e, "l;ylfu world\n", &["สวัสดี world\n"]);
     }
     #[test] fn a_selection_with_typos_is_offered_fixed() {
         let Some(mut e) = engine_typo() else { return };
         e.speller = Some(Box::new(FakeSpeller));
-        assert_eq!(options(&mut e, Captured::Text("is ths".into())), ["is this", AI[0], AI[1]]);
+        selection_options(&mut e, "is ths", &["is this"]);
         e.on_key(Key::Esc);
-        assert_eq!(options(&mut e, Captured::Text("รานอาหาร".into())), ["ร้านอาหาร", AI[0], AI[1]]);
+        selection_options(&mut e, "รานอาหาร", &["ร้านอาหาร"]);
         e.on_key(Key::Esc);
-        assert_eq!(options(&mut e, Captured::Text("ขอบคุนมาก ประเทษไทย\n".into())), ["ขอบคุณมาก ประเทศไทย\n", AI[0], AI[1]], "a typo inside a run");
+        selection_options(&mut e, "ขอบคุนมาก ประเทษไทย\n", &["ขอบคุณมาก ประเทศไทย\n"]);
     }
     #[test] fn each_selection_row_says_what_it_fixes() {
         let Some(mut e) = engine_typo() else { return };
         e.speller = Some(Box::new(FakeSpeller));
         let reasons = |e: &Engine| e.bubble.iter().map(BubbleItem::reason).collect::<Vec<_>>();
         options(&mut e, Captured::Text("l;ylfu".into()));
-        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Thai)), None, None], "to Thai, then the AI rows");
+        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Thai)), None, None, None], "to Thai, then the AI rows");
         e.on_key(Key::Esc);
         options(&mut e, Captured::Text(en_to_th("i dont know")));
-        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Latin)), None, None], "back to the English keys");
+        assert_eq!(reasons(&e), [Some(Reason::Layout(InputLang::Latin)), None, None, None], "back to the English keys");
         e.on_key(Key::Esc);
         options(&mut e, Captured::Text("is ths".into()));
-        assert_eq!(reasons(&e), [Some(Reason::Typo), None, None]);
+        assert_eq!(reasons(&e), [Some(Reason::Typo), None, None, None]);
     }
     #[test] fn the_bubble_lists_conversions_then_typo_fixes_then_completions() {
         let Some(mut e) = engine() else { return };
@@ -2599,20 +2664,23 @@ mod tests {
         e.show(vec![done.clone(), fix.clone(), flip.clone()], &mut a);
         assert_eq!(a, vec![Action::ShowBubble(vec![flip, fix, done])], "Tab, the digits and clicks count in this order");
     }
-    #[test] fn a_correct_selection_gets_only_the_ai_rows_or_a_notice() {
+    #[test] fn a_correct_selection_gets_ai_rows_and_finish_needs_no_key() {
         let Some(mut e) = engine_typo() else { return };
         e.speller = Some(Box::new(FakeSpeller));
-        assert_eq!(options(&mut e, Captured::Text("hello world".into())), AI);
+        selection_options(&mut e, "hello world", &[]);
         e.on_key(Key::Esc);
-        assert_eq!(options(&mut e, Captured::Text("สวัสดีครับ ยินดีที่ได้รู้จัก".into())), AI);
+        selection_options(&mut e, "สวัสดีครับ ยินดีที่ได้รู้จัก", &[]);
         e.on_key(Key::Esc);
-        assert_eq!(options(&mut e, Captured::Text("วันนี้อากาศดีมากเลยนะ".into())), AI);
+        selection_options(&mut e, "วันนี้อากาศดีมากเลยนะ", &[]);
         e.on_key(Key::Esc);
         let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: false });
-        assert_eq!(labels(&e), ["Add an API key in Settings"]);
+        assert_eq!(presets(&e), [Preset::Finish]);
+        assert_eq!(e.bubble.len(), 1);
         e.on_key(Key::Esc);
         let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false });
-        assert_eq!(labels(&e), ["is this"], "no key: the local fix alone, no notice");
+        assert_eq!(presets(&e), [Preset::Finish]);
+        assert_eq!(e.bubble.len(), 2);
+        assert!(matches!(&e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Fixed(Reason::Typo, text)) if text == "is this"));
     }
     #[test] fn enter_applies_a_fix_offered_by_ctrl_opt_r() {
         let Some(mut e) = engine() else { return };
@@ -2651,7 +2719,7 @@ mod tests {
     #[test] fn a_long_selection_skips_the_local_rows() {
         let Some(mut e) = engine() else { return };
         let long = "l;ylfu ".repeat(50);
-        assert_eq!(options(&mut e, Captured::Text(long)), AI);
+        selection_options(&mut e, &long, &[]);
     }
     #[test] fn rewrite_secure_refuses_silently() {
         let Some(mut e) = engine() else { return };
@@ -2671,13 +2739,13 @@ mod tests {
         let id = start(&mut e);
         assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rewrite)), Outcome { swallow: true, actions: vec![] });
         e.on_reply(captured(id, Captured::Text("helo".into())));
-        assert_eq!(labels(&e), ["Fix typos", "Translate TH↔EN"]);
+        assert_eq!(presets(&e), Preset::ALL);
     }
     #[test] fn rewrite_tab_while_pending_keeps_waiting() {
         let Some(mut e) = engine() else { return };
         let run = pending(&mut e, "helo");
         assert_eq!(tab(&mut e), Outcome { swallow: true, actions: vec![] });
-        assert_eq!(labels(&e), ["Rewriting…"]);
+        assert!(matches!(e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Busy(id)) if id == run.req));
         e.on_reply(Reply::Rewritten(run.req, Ok("hello".into())));
         assert_eq!(labels(&e), ["hello"]);
     }
@@ -3300,11 +3368,12 @@ mod tests {
         let t = Instant::now();
         assert_eq!(e.on_keystroke(t), vec![Action::Badge(false)]);
         assert_eq!(e.on_keystroke(t), vec![], "already down");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle - Duration::from_millis(10)), vec![], "not yet");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle), vec![Action::Badge(true)]);
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "up once per pause");
-        assert_eq!(e.on_keystroke(t + e.opts.badge_idle * 2), vec![Action::Badge(false)], "typing again");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 4), vec![Action::Badge(true)], "and back after the next pause");
+        let idle = e.opts.badge_idle.expect("the default pause");
+        assert_eq!(e.on_idle(t + idle - Duration::from_millis(10)), vec![], "not yet");
+        assert_eq!(e.on_idle(t + idle), vec![Action::Badge(true)]);
+        assert_eq!(e.on_idle(t + idle * 2), vec![], "up once per pause");
+        assert_eq!(e.on_keystroke(t + idle * 2), vec![Action::Badge(false)], "typing again");
+        assert_eq!(e.on_idle(t + idle * 4), vec![Action::Badge(true)], "and back after the next pause");
     }
     #[test] fn the_model_offers_the_next_word_where_the_pairs_have_nothing() {
         let Some(mut e) = engine() else { return };
@@ -3324,11 +3393,22 @@ mod tests {
         assert!(until_idle(&mut e, |e| !e.bubble_visible()));
         assert_eq!(labels(&e), Vec::<String>::new());
     }
+    #[test] fn off_keeps_the_preview_to_the_focus_that_showed_it() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.apply_settings(SettingsCmd::SetBadgeIdle(None)), "Off");
+        assert_eq!(e.settings_snapshot().badge_idle, None);
+        assert_eq!(e.on_focus(true), vec![Action::Badge(true)], "focus still shows it");
+        let t = Instant::now();
+        e.on_keystroke(t);
+        assert_eq!(e.on_idle(t + Duration::from_secs(600)), vec![], "and a pause never brings it back");
+        assert_eq!(e.on_focus(true), vec![Action::Badge(true)], "a new focus does");
+    }
     #[test] fn the_preview_follows_its_pause_setting() {
         let Some(mut e) = engine() else { return };
-        assert!(e.apply_settings(SettingsCmd::SetBadgeIdle(Duration::from_millis(5000))));
-        assert!(!e.apply_settings(SettingsCmd::SetBadgeIdle(Duration::from_millis(5000))), "same delay is not a change");
-        assert_eq!(e.settings_snapshot().badge_idle, Duration::from_millis(5000));
+        let five = Some(Duration::from_millis(5000));
+        assert!(e.apply_settings(SettingsCmd::SetBadgeIdle(five)));
+        assert!(!e.apply_settings(SettingsCmd::SetBadgeIdle(five)), "same delay is not a change");
+        assert_eq!(e.settings_snapshot().badge_idle, five);
         e.on_focus(true);
         let t = Instant::now();
         e.on_keystroke(t);
@@ -3339,10 +3419,10 @@ mod tests {
         let Some(mut e) = engine() else { return };
         let t = Instant::now();
         assert_eq!(e.on_keystroke(t), vec![], "outside a text field there is nothing to take down");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "and none to bring back");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 2), vec![], "and none to bring back");
         e.paused = true;
         assert_eq!(e.on_focus(true), vec![], "paused: no preview");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![]);
+        assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 2), vec![]);
         e.paused = false;
         assert_eq!(e.on_focus(true), vec![Action::Badge(true)], "and it is not lost: focus is still there");
     }
@@ -3355,7 +3435,7 @@ mod tests {
         assert!(!e.badge_shown());
         let t = Instant::now();
         e.on_keystroke(t);
-        assert_eq!(e.on_idle(t + e.opts.badge_idle), vec![Action::Badge(true)], "and the pause after it shows it");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause")), vec![Action::Badge(true)], "and the pause after it shows it");
     }
     #[test] fn a_pause_takes_the_preview_down_and_the_setting_too() {
         let Some(mut e) = engine() else { return };
@@ -3375,9 +3455,9 @@ mod tests {
         let t = Instant::now();
         e.on_keystroke(t);
         typ(&mut e, "hel"); idle(&mut e, 600); assert_eq!(labels(&e), ["help", "hello", "helmet"], "the bubble is up");
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 2), vec![], "no preview over the bubble");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 2), vec![], "no preview over the bubble");
         let o = e.on_key(Key::Esc); assert_eq!(o.actions, vec![Action::HideBubble]);
-        assert_eq!(e.on_idle(t + e.opts.badge_idle * 3), vec![Action::Badge(true)], "the bubble is gone");
+        assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 3), vec![Action::Badge(true)], "the bubble is gone");
     }
     #[test] fn a_key_with_pause_rows_up_updates_them_in_place() {
         let Some(mut e) = engine() else { return };

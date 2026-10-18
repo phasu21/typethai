@@ -11,10 +11,10 @@
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
 //! deletes a grapheme per Backspace, here and in the engine's count.
 //! `^R` (Ctrl+Opt+R) reads the selection at once: the text of the last `<SEL:text>` (taken by that capture), else nothing
-//! selected. The sim answers as if an API key were stored; AI rewrites and pastes are only printed.
+//! selected. Local sentence completion calls Ollama; cloud rewrites and pastes are only printed.
 //! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row,
 //! `{"pick_with_ctrl":true}` makes `<C-1>`..`<C-3>` pick a row.
-use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}, rewrite::{Captured, Job, Reply}};
+use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, engine::{Action, Boundary, Key, Outcome}, rewrite::{Captured, Job, Preset, Reply}};
 use std::io::BufRead;
 use unicode_segmentation::UnicodeSegmentation;
 /// One Backspace in an app that deletes `unit`s.
@@ -71,12 +71,19 @@ pub fn run(mut app: App) {
                 let mut o = match &k {
                     Some(k) => { let mut a = if *k == Key::TabUp { vec![] } else { app.engine.on_keystroke(std::time::Instant::now()) };
                         let o = app.engine.on_key(k.clone()); a.extend(o.actions); Outcome { swallow: o.swallow, actions: a } }
-                    None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle.max(app.engine.opts.badge_idle)) },
+                    None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle.max(app.engine.opts.badge_idle.unwrap_or_default())) },
                 };
                 let captures: Vec<_> = o.actions.iter().filter_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }).collect();
                 for id in captures {
                     let sel = selection.take().map_or(Captured::NoSelection, Captured::Text);
                     o.actions.extend(app.engine.on_reply(Reply::Captured { id, sel, has_key: true }));
+                }
+                let completion = o.actions.iter().find_map(|a| match a {
+                    Action::Rewrite(Job::Run(run)) if run.preset == Preset::Finish => Some((run.req, crate::completion::run(&run.text, &run.cfg.local_model))),
+                    _ => None,
+                });
+                if let Some((id, result)) = completion {
+                    o.actions.extend(app.engine.on_reply(Reply::Rewritten(id, result)));
                 }
                 let k = k.map_or("Idle".to_string(), |k| format!("{k:?}"));
                 for a in &o.actions { println!("  {k} -> {a:?}"); }

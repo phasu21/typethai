@@ -1,0 +1,137 @@
+# typethai-desktop --simulate transcripts, 2026-10-18
+# Each input line: <SEL:prefix> selects that text, ^R is the (Ctrl+Opt+R) hotkey, <TabDown>3<TabUp> picks row 3.
+# Command (Ollama running with gemma4:latest):
+#   printf '<SEL:Please let me>^R<TabDown>3<TabUp>\n' | TYPETHAI_MODEL=/tmp/ttmodel/typethai.ttm \
+#     rust/target/debug/typethai-desktop --simulate --state /tmp/ttsim/personal.json
+# stdout follows, verbatim.
+
+  [selected: "Please let me"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(1)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Please let me")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Please let me")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Please let me")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(2))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(2), preset: Finish, text: "Please let me", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Please let me know if you need any further assistance.", kind: Rewrite(Result("Please let me know if you need any further assistance.")) }])
+  [bubble: >Please let me know if you need any further assistance.]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+  Enter -> Rewrite(Paste("Please let me know if you need any further assistance."))
+
+  [selected: "Micro"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(3)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Micro")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Micro")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Micro")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(4))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(4), preset: Finish, text: "Micro", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Microscope is a powerful tool for viewing tiny objects.", kind: Rewrite(Result("Microscope is a powerful tool for viewing tiny objects.")) }])
+  [bubble: >Microscope is a powerful tool for viewing tiny objects.]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+  Enter -> Rewrite(Paste("Microscope is a powerful tool for viewing tiny objects."))
+
+  [selected: "ขอแสดงความย\u{e34}น"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(5)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "ขอแสดงความย\u{e34}น")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "ขอแสดงความย\u{e34}น")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "ขอแสดงความย\u{e34}น")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(6))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(6), preset: Finish, text: "ขอแสดงความย\u{e34}น", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "ขอแสดงความย\u{e34}นด\u{e35}ก\u{e31}บค\u{e38}ณด\u{e49}วยนะคะ", kind: Rewrite(Result("ขอแสดงความย\u{e34}นด\u{e35}ก\u{e31}บค\u{e38}ณด\u{e49}วยนะคะ")) }])
+  [bubble: >ขอแสดงความยินดีกับคุณด้วยนะคะ]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+  Enter -> Rewrite(Paste("ขอแสดงความย\u{e34}นด\u{e35}ก\u{e31}บค\u{e38}ณด\u{e49}วยนะคะ"))
+
+  [selected: "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}า"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(7)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}า")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}า")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}า")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(8))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(8), preset: Finish, text: "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}า", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}าข\u{e49}อม\u{e39}ลส\u{e48}วนน\u{e35}\u{e49}ถ\u{e39}กต\u{e49}องไหมคร\u{e31}บ", kind: Rewrite(Result("Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}าข\u{e49}อม\u{e39}ลส\u{e48}วนน\u{e35}\u{e49}ถ\u{e39}กต\u{e49}องไหมคร\u{e31}บ")) }])
+  [bubble: >Before merging, ช่วยเช็กว่าข้อมูลส่วนนี้ถูกต้องไหมครับ]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+  Enter -> Rewrite(Paste("Before merging, ช\u{e48}วยเช\u{e47}กว\u{e48}าข\u{e49}อม\u{e39}ลส\u{e48}วนน\u{e35}\u{e49}ถ\u{e39}กต\u{e49}องไหมคร\u{e31}บ"))
+
+  [selected: "My bank account number is"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(9)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "My bank account number is")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "My bank account number is")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "My bank account number is")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(10))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(10), preset: Finish, text: "My bank account number is", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Local Gemma has no suggestion for this selection", kind: Rewrite(Notice) }])
+  [bubble: >Local Gemma has no suggestion for this selection]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+
+  [selected: "The tracking number for my order is"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(11)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "The tracking number for my order is")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "The tracking number for my order is")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "The tracking number for my order is")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(12))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(12), preset: Finish, text: "The tracking number for my order is", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Local Gemma has no suggestion for this selection", kind: Rewrite(Notice) }])
+  [bubble: >Local Gemma has no suggestion for this selection]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+
+  [selected: "It was great catching up with you. Let's keep in"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(13)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "It was great catching up with you. Let's keep in")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "It was great catching up with you. Let's keep in")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "It was great catching up with you. Let's keep in")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(14))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(14), preset: Finish, text: "It was great catching up with you. Let's keep in", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "It was great catching up with you. Let's keep in touch!", kind: Rewrite(Result("It was great catching up with you. Let's keep in touch!")) }])
+  [bubble: >It was great catching up with you. Let's keep in touch!]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+  Enter -> Rewrite(Paste("It was great catching up with you. Let's keep in touch!"))
+
+  [selected: "Please let me"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(15)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Please let me")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Please let me")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Please let me")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(16))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(16), preset: Finish, text: "Please let me", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Please let me know if you need any further assistance.", kind: Rewrite(Result("Please let me know if you need any further assistance.")) }])
+  [bubble: >Please let me know if you need any further assistance.]
+  TabUp -> (swallowed)
+  Tab -> (swallowed)
+  TabUp -> HideBubble
+  TabUp -> Rewrite(Paste("Please let me know if you need any further assistance."))
+
+  [selected: "Micro"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(17)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Micro")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Micro")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Micro")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(18))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(18), preset: Finish, text: "Micro", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Microscope is a powerful tool for viewing tiny objects.", kind: Rewrite(Result("Microscope is a powerful tool for viewing tiny objects.")) }])
+  [bubble: >Microscope is a powerful tool for viewing tiny objects.]
+  TabUp -> (swallowed)
+  Esc -> HideBubble
+
+
+# Same binary under sandbox-exec with "(deny network*)" so 127.0.0.1:11434 is unreachable:
+
+  [selected: "Please let me"]
+  Hotkey(Rewrite) -> Rewrite(Capture(ReqId(1)))
+  Hotkey(Rewrite) -> ShowBubble([BubbleItem { label: "Fix typos", kind: Rewrite(Preset(Fix, "Please let me")) }, BubbleItem { label: "Translate TH↔EN", kind: Rewrite(Preset(Translate, "Please let me")) }, BubbleItem { label: "Finish sentence locally", kind: Rewrite(Preset(Finish, "Please let me")) }])
+  [bubble: >Fix typos |  Translate TH↔EN |  Finish sentence locally]
+  Tab -> (swallowed)
+  Char('3') -> ShowBubble([BubbleItem { label: "Finishing locally…", kind: Rewrite(Busy(ReqId(2))) }])
+  Char('3') -> Rewrite(Run(Run { req: ReqId(2), preset: Finish, text: "Please let me", cfg: Config { enabled: true, base_url: "https://openrouter.ai/api/v1", model: "google/gemma-4-26b-a4b-it", instructions: "" } }))
+  Char('3') -> ShowBubble([BubbleItem { label: "Start Ollama locally, then run ollama pull gemma4:latest", kind: Rewrite(Notice) }])
+  [bubble: >Start Ollama locally, then run ollama pull gemma4:latest]
+  TabUp -> (swallowed)
+  Enter -> HideBubble
+

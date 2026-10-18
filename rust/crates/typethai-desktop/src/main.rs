@@ -1,7 +1,7 @@
 //! typethai-desktop: system-wide wrong-layout (EN QWERTY -> Thai Kedmanee) auto-converter with a suggestion bubble.
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-mod app; mod backspace; mod bridge; mod engine; mod keys; mod placement; mod prefs; mod rewrite; mod predict;
+mod app; mod backspace; mod bridge; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rewrite; mod predict;
 mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
@@ -65,10 +65,13 @@ fn main() {
         #[cfg(any(windows, target_os = "macos"))] { ui::demo_hold(pts, secs, shot, progress, light, backdrop); return }
         #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, progress, light, backdrop); eprintln!("--demo-hold needs macOS or Windows"); std::process::exit(2) }
     }
-    // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light]: only the Settings window, with sample
-    // words and no key capture, prefs or keychain
+    // --demo-settings [--secs N] [--screenshot PNG] [--search TEXT] [--page N] [--light] [--local-state NAME|--local-cycle]:
+    // only the Settings window, with sample words and no key capture, prefs or keychain. The local-state options show the
+    // Local model setup row in a chosen state (checking, install, start, pull, downloading, ready, failed) instead of
+    // asking Ollama, so every branch can be seen without moving Ollama around.
     if let Some(i) = args.iter().position(|a| a == "--demo-settings") {
         let mut secs = 30.0; let mut shot: Option<String> = None; let mut search: Option<String> = None; let mut page = 0usize; let mut light = false;
+        let mut local: Option<ui::LocalDemo> = None;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() { match a.as_str() {
             "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(30.0),
@@ -76,10 +79,15 @@ fn main() {
             "--search" => search = it.next().cloned(),
             "--page" => page = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
             "--light" => light = true,
+            "--local-cycle" => local = ui::demo_local("cycle"),
+            "--local-state" => match it.next().and_then(|s| ui::demo_local(s)) {
+                Some(state) => local = Some(state),
+                None => { eprintln!("--local-state: expected checking, install, start, pull, downloading, ready, failed or cycle"); std::process::exit(2) }
+            },
             _ => { eprintln!("--demo-settings: unknown option {a:?}"); std::process::exit(2) }
         } }
-        #[cfg(any(windows, target_os = "macos"))] { ui::demo_settings(secs, shot, search, page, light); return }
-        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (secs, shot, search, page, light); eprintln!("--demo-settings needs macOS or Windows"); std::process::exit(2) }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo_settings(secs, shot, search, page, light, local); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (secs, shot, search, page, light, local); eprintln!("--demo-settings needs macOS or Windows"); std::process::exit(2) }
     }
     // --probe-caret [--secs N]: log frontmost app / anchor source / caret rect every 500 ms and mark it on screen
     if args.iter().any(|a| a == "--probe-caret") {
@@ -90,6 +98,7 @@ fn main() {
     let cli = app::Cli::parse();
     if cli.list_sources { platform::print_input_sources(); return }
     bridge::REQ_OPEN_SETTINGS.store(cli.open_settings, std::sync::atomic::Ordering::SeqCst);
+    bridge::SETTINGS_PAGE.store(cli.settings_page, std::sync::atomic::Ordering::SeqCst);
     if let Some(dir) = &cli.eval_typo { evaltypo::run(&cli, dir); return }
     if let Some(dir) = &cli.eval_live { if cli.eval_reverse { evallive::run_reverse(&cli, dir, &cli.eval_split) } else { evallive::run(&cli, dir, &cli.eval_split) } return }
     let app = match app::App::load(&cli) { Ok(a) => a, Err(e) => { eprintln!("typethai: {e}"); std::process::exit(1) } };
