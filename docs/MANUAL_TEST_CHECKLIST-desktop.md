@@ -162,3 +162,11 @@
 - [ ] The pill never takes focus and clicks pass through it (macOS).
 - [ ] ⌃⌥P (or the tray menu) while the pill is up: it goes, and does not come back until typeThai is unpaused.
 - [ ] Windows (Notepad): the same, including a click from the browser into Notepad and back.
+
+## Off in chosen apps (agent-verified on the Mac with System Events keystrokes into TextEdit; Windows not run)
+- [x] Tray shows *Turn off in TextEdit* after a key in TextEdit; clicking it writes `"off_apps":[{"id":"com.apple.textedit","name":"TextEdit"}]` and the item becomes *Turn on in TextEdit*.
+- [x] With TextEdit off, `l;ylfu ` + Tab types `l;ylfu ⇥` unchanged: no bubble, no language preview. *Turn on in TextEdit* and the same keys give `สวัสดี `.
+- [x] `--demo-settings --page 5`: the Apps page lists the apps with their ids and a Remove button; search `code` finds it.
+- [ ] Settings → Apps → Remove on a live entry turns that app back on without a restart.
+- [ ] Switch to an off app with the bubble or the preview up: it goes at once.
+- [ ] Windows: *Turn off in ‹exe›* names the window in front, never the taskbar after clicking the tray icon.

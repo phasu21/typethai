@@ -352,10 +352,19 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
         Key::TabUp
     } else { let Some(key) = translate(vk) else { return false }; key };
     let gi = gui_info(fg); let focus = gi.map(|g| g.hwndFocus).unwrap_or_default();
-    if fg != st.last_fg { let exe = exe_of(fg); st.app.engine.delete_unit = DeleteUnit::of_app(&exe); st.text_app = field::known_text_exe(&exe) || field::known_text_class(&class_of(fg)); }
+    if fg != st.last_fg { let exe = exe_of(fg); st.app.engine.delete_unit = DeleteUnit::of_app(&exe); st.text_app = field::known_text_exe(&exe) || field::known_text_class(&class_of(fg));
+        // the tray's app item follows the window in front, except the tray/taskbar itself (clicking its icon must not
+        // make the taskbar the app the menu talks about) and our own windows
+        let class = class_of(fg);
+        if !exe.is_empty() && !foreground_is_self(fg) && !matches!(class.as_str(), "Shell_TrayWnd" | "NotifyIconOverflowWindow" | "TopLevelWindowForOverflowXamlIsland") {
+            let name = match exe.len().checked_sub(4) { Some(i) if exe.is_char_boundary(i) && exe[i..].eq_ignore_ascii_case(".exe") => &exe[..i], _ => &exe };
+            let a = st.app.set_front_app(&exe, name); run_actions(st, a);
+        } }
     if fg != st.last_fg || focus != st.last_focus { st.last_fg = fg; st.last_focus = focus; st.secure = false; st.gate.reset(); st.field_rx = None; arm_focus_look(st, false);
         // the new window's caret is somewhere else: a preview that is up follows it there
         if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); } let a = st.app.engine.reset(); run_actions(st, a); }
+    // typeThai is off in this app: every key reaches it untouched, before any focus/AX work
+    if st.app.engine.app_off() { return false }
     // these may move focus inside the window: a closed gate re-checks, and so does the preview's policy (a look armed by
     // a key never pins the preview: the caret under it is not laid out yet, and Enter/Ctrl+C are typing)
     if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
@@ -460,6 +469,7 @@ unsafe fn focus_look(st: &mut State, key: bool) {
 /// text field (a fresh look, by the gate's rule: a caret or a known text app opens). `pin`: focus just landed in a text
 /// field, so it stays until typing or focus leaving; else it goes after a moment.
 unsafe fn offer_badge(st: &mut State, fg: HWND, pin: bool) -> bool {
+    if st.app.engine.app_off() { return false }
     let lang = if layout_is_thai(fg) { InputLang::Thai } else { InputLang::Latin };
     let e = &st.app.engine; let on = e.opts.input_badge && !e.paused && !foreground_is_self(fg);
     // a password field or no text field (a fresh look, by the gate's rule: a caret or a known text app opens)

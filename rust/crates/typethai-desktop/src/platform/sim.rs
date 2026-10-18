@@ -9,8 +9,9 @@
 //! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`, `<C-1>`..`<C-3>` (Ctrl+digit). `<Idle>`: a typing pause long enough for word
 //! completions and for the input-language preview. Each line also prints `[bubble: ...]` state after keys that change it, with `>` marking the selected row.
 //! `<Rate+N>` / `<Rate-N>`: Shift held and the thumb up / down on option N (1-based) clicked.
-//! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`); a terminal
-//! deletes a grapheme per Backspace, here and in the engine's count.
+//! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`), and typeThai
+//! behaves there as `prefs.json`'s `off_apps` says (so a listed app types the keys unchanged and shows no bubble);
+//! a terminal deletes a grapheme per Backspace, here and in the engine's count.
 //! `^R` (Ctrl+Opt+R) reads the selection at once: the text of the last `<SEL:text>` (taken by that capture), else nothing
 //! selected. Local sentence completion calls Ollama; cloud rewrites and pastes are only printed.
 //! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row,
@@ -43,6 +44,8 @@ pub fn run(mut app: App) {
             let rest: String = ch[i..].iter().collect();
             if let Some(id) = rest.strip_prefix("<APP:").and_then(|r| r.split_once('>')).map(|(id, _)| id.to_string()) {
                 app.engine.delete_unit = DeleteUnit::of_app(&id);
+                // the same app switch the platforms do: `<APP:id>` keys go to that app, and prefs decide if typeThai is off there
+                for a in app.set_front_app(&id, &id) { println!("  [app: {id}] -> {a:?}"); if matches!(a, Action::HideBubble) { bubble.clear(); } }
                 println!("  [app: {id}, Backspace deletes a {:?}]", app.engine.delete_unit);
                 i += id.chars().count() + "<APP:>".len(); continue
             }

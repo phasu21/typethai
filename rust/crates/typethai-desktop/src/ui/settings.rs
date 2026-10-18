@@ -1,5 +1,5 @@
 //! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, AI rewrite and
-//! updates, one sidebar page each.
+//! updates, and the apps typeThai stays out of, one sidebar page each.
 use crate::bridge::{self, BubbleLayout};
 use crate::engine::{AcceptKeys, CompleteMode, BADGE_IDLE_CHOICES_MS, COMPLETE_IDLE_CHOICES_MS, TAB_HOLD_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
@@ -432,6 +432,12 @@ impl SettingsView {
         bridge::push_settings(SettingsCmd::RemoveNever(word));
         cx.notify();
     }
+    /// Removing an app is turning typeThai back on in it: the same command the tray item pushes.
+    fn remove_app(&mut self, id: String, cx: &mut Context<Self>) {
+        self.confirm_reset = false;
+        bridge::push_settings(SettingsCmd::AppOn(id));
+        cx.notify();
+    }
     fn forget_word(&mut self, word: String, cx: &mut Context<Self>) {
         self.confirm_reset = false;
         bridge::push_settings(SettingsCmd::Forget(word));
@@ -451,6 +457,16 @@ impl SettingsView {
             let button = Button::new(SharedString::from(format!("rm-{word}"))).label("Remove").ghost().small()
                 .on_click(click(view, move |v, _, cx| v.remove_never(owned.clone(), cx)));
             labeled_row(word.clone(), None, paint, button)
+        }).collect(), paint)
+    }
+    fn apps_list(&self, view: &Entity<Self>, paint: Paint) -> AnyElement {
+        if !self.loaded { return note(paint, "Loading…"); }
+        if self.snap.off_apps.is_empty() { return note(paint, "No apps yet. typeThai works in every app."); }
+        group(self.snap.off_apps.iter().map(|(id, name)| {
+            let owned = id.clone();
+            let button = Button::new(SharedString::from(format!("ra-{id}"))).label("Remove").ghost().small()
+                .on_click(click(view, move |v, _, cx| v.remove_app(owned.clone(), cx)));
+            labeled_row(name.clone(), Some(id.clone()), paint, button)
         }).collect(), paint)
     }
     fn learn_list(&self, view: &Entity<Self>, paint: Paint) -> AnyElement {
@@ -482,6 +498,12 @@ impl SettingsView {
             keywords(&["learning", "learned", "forget", "reset", "undo"], self.snap.learned.iter().map(|row| &row.word)),
             vec![element(view, |v, view, _, paint| v.learn_list(view, paint)),
                 SettingItem::new("Reset learning", reset).description("This clears learned words. Words you asked not to translate stay.")])
+    }
+    fn apps_page(&self, view: &Entity<Self>) -> SettingPage {
+        page("Apps", Icon::new(gpui_kit::assets::IconName::AppWindow),
+            "typeThai stays out of these apps: no suggestions, no conversions, no language badge, and every key reaches the app. Add the app in front from the menu-bar icon → Turn off in …".into(),
+            keywords(&["apps", "app", "off", "disable", "exclude", "terminal", "game", "ide", "editor"], self.snap.off_apps.iter().map(|(_, name)| name)),
+            vec![element(view, |v, view, _, paint| v.apps_list(view, paint))])
     }
     fn completion_page(&self, view: &Entity<Self>) -> SettingPage {
         let options = COMPLETION.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
@@ -723,7 +745,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let pages = [self.completion_page(&view), self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view), self.updates_page(&view)];
+        let pages = [self.completion_page(&view), self.never_page(&view), self.learn_page(&view), self.rewrite_page(&view), self.updates_page(&view), self.apps_page(&view)];
         let t = cx.theme();
         div().size_full().bg(t.background).text_color(t.foreground).font(thai_font())
             .child(Settings::new("settings").sidebar_width(px(200.)).sidebar_size_range(px(160.)..px(280.))

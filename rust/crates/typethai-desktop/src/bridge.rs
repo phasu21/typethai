@@ -302,6 +302,13 @@ impl Layout {
     }
 }
 pub static SHIFT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The app other than typeThai itself that keys or focus went to last, and whether the user turned typeThai off there:
+/// the tray's app item and the Settings page are about this app. Written by the capture side (`App::set_front_app`),
+/// read by the UI loop/tray.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontApp { pub id: String, pub name: String, pub off: bool }
+pub static FRONT_APP: Mutex<Option<FrontApp>> = Mutex::new(None);
+pub fn front_app() -> Option<FrontApp> { FRONT_APP.lock().unwrap().clone() }
 pub static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 pub fn geom() -> Option<Geom> { GEOM.lock().unwrap().clone() }
 pub fn set_geom(g: Option<Geom>) { *GEOM.lock().unwrap() = g; }

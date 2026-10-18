@@ -350,6 +350,9 @@ pub struct Engine {
     thai_active: bool,
     pub det: Detector, pub personal: PersonalModel, pub corrector: Option<Corrector>, pub opts: Options,
     pub paused: bool,
+    /// The app in front is on the user's don't-use-typeThai list: every key passes through untouched, nothing is shown
+    /// and nothing is learned, as if the field were a password field.
+    off: bool,
     word: String,
     /// The last key was a Tab that inserted itself: a second Tab runs Guess.
     tab_pending: bool,
@@ -427,7 +430,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -442,11 +445,23 @@ impl Engine {
     /// Platform reports the active input source before each key. A change starts a new word (the line and a visible
     /// bubble are kept, so undo / Tab still work right after a conversion switched the layout).
     pub fn set_thai_active(&mut self, on: bool) { if on != self.thai_active { self.thai_active = on; self.word.clear(); self.live_streak = 0; } }
+    /// The app in front was added to / removed from the don't-use-typeThai list (`App::set_front_app`). Turning it off
+    /// takes down whatever is on screen (a bubble, the preview) and starts a fresh, empty state; nothing is offered or
+    /// learned again until it is turned back on. Returns the actions that take that down.
+    pub fn set_app_off(&mut self, off: bool) -> Vec<Action> {
+        if self.off == off { return vec![] }
+        self.off = off;
+        let mut a = self.reset();
+        a.extend(self.hide_badge());
+        a
+    }
+    pub fn app_off(&self) -> bool { self.off }
     /// The platform's gate looked at focus: it is (`text`) or is not in a text field. Focus landing in one shows the
     /// input-language preview and keeps it up: nothing has been typed there yet, so the language about to be typed is
     /// what the user needs to see. Focus leaving a text field takes it down.
     pub fn on_focus(&mut self, text: bool) -> Vec<Action> {
         self.focus = text; self.typed_at = None;
+        if self.off { return self.hide_badge() }
         if text { self.badge_show() } else { self.hide_badge() }
     }
     /// The platform's gate looked at focus after a keystroke that may have moved it (Tab, ⌘K), so this is not a focus
@@ -455,21 +470,22 @@ impl Engine {
     /// preview, on a caret that has settled (the keystroke may have scrolled or laid the field out under it).
     pub fn set_field(&mut self, text: bool) -> Vec<Action> {
         self.focus = text;
-        if text { vec![] } else { self.hide_badge() }
+        if self.off || text { vec![] } else { self.hide_badge() }
     }
     /// A keystroke the user made, however the platform then routes it (a converted key, a bypassed one, one of ours):
     /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field
     /// (or not at all, when that is None).
     pub fn on_keystroke(&mut self, now: Instant) -> Vec<Action> {
-        if !self.focus { return vec![] }
+        if self.off || !self.focus { return vec![] }
         self.typed_at = Some(now);
         self.hide_badge()
     }
     /// The preview is up (`Action::Badge(true)`): the platform layer keeps it on the caret while it is.
     pub fn badge_shown(&self) -> bool { self.badge_up }
-    /// Show the input-language preview: one action per time it goes up, and never where the bubble has the window.
+    /// Show the input-language preview: one action per time it goes up, and never where the bubble has the window or
+    /// typeThai is off in the app in front.
     fn badge_show(&mut self) -> Vec<Action> {
-        if self.badge_up || self.paused || !self.opts.input_badge || self.bubble_visible() { return vec![] }
+        if self.badge_up || self.paused || self.off || !self.opts.input_badge || self.bubble_visible() { return vec![] }
         self.badge_up = true; vec![Action::Badge(true)]
     }
     /// Take the preview down, if it was up: for typing and for focus leaving (above), and for a pause (the pause
@@ -537,6 +553,7 @@ impl Engine {
     /// field check): the bubble controls while the bubble is up, the keys of a held Tab, and Space when it applies a live
     /// row (a layout change clears the buffer first, so a stale row never pulls Space in).
     pub fn is_bubble_key(&self, k: &Key) -> bool {
+        if self.off { return false }
         (self.bubble_visible() && matches!(k, Key::Tab | Key::SelectPrev | Key::SelectNext | Key::Esc))
             || (self.tab != TabChord::Up && matches!(k, Key::Tab | Key::TabUp | Key::Char('1'..='3' | 'r' | 'R')))
             || (*k == Key::Boundary(Boundary::Space) && self.space_accepts())
@@ -567,8 +584,7 @@ impl Engine {
         let mut a = self.reset_inner(); a.splice(0..0, hold); a
     }
     fn reset_inner(&mut self) -> Vec<Action> {
-        self.settle();
-        self.learn_line();
+        if !self.off { self.settle(); self.learn_line(); }
         self.line_learned = false;
         self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
@@ -647,6 +663,7 @@ impl Engine {
     }
 
     pub fn on_key(&mut self, k: Key) -> Outcome {
+        if self.off { return Outcome::pass() }
         let mut o = self.on_key_inner(k);
         // the held Tab let go (released, rolled into a key, Tab+R / Tab+digit): its indicator goes first
         if !self.tab_down() { o.actions.splice(0..0, self.hold_off()); }
@@ -829,10 +846,12 @@ impl Engine {
             SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.pred_next_ask = None; self.pred_next_answer = None; changed }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
             SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
+            // handled by `App` (it owns the off-app list and the app in front), not the engine's own settings
+            SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_) => false,
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates, off_apps: vec![] }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -906,7 +925,7 @@ impl Engine {
     /// A Tab held `Options::tab_hold` on its own opens the ⌃⌥R rows; held past a tap (`TAB_CHORD_MIN`), its indicator shows.
     pub fn on_idle(&mut self, now: Instant) -> Vec<Action> {
         let mut acts = vec![];
-        if self.paused { return acts }
+        if self.paused || self.off { return acts }
         // the model's answer lands a tick or two after the state that asked for it: the rows that state shows take it
         // in, without the pause's spell checker call
         let answered = self.poll_prediction();
@@ -1732,6 +1751,7 @@ impl Engine {
     }
     /// A rewrite worker answer. Stale answers (cancelled or superseded) change nothing.
     pub fn on_reply(&mut self, r: Reply) -> Vec<Action> {
+        if self.off { return vec![] }
         let mut a = vec![];
         match r {
             Reply::Captured { id, sel, has_key } if self.capturing == Some(id) => {
@@ -1786,6 +1806,21 @@ fn splice(text: &str, spans: &[(usize, usize)], to: Vec<Option<String>>) -> Opti
     (out != text).then_some(out)
 }
 
+/// An engine with no model data at all, for tests outside this module (it exercises only the off-app / settings paths,
+/// which need no detector). The model-free sibling of the tests' `bare_engine`.
+#[cfg(test)]
+pub(crate) fn bare_engine_for_test() -> Engine {
+    let lr = |n: usize| typethai_core::classifier::Lr { w: vec![0.0; n], b: 0.0, mu: vec![0.0; n], sd: vec![1.0; n] };
+    let flip = typethai_core::classifier::FlipModel { stage1: lr(29), stage2: lr(38), threshold: 0.0, names: vec![] };
+    let det = Detector {
+        thai: typethai_core::ngram::Ngram::default(), english: typethai_core::ngram::Ngram::default(),
+        th_dict: Arc::new(typethai_core::dict::Dict::new(std::iter::empty::<String>())),
+        en_words: Arc::new(Default::default()),
+        brands: Default::default(), collapse: false, params: typethai_core::detector::Params::default(),
+    };
+    Engine::new(det, PersonalModel::new(flip, None, typethai_core::personal::DEFAULT_PERSONAL), None, Options::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1837,6 +1872,48 @@ mod tests {
         let Some(mut e) = engine() else { return };
         typ(&mut e, "l;yl"); e.on_key(Key::Nav); assert_eq!(e.buffer(), "");
         e.on_key(Key::Hotkey(Hotkey::TogglePause)); let o = typ(&mut e, "l;ylfu "); assert!(o.iter().all(|x| !x.swallow));
+    }
+    #[test] fn an_off_app_passes_every_key_through_and_shows_nothing() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.set_app_off(true).is_empty(), "nothing was up");
+        assert!(e.app_off());
+        // l;ylfu + Space: no conversion, no live bubble, nothing swallowed
+        for o in typ(&mut e, "l;ylfu ") {
+            assert!(!o.swallow, "{:?}", o.actions);
+            assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. } | Action::ShowBubble(_))), "{:?}", o.actions);
+        }
+        assert_eq!(e.buffer(), "");
+        // hotkeys are not the engine's while off either: they reach the app
+        for h in [Hotkey::ForceConvert, Hotkey::Undo, Hotkey::Guess, Hotkey::Accept(0), Hotkey::Rewrite] {
+            let o = e.on_key(Key::Hotkey(h)); assert!(!o.swallow, "{h:?}"); assert!(o.actions.is_empty(), "{h:?} {:?}", o.actions);
+        }
+        // bubble keys are ordinary keys here too
+        assert!(!e.is_bubble_key(&Key::Tab)); assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        // the timer and the focus paths show nothing
+        assert!(e.on_idle(Instant::now() + Duration::from_secs(5)).is_empty());
+        assert!(e.on_focus(true).is_empty()); assert!(e.set_field(true).is_empty()); assert!(e.on_keystroke(Instant::now()).is_empty());
+        assert!(!e.badge_shown());
+        // and it is remembered: turning off again changes nothing
+        assert!(e.set_app_off(true).is_empty());
+    }
+    #[test] fn turning_an_app_off_takes_the_bubble_and_preview_down() {
+        let Some(mut e) = engine() else { return };
+        assert_eq!(e.on_focus(true), vec![Action::Badge(true)]);
+        let a = e.set_app_off(true);
+        assert!(a.contains(&Action::Badge(false)), "{a:?}"); assert!(!e.badge_shown());
+        // a bubble that is up goes too
+        e.set_app_off(false);
+        typ(&mut e, "l;ylfu "); assert!(e.bubble_visible());
+        let a = e.set_app_off(true); assert!(a.contains(&Action::HideBubble), "{a:?}"); assert!(!e.bubble_visible());
+    }
+    #[test] fn turning_an_app_back_on_resumes_conversion() {
+        let Some(mut e) = engine() else { return };
+        e.set_app_off(true);
+        for o in typ(&mut e, "l;ylfu ") { assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { .. }))); }
+        e.set_app_off(false);
+        assert!(!e.app_off());
+        typ(&mut e, "l;ylfu "); assert!(e.bubble_visible(), "the live bubble is back");
+        let o = tab(&mut e); assert!(o.swallow); assert!(o.actions.iter().any(|a| matches!(a, Action::Replace { .. })), "{:?}", o.actions);
     }
     #[test] fn selection_wraps() {
         let mut s = Selection::new(3); assert_eq!(s.idx, 0);

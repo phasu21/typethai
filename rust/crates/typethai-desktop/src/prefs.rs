@@ -4,7 +4,7 @@
 use crate::bridge::BubbleLayout;
 use crate::engine::{AcceptKeys, Action, CompleteMode, BADGE_IDLE_CHOICES_MS, BADGE_IDLE_DEFAULT_MS, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS, TAB_HOLD_CHOICES_MS, TAB_HOLD_DEFAULT_MS};
 use crate::rewrite;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 use typethai_core::keymap::th_to_en;
@@ -36,10 +36,14 @@ pub enum SettingsCmd {
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
     SetRewrite(rewrite::Config),
     SetCheckUpdates(bool),
+    /// Turn typeThai fully off in an app (macOS bundle id / Windows exe name); the name is only for showing.
+    AppOff { id: String, name: String },
+    /// Turn it back on in that app, by the id it was stored under.
+    AppOn(String),
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_) | SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_))
     }
 }
 
@@ -67,6 +71,8 @@ pub struct SettingsSnap {
     pub words_learned: usize,
     pub rewrite: rewrite::Config,
     pub check_updates: bool,
+    /// Apps typeThai is off in: (key id, display name), sorted by name.
+    pub off_apps: Vec<(String, String)>,
 }
 
 /// One English key token: trimmed, lowercased, no whitespace.
@@ -81,11 +87,15 @@ pub fn normalize_word(raw: &str) -> Option<String> {
 fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) }
 
 /// What prefs.json holds. `offer_last`: the words whose conversion was rated down (`Engine::offer_last`).
+/// `off_apps`: apps typeThai is turned fully off in, keyed by `app_key(id)`, value the display name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool }
+pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool, pub off_apps: BTreeMap<String, String> }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true, off_apps: BTreeMap::new() } }
 }
+/// The key an app id matches on: trimmed and ASCII-lowercased, so `com.apple.Terminal` and `COM.APPLE.TERMINAL` are one
+/// app. An empty id is never a match and is never stored.
+pub fn app_key(id: &str) -> String { id.trim().to_ascii_lowercase() }
 /// `prefs.json` spelling of each completion mode.
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (CompleteMode::Pause, "pause"), (CompleteMode::Typing, "typing")];
 /// `prefs.json` spelling of the accept keys.
@@ -107,7 +117,7 @@ impl Prefs {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
         let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates, "off_apps": self.off_apps.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name })).collect::<Vec<_>>() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -117,7 +127,8 @@ impl Prefs {
 }
 /// None when the file is not JSON or `never` is not a list; an unknown or missing `completion`, `complete_idle_ms`,
 /// `learn_words`, `accept_with`, `pick_with_ctrl`, `input_badge`, `badge_idle_ms` (`0`: never bring the preview back),
-/// `next_word`, `bubble_layout` or `check_updates` is the default, and an `offer_last` that is not a list is empty.
+/// `next_word`, `bubble_layout`, `check_updates` or `off_apps` is the default, and an `offer_last` that is not a list is empty.
+/// `off_apps` entries without an id (or with a blank one) are skipped.
 fn parse(text: &str) -> Option<Prefs> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let words = |n: &serde_json::Value| -> Option<BTreeSet<String>> { Some(n.as_array()?.iter().filter_map(|x| x.as_str()).filter_map(normalize_word).collect()) };
@@ -143,7 +154,12 @@ fn parse(text: &str) -> Option<Prefs> {
     let b = v.get("bubble_layout").and_then(|b| b.as_str());
     let bubble = BUBBLE.iter().find(|(_, s)| Some(*s) == b).map_or(BubbleLayout::default(), |(l, _)| *l);
     let check_updates = v.get("check_updates").and_then(serde_json::Value::as_bool).unwrap_or(true);
-    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates })
+    let off_apps = v.get("off_apps").and_then(serde_json::Value::as_array).map_or_else(BTreeMap::new, |xs| xs.iter().filter_map(|e| {
+        let key = app_key(e.get("id")?.as_str()?);
+        if key.is_empty() { return None }
+        Some((key, e.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string()))
+    }).collect());
+    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates, off_apps })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -154,21 +170,31 @@ pub fn prefs_beside(state: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Apply queued settings commands. Returns the snapshot to show, and a Hide bubble action when the
-/// word currently being typed just became blocked.
+/// Apply queued settings commands. Returns the snapshot to show, and the actions that take a bubble or the preview down
+/// (the word just became blocked, or typeThai was turned off in the app in front).
 pub fn apply_commands(app: &mut crate::app::App, cmds: Vec<SettingsCmd>) -> (SettingsSnap, Vec<Action>) {
     let mut personal = false;
     let mut prefs = false;
+    let mut acts = vec![];
     for cmd in cmds {
         let prefs_write = cmd.writes_prefs();
-        if let SettingsCmd::SetCheckUpdates(on) = cmd { crate::update::set_auto(on) }
-        if let SettingsCmd::SetPredict(on) = cmd { app.set_predict(on) }
-        if app.engine.apply_settings(cmd) { note_write(prefs_write, &mut personal, &mut prefs) }
+        match &cmd {
+            SettingsCmd::SetCheckUpdates(on) => crate::update::set_auto(*on),
+            SettingsCmd::SetPredict(on) => app.set_predict(*on),
+            _ => {}
+        }
+        match cmd {
+            SettingsCmd::AppOff { id, name } => { acts.extend(app.app_off(&id, name)); note_write(prefs_write, &mut personal, &mut prefs); }
+            SettingsCmd::AppOn(id) => { acts.extend(app.app_on(&id)); note_write(prefs_write, &mut personal, &mut prefs); }
+            cmd => if app.engine.apply_settings(cmd) { note_write(prefs_write, &mut personal, &mut prefs) },
+        }
     }
     if personal { app.save(); }
     if prefs { app.save_prefs(); }
-    let hide = app.engine.hide_if_blocked();
-    (app.engine.settings_snapshot(), hide)
+    acts.extend(app.engine.hide_if_blocked());
+    let mut snap = app.engine.settings_snapshot();
+    snap.off_apps = app.off_apps_sorted();
+    (snap, acts)
 }
 fn note_write(prefs_write: bool, personal: &mut bool, prefs: &mut bool) {
     if prefs_write { *prefs = true } else { *personal = true }
@@ -416,5 +442,42 @@ mod tests {
         on.save(&path);
         assert_eq!(Prefs::load(&path), on);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn off_apps_round_trip_and_malformed_entries_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-offapps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"never":[],"off_apps":[{"id":"com.apple.Terminal","name":"Terminal"},{"name":"No id"},{"id":"   "},{"id":42},{"name":"x"},"junk"]}"#).unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!(p.off_apps, BTreeMap::from([("com.apple.terminal".to_string(), "Terminal".to_string())]), "only the entry with a real id survives");
+        p.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["off_apps"][0], serde_json::json!({ "id": "com.apple.terminal", "name": "Terminal" }));
+        assert_eq!(Prefs::load(&path), p, "written back in the same shape");
+        std::fs::write(&path, r#"{"never":[],"off_apps":"nope"}"#).unwrap();
+        assert!(Prefs::load(&path).off_apps.is_empty(), "not a list");
+        std::fs::write(&path, r#"{"never":[]}"#).unwrap();
+        assert!(Prefs::load(&path).off_apps.is_empty(), "file from before the setting");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn app_off_then_app_on_flips_the_current_app() {
+        let mut app = crate::app::App::for_test(crate::engine::bare_engine_for_test());
+        app.set_front_app("com.apple.Terminal", "Terminal");
+        assert!(!app.engine.app_off(), "not on the list yet");
+        let (snap, _) = apply_commands(&mut app, vec![SettingsCmd::AppOff { id: "com.apple.Terminal".into(), name: "Terminal".into() }]);
+        assert!(app.engine.app_off(), "the app in front is off now");
+        assert_eq!(snap.off_apps, vec![("com.apple.terminal".to_string(), "Terminal".to_string())]);
+        assert!(crate::bridge::front_app().is_some_and(|f| f.off), "the tray is told");
+        let (snap, _) = apply_commands(&mut app, vec![SettingsCmd::AppOn("com.apple.Terminal".into())]);
+        assert!(!app.engine.app_off(), "and on again");
+        assert!(snap.off_apps.is_empty());
+        assert!(SettingsCmd::AppOff { id: "a".into(), name: "A".into() }.writes_prefs() && SettingsCmd::AppOn("a".into()).writes_prefs());
+        // a blank id is never stored and never turns anything off
+        let (snap, _) = apply_commands(&mut app, vec![SettingsCmd::AppOff { id: "   ".into(), name: "?".into() }]);
+        assert!(snap.off_apps.is_empty());
+        assert!(!app.engine.app_off());
     }
 }

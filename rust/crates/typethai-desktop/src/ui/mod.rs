@@ -223,8 +223,8 @@ fn measure(window: &Window, items: &[Opt]) -> Vec<f64> {
             + bridge::MEASURE_SLACK
     }).collect()
 }
-// the typo badge's icon, the Settings updates page's and the hold indicator's, which the component icons lack
-gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download, Sparkles]);
+// the typo badge's icon, the Settings updates and apps pages' and the hold indicator's, which the component icons lack
+gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download, Sparkles, AppWindow]);
 /// The component icons, the typo badge's icon and the flags on conversion badges (flag-icons, MIT: `flags/LICENSE`).
 struct AppAssets;
 impl AssetSource for AppAssets {
@@ -467,6 +467,7 @@ pub fn run(rx: Receiver<UiMsg>) {
             let mut quit_at: Option<Instant> = None;
             let mut settings_win: Option<settings::SettingsWin> = None;
             let mut update_gen = 0;
+            let mut front_app: Option<bridge::FrontApp> = None;
             loop {
                 let mut stop = false;
                 cx.update(|cx| {
@@ -511,11 +512,17 @@ pub fn run(rx: Receiver<UiMsg>) {
         },
         Some(super::platform::tray::TrayCmd::Settings) => settings::open_or_focus(&mut settings_win, cx),
         Some(super::platform::tray::TrayCmd::Permission) => super::platform::request_permission(),
+        Some(super::platform::tray::TrayCmd::ToggleApp) => if let Some(f) = bridge::front_app() {
+            if f.off { bridge::push_settings(crate::prefs::SettingsCmd::AppOn(f.id)) }
+            else { bridge::push_settings(crate::prefs::SettingsCmd::AppOff { id: f.id, name: f.name }) }
+        },
         Some(super::platform::tray::TrayCmd::Quit) => { bridge::REQ_QUIT.store(true, std::sync::atomic::Ordering::SeqCst); quit_at.get_or_insert(Instant::now() + Duration::from_secs(2)); }
         None => {}
     }
                     let g = update::generation();
                     if g != update_gen { update_gen = g; if let Some(t) = &tray { t.set_update(&update::status()) } settings::refresh(&settings_win, cx) }
+                    let front = bridge::front_app();
+                    if front != front_app { if let Some(t) = &tray { t.set_front_app(front.as_ref()) } front_app = front; }
                     #[cfg(target_os = "macos")] super::platform::macos::sync_input_source();
                     if stop || quit_at.is_some_and(|t| Instant::now() > t) { cx.quit(); }
                 });
@@ -771,6 +778,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,
+        off_apps: vec![("com.apple.Terminal".into(), "Terminal".into()), ("com.microsoft.VSCode".into(), "Visual Studio Code".into())],
     }
 }
 

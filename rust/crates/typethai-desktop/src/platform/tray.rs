@@ -1,12 +1,18 @@
 //! Tray icon with Pause/Resume, the update item, Settings, and Quit (tray-icon crate; needs the platform's main-thread event loop running).
 use tray_icon::{menu::{Menu, MenuEvent, MenuItem}, Icon, TrayIcon, TrayIconBuilder};
-pub enum TrayCmd { TogglePause, Quit, CheckUpdate, Settings, Permission }
+pub enum TrayCmd { TogglePause, Quit, CheckUpdate, Settings, Permission, ToggleApp }
+/// The app item's label when no app is in front (or it is typeThai itself): there is nothing to turn off.
+const APP_NONE: &str = "Turn off in this app";
+/// A tray label stays readable: names over 28 characters are cut with an ellipsis.
+fn short_name(name: &str) -> String {
+    if name.chars().count() <= 28 { name.to_string() } else { name.chars().take(27).chain(std::iter::once('…')).collect() }
+}
 /// The permission item's two states. macOS needs Accessibility; other platforms have nothing to grant.
 #[cfg(target_os = "macos")] const PERMISSION_NEEDED: &str = "Grant Accessibility…";
 #[cfg(target_os = "macos")] const PERMISSION_OK: &str = "Accessibility: on";
 #[cfg(not(target_os = "macos"))] const PERMISSION_NEEDED: &str = "Permissions";
 #[cfg(not(target_os = "macos"))] const PERMISSION_OK: &str = "Permissions";
-pub struct Tray { pub icon: TrayIcon, pause: MenuItem, update: MenuItem, settings: MenuItem, permission: MenuItem, quit: MenuItem }
+pub struct Tray { pub icon: TrayIcon, pause: MenuItem, app: MenuItem, update: MenuItem, settings: MenuItem, permission: MenuItem, quit: MenuItem }
 fn icon(paused: bool) -> Icon {
     let (w, h) = (32u32, 32u32); let mut px = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h { for x in 0..w {
@@ -19,18 +25,20 @@ fn icon(paused: bool) -> Icon {
 impl Tray {
     pub fn new() -> Result<Tray, String> {
         let pause = MenuItem::new("Pause typeThai", true, None);
+        let app = MenuItem::new(APP_NONE, false, None);
         let update = MenuItem::new("Check for updates", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let permission = MenuItem::new(PERMISSION_OK, true, None);
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
         menu.append(&pause).map_err(|e| e.to_string())?;
+        menu.append(&app).map_err(|e| e.to_string())?;
         menu.append(&update).map_err(|e| e.to_string())?;
         menu.append(&settings).map_err(|e| e.to_string())?;
         menu.append(&permission).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
         let icon = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("typeThai").with_icon(icon(false)).build().map_err(|e| e.to_string())?;
-        Ok(Tray { icon, pause, update, settings, permission, quit })
+        Ok(Tray { icon, pause, app, update, settings, permission, quit })
     }
     pub fn set_paused(&self, p: bool) {
         self.pause.set_text(if p { "Resume typeThai" } else { "Pause typeThai" }); let _ = self.icon.set_icon(Some(icon(p)));
@@ -43,10 +51,20 @@ impl Tray {
     }
     /// The update item follows the updater: "Check for updates", "Restart to update to …", and so on.
     pub fn set_update(&self, s: &crate::update::Status) { let (text, enabled) = s.menu(); self.update.set_text(text); self.update.set_enabled(enabled); }
+    /// The app item: turn typeThai off in the app in front, or back on when that app is already off.
+    pub fn set_front_app(&self, f: Option<&crate::bridge::FrontApp>) {
+        let (text, enabled) = match f {
+            None => (APP_NONE.to_string(), false),
+            Some(f) if f.off => (format!("Turn on in {}", short_name(&f.name)), true),
+            Some(f) => (format!("Turn off in {}", short_name(&f.name)), true),
+        };
+        self.app.set_text(text); self.app.set_enabled(enabled);
+    }
     /// Non-blocking poll of menu clicks.
     pub fn poll(&self) -> Option<TrayCmd> {
         while let Ok(e) = MenuEvent::receiver().try_recv() {
             if e.id == *self.pause.id() { return Some(TrayCmd::TogglePause) }
+            if e.id == *self.app.id() { return Some(TrayCmd::ToggleApp) }
             if e.id == *self.update.id() { return Some(TrayCmd::CheckUpdate) }
             if e.id == *self.settings.id() { return Some(TrayCmd::Settings) }
             if e.id == *self.permission.id() { return Some(TrayCmd::Permission) }

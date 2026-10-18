@@ -1,5 +1,5 @@
 //! Shared startup: CLI options, model + personal-state loading/saving, hotkey mapping.
-use crate::engine::{Engine, Hotkey, Options};
+use crate::engine::{Action, Engine, Hotkey, Options};
 use crate::prefs::{self, Prefs};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -33,7 +33,13 @@ impl Cli {
         c
     }
 }
-pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: PathBuf, pub words_path: PathBuf, saver: Saver }
+pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: PathBuf, pub words_path: PathBuf, saver: Saver,
+    /// Apps typeThai is turned fully off in (see `prefs::app_key`), keyed by the app id as stored; the value is the name
+    /// the tray and Settings show. Mirrors `prefs.json`.
+    off_apps: std::collections::BTreeMap<String, String>,
+    /// The app keys/focus went to last, other than typeThai itself: (raw id, display name). What `refresh_front_off`
+    /// recomputes the off state for when the user turns the app on/off from the tray or Settings.
+    front: Option<(String, String)> }
 /// Writes the state files on a thread of its own, in the order asked: serialising a full words.json takes about 1.5 ms,
 /// too long for the key tap callback that triggers the save.
 struct Saver { tx: mpsc::Sender<Save> }
@@ -83,7 +89,7 @@ impl App {
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
         engine.load_completers(&mut m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
-        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, saver: Saver::spawn() };
+        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, off_apps: p.off_apps, front: None, saver: Saver::spawn() };
         app.set_predict(app.engine.opts.predict);
         Ok(app)
     }
@@ -112,11 +118,51 @@ impl App {
         if self.engine.events_since_save >= 10 { self.save() }
         if std::mem::take(&mut self.engine.prefs_dirty) { self.save_prefs() }
     }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), offer_last: self.engine.offer_last.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, next_word: self.engine.opts.next_word, bubble: self.engine.opts.bubble, rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), offer_last: self.engine.offer_last.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, next_word: self.engine.opts.next_word, bubble: self.engine.opts.bubble, rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates, off_apps: self.off_apps.clone() }.save(&self.prefs_path); }
+    /// Keys or focus just went to this app (not typeThai itself): remember it, recompute whether it is off from prefs,
+    /// tell the tray/UI and return the engine's actions (a bubble or preview that was up goes away).
+    pub fn set_front_app(&mut self, id: &str, name: &str) -> Vec<Action> {
+        self.front = Some((id.to_string(), name.to_string()));
+        self.refresh_front_off()
+    }
+    /// Recompute the off state for the app in front and publish it. An empty id is never off (`prefs::app_key`).
+    fn refresh_front_off(&mut self) -> Vec<Action> {
+        let Some((id, name)) = self.front.clone() else { *crate::bridge::FRONT_APP.lock().unwrap() = None; return vec![] };
+        let key = prefs::app_key(&id);
+        let off = !key.is_empty() && self.off_apps.contains_key(&key);
+        *crate::bridge::FRONT_APP.lock().unwrap() = Some(crate::bridge::FrontApp { id, name, off });
+        self.engine.set_app_off(off)
+    }
+    /// Turn typeThai off in an app (from the tray or Settings). A blank id is ignored.
+    pub fn app_off(&mut self, id: &str, name: String) -> Vec<Action> {
+        let key = prefs::app_key(id);
+        if key.is_empty() { return vec![] }
+        self.off_apps.insert(key, name);
+        self.refresh_front_off()
+    }
+    /// Turn it back on there.
+    pub fn app_on(&mut self, id: &str) -> Vec<Action> {
+        self.off_apps.remove(&prefs::app_key(id));
+        self.refresh_front_off()
+    }
+    /// The off apps for the Settings page: (key id, display name), sorted by name case-insensitively.
+    pub fn off_apps_sorted(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self.off_apps.iter().map(|(k, n)| (k.clone(), n.clone())).collect();
+        v.sort_by_cached_key(|(_, n)| n.to_lowercase());
+        v
+    }
 }
 /// Hotkeys are Ctrl+Alt (Windows) / Ctrl+Option (macOS) + key char.
 pub fn hotkey_for(c: char) -> Option<Hotkey> {
     Some(match c.to_ascii_lowercase() { 'z' => Hotkey::Undo, 'x' => Hotkey::ForceConvert, 'g' => Hotkey::Guess, '1' => Hotkey::Accept(0), '2' => Hotkey::Accept(1), '3' => Hotkey::Accept(2), 'p' => Hotkey::TogglePause, 'r' => Hotkey::Rewrite, _ => return None })
+}
+#[cfg(test)]
+impl App {
+    /// A minimal App around a model-free engine, for tests in other modules that never touch the state files.
+    pub(crate) fn for_test(engine: Engine) -> App {
+        let dir = std::env::temp_dir().join(format!("typethai-app-test-{}", std::process::id()));
+        App { engine, state_path: dir.join("personal.json"), prefs_path: dir.join("prefs.json"), words_path: dir.join("words.json"), off_apps: Default::default(), front: None, saver: Saver::spawn() }
+    }
 }
 
 #[cfg(test)]

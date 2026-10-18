@@ -83,6 +83,10 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   nothing uploaded. Pick the row, review the continuation and confirm with Tab; the row itself says when Ollama is not
   running or the model has no suggestion.
 - **Password fields are skipped** (macOS secure input / AXSecureTextField, Windows ES_PASSWORD / UIA IsPassword).
+- **Off in the apps you choose.** In a terminal, an IDE or a game, the menu-bar icon's **Turn off in ‹app›** keeps
+  typeThai out of the app in front: no bubble, no conversions, no language badge and nothing learned, and every key
+  (hotkeys included) reaches the app. **Turn on in ‹app›** brings it back; **Settings… → Apps** lists the apps and
+  removes them. Kept in `prefs.json` as `"off_apps"` (macOS bundle id or Windows exe name, matched case-insensitively).
 
 ## Download and install
 

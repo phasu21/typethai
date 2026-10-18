@@ -188,12 +188,14 @@ fn frontmost() -> Option<(i32, String, String)> {
         Some((app.processIdentifier(), app.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default(), app.localizedName().map(|s| s.to_string()).unwrap_or_default()))
     }
 }
-/// Bundle id of the app a key goes to (the frontmost app when the event names no pid); empty when unknown.
-fn bundle_of(pid: i64) -> String {
+/// Bundle id and display name of the app a key goes to (the frontmost app when the event names no pid); empty when
+/// unknown.
+fn app_of(pid: i64) -> (String, String) {
     autoreleasepool(|_| {
         let app = if pid > 0 { objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32) }
             else { objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication() };
-        app.and_then(|a| a.bundleIdentifier()).map(|s| s.to_string()).unwrap_or_default()
+        let Some(a) = app else { return (String::new(), String::new()) };
+        (a.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default(), a.localizedName().map(|s| s.to_string()).unwrap_or_default())
     })
 }
 fn is_chromium_browser(bundle: &str) -> bool {
@@ -456,9 +458,13 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 Key::TabUp
             } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
-            if pid != st.last_pid { st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(&bundle_of(pid)); st.gate.reset(); st.field_rx = None; arm_focus_look(st, false); arm_caret_follow(st);
+            if pid != st.last_pid { st.last_pid = pid; let (id, name) = app_of(pid); st.app.engine.delete_unit = DeleteUnit::of_app(&id); st.gate.reset(); st.field_rx = None; arm_focus_look(st, false); arm_caret_follow(st);
+                // the tray's app item follows keys to another app, and turning it off there takes anything on screen down
+                let mut a = if id.is_empty() { vec![] } else { st.app.set_front_app(&id, if name.is_empty() { &id } else { &name }) };
                 // the new app's caret is somewhere else, and the pill may be up over the old one
-                let a = st.app.engine.reset(); run_actions(st, a); }
+                a.extend(st.app.engine.reset()); run_actions(st, a); }
+            // typeThai is off in this app: every key reaches it untouched, before any AX work
+            if st.app.engine.app_off() { return false }
             // these may move focus inside the app: a closed gate re-checks, and so does the preview's policy (a look
             // armed by a key never pins the preview: the caret under it is not laid out yet, and Enter/⌘C are typing)
             if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
@@ -521,6 +527,10 @@ fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now
 /// and keeps it up while nothing has been typed in that field; elsewhere, or in a password field, it goes. The verdict
 /// is the gate's own rule (macOS has no caret flag: the focused element decides, and an unknown one opens).
 fn focus_look(st: &mut State, key: bool) {
+    // a click or Cmd+Tab may have brought another app forward: the tray names it, and its off state may differ
+    if let Some((pid, bundle, name)) = frontmost() {
+        if !bundle.is_empty() && pid as i64 != std::process::id() as i64 && pid as i64 != st.last_pid { let a = st.app.set_front_app(&bundle, if name.is_empty() { &bundle } else { &name }); run_actions(st, a); }
+    }
     let (secure, f) = unsafe { focus_check() };
     let text = !secure && field::Gate::told(f).open(false, || false);
     let acts = if key { st.app.engine.set_field(text) } else { st.app.engine.on_focus(text) };
@@ -530,6 +540,7 @@ fn focus_look(st: &mut State, key: bool) {
 /// front, or focus is a password field or no text field (a fresh look, by the gate's rule). `pin`: focus just landed in
 /// a text field, so it stays until typing or focus leaving; else it goes after a moment.
 fn offer_badge(st: &mut State, pin: bool) -> bool {
+    if st.app.engine.app_off() { return false }
     let lang = source_lang();
     let ours = key_targets_us(0);
     let (on, bubble) = (st.app.engine.opts.input_badge && !st.app.engine.paused && !ours, st.app.engine.bubble_visible());
