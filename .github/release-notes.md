@@ -1,5 +1,10 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.14**
+- **Turn typeThai off in one app.** The menu-bar icon has *Turn off in ‹app›* for the app in front: there typeThai
+  shows nothing, converts nothing and every key, hotkeys included, reaches the app. *Turn on in ‹app›* undoes it, and
+  Settings → *Apps* lists the apps and removes them.
+
 **New in 0.5.13**
 - **Your own next words, also beside นา.** After a word and a pause, the words *you* usually type next come first
   (any you typed after that word at least twice, best first), then the built-in pairs. They now also show when the
