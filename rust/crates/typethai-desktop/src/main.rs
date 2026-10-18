@@ -11,7 +11,8 @@ fn main() {
         // extra debug options: --screenshot PATH (capture the bubble's own window to a PNG, then quit),
         // --items "a|b|c" (custom rows instead of the samples; repeat it to update the bubble in place; a row ending in
         // !th, !en or !typo is offered for that reason), --vertical (ask for rows, not a strip), --light,
-        // --backdrop light|dark (a window of text behind the bubble), --hold P (Tab held over it, P of the way to the rows)
+        // --backdrop light|dark (a window of text behind the bubble), --hold P (Tab held over it, P of the way to the rows),
+        // --shift (Shift held: the thumbs on the options offered in Thai)
         let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() {
@@ -24,6 +25,7 @@ fn main() {
             if a == "--vertical" { layout = bridge::BubbleLayout::Vertical; continue }
             if a == "--focused" { focused = true; continue }
             if a == "--light" { light = true; continue }
+            if a == "--shift" { bridge::SHIFT_HELD.store(true, std::sync::atomic::Ordering::SeqCst); continue }
             let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-bubble: expected x,y but got {a:?}"); std::process::exit(2) }
         }
@@ -104,12 +106,13 @@ fn main() {
     let app = match app::App::load(&cli) { Ok(a) => a, Err(e) => { eprintln!("typethai: {e}"); std::process::exit(1) } };
     if cli.simulate { platform::sim::run(app) } else { update::spawn(app.engine.check_updates); platform::run(app) }
 }
-/// A `--demo-bubble --items` row: its label, and the reason a trailing `!th`, `!en` or `!typo` names.
+/// A `--demo-bubble --items` row: its label, and the reason a trailing `!th`, `!en` or `!typo` names. One offered in Thai
+/// is rated, as a conversion is (`BubbleItem::rated_word`).
 fn demo_opt(s: &str) -> bridge::Opt {
     use engine::{InputLang, Reason};
     let reason = |b| match b { "th" => Some(Reason::Layout(InputLang::Thai)), "en" => Some(Reason::Layout(InputLang::Latin)), "typo" => Some(Reason::Typo), _ => None };
     match s.rsplit_once('!').and_then(|(label, b)| Some((label, reason(b)?))) {
-        Some((label, r)) => bridge::Opt { label: label.into(), reason: Some(r) },
-        None => bridge::Opt { label: s.into(), reason: None },
+        Some((label, r)) => bridge::Opt { label: label.into(), reason: Some(r), rated: r == Reason::Layout(InputLang::Thai) },
+        None => bridge::Opt { label: s.into(), reason: None, rated: false },
     }
 }

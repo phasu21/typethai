@@ -48,7 +48,11 @@ fn spell_context(text: &str) -> &str {
 pub enum Hotkey { Undo, ForceConvert, Guess, Accept(usize), Dismiss, TogglePause,
     /// Ctrl+Opt/Alt+R: options for the selected text (other layout, spelling, AI rewrite), or with nothing selected for
     /// the word before the caret.
-    Rewrite }
+    Rewrite,
+    /// A thumb clicked on option `i` while Shift is held: up (`true`) or down. Only a conversion of a word typed on the
+    /// English keys is rated (`BubbleItem::rated_word`): down puts that word's conversion last from now on
+    /// (`Engine::offer_last`), up puts it back in its place. Neither stops it being offered.
+    Rate(usize, bool) }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     /// A printable key, as the US-QWERTY char it produces (e.g. `;` for the ว key).
@@ -177,6 +181,9 @@ impl BubbleItem {
             BubbleKind::Complete { .. } | BubbleKind::Rewrite(RewriteRow::Preset(..) | RewriteRow::Busy(_) | RewriteRow::Result(_) | RewriteRow::Notice) => None,
         }
     }
+    /// The typed word a thumb rates (`Hotkey::Rate`): a finished word offered in Thai. The personal model learns the
+    /// English-keys-to-Thai direction only, so nothing else is rated.
+    pub fn rated_word(&self) -> Option<&str> { match &self.kind { BubbleKind::Convert { typed, .. } => Some(typed), _ => None } }
 }
 /// The visible rewrite phases; a bubble holds rows of one phase.
 #[derive(Clone, Debug, PartialEq)]
@@ -318,8 +325,14 @@ pub const TAB_CHORD_MIN: Duration = Duration::from_millis(150);
 pub const TAB_HOLD_CHOICES_MS: [u64; 6] = [200, 250, 350, 500, 750, 1000];
 pub const TAB_HOLD_DEFAULT_MS: u64 = TAB_HOLD_CHOICES_MS[0];
 pub const TAB_HOLD: Duration = Duration::from_millis(TAB_HOLD_DEFAULT_MS);
-/// The least share of the pairs after a word that a next word needs to be offered.
+/// The least share of the corpus pairs after a word that a next word needs to be offered.
 const NEXT_WORD_SHARE: f64 = 0.2;
+/// The user's own pairs (`WordMemory`) offer a next word finished after that word at least twice: two finishes decay
+/// to this after about 20,000 words. Theirs come first, best first, and the corpus fills what is left.
+const NEXT_WORD_MINE: f64 = 1.5;
+/// Next words offered at once. Beside the layout flip of the word just typed they make a fourth row (`ok ` → นา |
+/// lets | done | cool), which has no digit shortcut.
+const NEXT_WORDS: usize = 3;
 /// Retroactive previous-word flip threshold (only when the next word auto-flips).
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
@@ -364,6 +377,11 @@ pub struct Engine {
     pub events_since_save: usize,
     /// English key tokens the user does not want translated (`ok` stays as typed, not `นา`).
     pub never: BTreeSet<String>,
+    /// English key tokens whose conversion the user rated down (`Hotkey::Rate`): still offered, after every other
+    /// option (`ok ` → lets | done | cool | นา).
+    pub offer_last: BTreeSet<String>,
+    /// `never` / `offer_last` changed outside Settings: the host saves prefs.json.
+    pub prefs_dirty: bool,
     /// English spelling suggestions for words left as typed; None disables them.
     pub speller: Option<Box<dyn Speller + Send>>,
     /// prefs.json "rewrite". The API key is not here; only the rewrite worker reads it.
@@ -409,7 +427,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -612,8 +630,9 @@ impl Engine {
         self.fixing = false;
         // new rows start with the arrow keys outside (the UI resets on Show / Hide)
         self.in_bubble = false;
-        // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks
-        items.sort_by_key(|i| match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 });
+        // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks; a conversion rated
+        // down goes after everything
+        items.sort_by_key(|i| if i.rated_word().is_some_and(|w| self.rated_down(w)) { 3 } else { match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 } });
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
         let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
             else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); self.badge_up = false; Action::ShowBubble(items) };
@@ -621,6 +640,8 @@ impl Engine {
         acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
         acts.push(act);
     }
+    /// The conversion of `typed` was rated down (`offer_last`).
+    fn rated_down(&self, typed: &str) -> bool { normalize_word(typed).is_some_and(|k| self.offer_last.contains(&k)) }
     fn feedback(&mut self, typed: &str, kind: Feedback) {
         let ds = self.decisions(typed); let i = ds.len() - 1; self.personal.feedback(&ds, i, kind); self.events_since_save += 1;
     }
@@ -910,7 +931,7 @@ impl Engine {
         }
         // the model answers from its own thread, so the word it adds to the next-word rows can arrive after the pause
         // tick that offered the pairs: take it on a later tick, once (the row it shows keeps this quiet afterwards)
-        if self.last_key.is_none() && self.word.is_empty() && !self.bubble_visible()
+        if self.last_key.is_none() && self.word.is_empty() && self.next_word_room()
             && self.pred_next_answer.as_ref().is_some_and(|(key, _, _)| Some(*key) == self.pred_next_ask) {
             self.offer_next_words(&mut acts);
         }
@@ -924,20 +945,22 @@ impl Engine {
         self.offer_next_words(&mut acts);
         acts
     }
-    /// The next-word rows: the built-in pairs after the word just finished, and the personal model's word where it has
-    /// one for this line. The pairs only show once the pause has elapsed (`on_idle` calls this below that guard); an
-    /// answer that lands later brings the rows up on its own tick.
+    /// The next-word rows: the user's own pairs and the built-in pairs after the word just finished, and the personal
+    /// model's word where it has one for this line. The pairs only show once the pause has elapsed (`on_idle` calls
+    /// this below that guard); an answer that lands later brings the rows up on its own tick. They join a layout flip
+    /// offered for that word (`next_word_room`), after it.
     fn offer_next_words(&mut self, acts: &mut Vec<Action>) {
         if self.opts.complete == CompleteMode::Off || !self.opts.next_word { return }
         self.ask_next_word();
         self.poll_prediction();
         if self.word.is_empty() {
-            if !self.bubble_visible() {
-                let rows = self.next_word_rows();
-                if rows != self.bubble { self.show(rows, acts) }
+            if self.next_word_room() {
+                let next = self.next_word_rows();
                 // nothing to offer here (the caret is not after a word): the answer is spent, and the next line asks
                 // again. Without this the late-answer tick would rebuild the rows every tick until a key came.
-                else if rows.is_empty() { self.pred_next_answer = None }
+                if next.is_empty() { self.pred_next_answer = None }
+                let rows: Vec<BubbleItem> = self.bubble.iter().cloned().chain(next).collect();
+                if rows != self.bubble { self.show(rows, acts) }
             }
         }
         // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
@@ -951,27 +974,40 @@ impl Engine {
             }
         }
     }
-    /// The words to offer after `prev`: the built-in pairs, and the personal model's word in the last slot when it
-    /// has one for this line (the pairs know the language, the model knows this user).
+    /// The words to offer after `prev`: the pairs (`next_words`), and the personal model's word in the last slot when
+    /// it has one for this line (the pairs know the language and this user's habits, the model reads the line).
     fn next_words_here(&self, prev: &str, lang: InputLang) -> Vec<String> {
         let mut words = self.next_words(prev, lang);
         if let Some(w) = self.predicted_next() {
-            if !words.iter().any(|x| *x == w) { words.truncate(2); words.push(w) }
+            if !words.iter().any(|x| *x == w) { words.truncate(NEXT_WORDS - 1); words.push(w) }
         }
         words
     }
-    /// The words likely to follow `prev` in `lang`: the corpus pairs after it, each at least `NEXT_WORD_SHARE` of them
-    /// (`thank` → you; nothing after `you`, where no word stands out).
+    /// The words likely to follow `prev` in `lang`: first the ones this user finished after it at least twice
+    /// (`NEXT_WORD_MINE`, from `words` while `learn_words` is on), best first; then the corpus pairs after it, each at
+    /// least `NEXT_WORD_SHARE` of them (`thank` → you; nothing after `you`, where no word stands out).
     fn next_words(&self, prev: &str, lang: InputLang) -> Vec<String> {
-        let comp = match lang { InputLang::Thai => &self.thai_comp, InputLang::Latin => &self.en_comp };
-        let Some(comp) = comp else { return vec![] };
         let cx = self.context(Some(prev), lang);
-        let (Some(_), Some(b)) = (cx.prev, cx.bigrams) else { return vec![] };
+        if cx.prev.is_none() { return vec![] }
+        let mut words: Vec<String> = vec![];
+        if let Some(memory) = cx.memory {
+            let mut mine: Vec<(&str, f64)> = memory.followers(prev).filter(|&(w, n)| n >= NEXT_WORD_MINE && lang_of(w) == lang && !self.blocked(w)).collect();
+            mine.sort_by(|a, b| b.1.total_cmp(&a.1));
+            words.extend(mine.into_iter().take(NEXT_WORDS).map(|(w, _)| w.to_string()));
+        }
+        let comp = match lang { InputLang::Thai => &self.thai_comp, InputLang::Latin => &self.en_comp };
+        let (Some(comp), Some(b)) = (comp, cx.bigrams) else { return words };
         // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
         let mass = b.mass(prev);
-        b.followers(prev).take(3).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass)
-            .filter(|(w, _)| comp.knows(w) && !self.blocked(w)).map(|(w, _)| w.to_string()).collect()
+        for (w, _) in b.followers(prev).take(NEXT_WORDS).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass) {
+            if words.len() == NEXT_WORDS { break }
+            if comp.knows(w) && !self.blocked(w) && !words.iter().any(|x| x == w) { words.push(w.to_string()) }
+        }
+        words
     }
+    /// The next-word rows may come up: the bubble is down, or holds only the layout flip of the word just typed
+    /// (`ok ` → นา), which they join after (Tab still applies the flip).
+    fn next_word_room(&self) -> bool { self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Convert { .. })) }
     /// The next words when the caret sits after a word and a space, in the input language. Applied like a completion
     /// of nothing. None at the start of a line.
     fn next_word_rows(&self) -> Vec<BubbleItem> {
@@ -1539,6 +1575,13 @@ impl Engine {
                 self.show(vec![], &mut acts);
             }
             Hotkey::Dismiss => { self.dismiss(&mut acts); return Outcome { swallow: false, actions: acts } }
+            Hotkey::Rate(i, up) => {
+                let Some(key) = self.bubble.get(i).and_then(BubbleItem::rated_word).and_then(normalize_word) else { return Outcome { swallow: true, actions: acts } };
+                let changed = if up { self.offer_last.remove(&key) } else { self.offer_last.insert(key) };
+                // the bubble up now takes the new order too: down, the conversion moves behind the others and Tab
+                // applies what is first now; up, it is back in front
+                if changed { self.prefs_dirty = true; let items = self.bubble.clone(); self.show(items, &mut acts); }
+            }
             Hotkey::Rewrite => return self.start_rewrite(),
             Hotkey::TogglePause => unreachable!(),
         }
@@ -1553,7 +1596,7 @@ impl Engine {
         match k {
             // holding the hotkey autorepeats: while capturing that is a no-op, not a restart
             Key::Hotkey(Hotkey::Rewrite) => self.capturing.is_some(),
-            Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss) => self.bubble_visible(),
+            Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(Hotkey::Accept(_) | Hotkey::Dismiss | Hotkey::Rate(..)) => self.bubble_visible(),
             Key::Boundary(Boundary::Enter) => (self.fixing || self.in_bubble) && self.bubble_visible(),
             Key::Arrow(_) => self.bubble_visible() && self.is_arrow_key(k),
             _ => false,
@@ -3154,6 +3197,56 @@ mod tests {
         e.reset(); e.opts.complete = CompleteMode::Pause;
         assert!(e.apply_settings(SettingsCmd::SetNextWord(false))); assert!(!e.settings_snapshot().next_word);
         typ(&mut e, "you "); e.show(vec![], &mut vec![]); idle(&mut e, 600); assert!(!e.bubble_visible());
+    }
+    #[test] fn thumbs_down_puts_a_conversion_last_and_up_puts_it_back() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.set_thai_active(false);
+        let mut m = WordMemory::default(); for w in ["lets", "lets", "cool", "cool"] { m.learn(Some("ok"), w) } e.words = Arc::new(m);
+        typ(&mut e, "ok "); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["นา", "cool", "lets"]);
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Rate(3, false))).actions, vec![], "no option there: nothing");
+        e.on_key(Key::Hotkey(Hotkey::Rate(0, false)));
+        assert_eq!((labels(&e), e.selected()), (vec!["cool".to_string(), "lets".into(), "นา".into()], 0), "last now; Tab takes cool");
+        assert!(e.prefs_dirty && e.offer_last.contains("ok"));
+        assert!(e.personal.learned().iter().all(|l| l.word != "ok"), "the personal model is not told: นา stays on offer");
+        // from now on: still offered, after the rest, however often it is rated down
+        for _ in 0..5 {
+            e.reset(); typ(&mut e, "ok ");
+            assert_eq!(labels(&e), ["นา"], "alone, it is the one option");
+            idle(&mut e, 600);
+            assert_eq!(labels(&e), ["cool", "lets", "นา"]);
+            e.on_key(Key::Hotkey(Hotkey::Rate(2, false)));
+        }
+        // up: back in front, now and next time
+        e.on_key(Key::Hotkey(Hotkey::Rate(2, true)));
+        assert_eq!(labels(&e), ["นา", "cool", "lets"]);
+        e.reset(); typ(&mut e, "ok "); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["นา", "cool", "lets"]);
+        assert!(e.offer_last.is_empty());
+    }
+    #[test] fn your_own_pairs_lead_the_next_words_and_join_a_layout_flip() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.set_thai_active(false);
+        e.en_bigrams = Some(Bigrams::new([("ok", "so", 9.0), ("ok", "i", 1.0)].map(|(p, n, c)| (p.to_string(), n.to_string(), c))));
+        e.en_comp = Some(Completer::new([("so", 50.0), ("i", 50.0)].map(|(w, f)| (w.to_string(), f))));
+        let mine = |pairs: &[(usize, &str)]| { let mut m = WordMemory::default(); for &(n, w) in pairs { for _ in 0..n { m.learn(Some("ok"), w) } } Arc::new(m) };
+        e.words = mine(&[(5, "lets"), (3, "done"), (2, "cool"), (1, "then")]);
+        typ(&mut e, "ok ");
+        assert_eq!(labels(&e), ["นา"], "the layout flip at Space");
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["นา", "lets", "done", "cool"], "yours after it, best first; a word typed once and the corpus's have no room");
+        assert_eq!(e.selected(), 0, "Tab still applies the flip");
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Accept(3))).actions[0], Action::Replace { delete: 0, insert: "cool".into(), then: None });
+        // no flip: three next words, the corpus filling after yours
+        e.reset(); e.words = mine(&[(2, "cool")]);
+        typ(&mut e, "ok "); e.show(vec![], &mut vec![]); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["cool", "so"]);
+        // learn_words off: the corpus alone
+        e.reset(); e.opts.learn_words = false;
+        typ(&mut e, "ok "); e.show(vec![], &mut vec![]); idle(&mut e, 600);
+        assert_eq!(labels(&e), ["so"]);
     }
     #[test] fn a_pause_after_a_thai_word_offers_the_next_one_without_a_space() {
         let Some(mut e) = engine() else { return };

@@ -3,7 +3,7 @@
 //! (ES_PASSWORD / UIA IsPassword), switch to Thai/US layout after applying, tray icon.
 use crate::{app::{hotkey_for, App}, backspace::DeleteUnit, bridge::{self, UiMsg}, engine::{Action, Arrow, Boundary, Hotkey, InputLang, Key}, inputsrc::Source, keys::win_vk_to_us, placement::{Anchor, Rect}, rewrite};
 use std::cell::{Cell, RefCell};
-use std::sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, mpsc, OnceLock};
+use std::sync::{atomic::{AtomicU32, Ordering}, mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use super::field::{self, Field};
 use windows::core::w;
@@ -383,9 +383,10 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     o.swallow
 }
 // ---------- mouse thread ----------
-/// The last click the mouse thread saw, for the hook thread: 0 none, 1 elsewhere (the caret may have moved), 2 + i a
-/// left click on bubble row i. Taken before the next key and on the timer, so a key typed after a click sees it first.
-static CLICK: AtomicUsize = AtomicUsize::new(0);
+/// The last click the mouse thread saw, for the hook thread: elsewhere (the caret may have moved), or a left click on
+/// an option or one of its thumbs. Taken before the next key and on the timer, so a key typed after a click sees it first.
+enum Click { Elsewhere, On(bridge::Hit) }
+static CLICK: Mutex<Option<Click>> = Mutex::new(None);
 /// The hook thread, woken (WM_APP) to apply a clicked row right away.
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
 static MOUSE_TX: OnceLock<mpsc::Sender<UiMsg>> = OnceLock::new();
@@ -401,31 +402,34 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             if let Some(tx) = MOUSE_TX.get() { let _ = tx.send(UiMsg::HideBadge); }
             return LRESULT(1)
         }
-        match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64)) {
-            // on the bubble: swallow so it is never clicked/activated; a left click on a row accepts that item
-            Some(row) => {
-                if let (WM_LBUTTONDOWN, Some(i)) = (m, row) {
-                    CLICK.store(2 + i, Ordering::SeqCst);
+        match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64, bridge::SHIFT_HELD.load(Ordering::SeqCst))) {
+            // on the bubble: swallow so it is never clicked/activated; a left click on an option applies it, on a thumb
+            // rates it
+            Some(hit) => {
+                if m == WM_LBUTTONDOWN && hit.key().is_some() {
+                    *CLICK.lock().unwrap() = Some(Click::On(hit));
                     let _ = PostThreadMessageW(HOOK_TID.load(Ordering::SeqCst), WM_APP, WPARAM(0), LPARAM(0));
                 }
                 return LRESULT(1)
             }
-            None => CLICK.store(1, Ordering::SeqCst),
+            None => *CLICK.lock().unwrap() = Some(Click::Elsewhere),
         }
     }
     CallNextHookEx(None, code, wp, lp)
 }
 /// The click the mouse thread saw, on the hook thread.
 unsafe fn take_click(st: &mut State) {
-    match CLICK.swap(0, Ordering::SeqCst) {
-        0 => {}
-        1 => {
+    // taken out first: the mouse thread must never wait on the engine
+    let click = CLICK.lock().unwrap().take();
+    match click {
+        None => {}
+        Some(Click::Elsewhere) => {
             st.gate.touch(Instant::now()); arm_focus_look(st, false);
             // the click moved the caret: a preview that is up follows it (Windows has no keystroke-driven follow)
             if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); }
             let a = st.app.engine.reset(); run_actions(st, a);
         }
-        n => { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(n - 2))); run_actions(st, o.actions); }
+        Some(Click::On(hit)) => if let Some(k) = hit.key() { let o = st.app.engine.on_key(k); run_actions(st, o.actions); st.app.maybe_save(); },
     }
 }
 fn mouse_thread() {

@@ -59,12 +59,16 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on by
   default: **Settings… → Word suggestions → Finish words from my typing** turns it off, and **Forget learned words**
   clears it. It also adds its guess to the next-word rows above, beside the built-in pairs.
-- **Next word.** Pause after a word and the bubble offers the word that usually follows it: built-in word pairs in the
-  input language, plus your own model's guess (see `Finish words from my typing` below) when its follower was not
-  already one of them. The pairs: after a space in English (`thank ` → you, `going ` → to), and in Thai as soon as the
-  run ends on a dictionary word, with no space (`แซ่บ` → มาก, `ขอบคุณ` → ค่ะ). Only a clear favourite is offered (at
-  least a fifth of the pairs after the word), so nothing comes up after words like `you` or `the`. Tab, the arrow keys
-  or a click types it. **Settings… → Word suggestions → Suggest the next word** turns it off (prefs.json
+- **Next word.** Pause after a word and the bubble offers the words that usually follow it. Your own habits come
+  first: a word you finished after that one at least twice (`ok ` → lets, done, cool, best first; on while **Learn
+  from my typing** is). Then the built-in word pairs in the input language, plus your own model's guess (see `Finish words
+  from my typing` below) when its follower was not already one of them. The pairs: after a space in English
+  (`thank ` → you, `going ` → to), and in Thai as soon as the run ends on a dictionary word, with no space (`แซ่บ` →
+  มาก, `ขอบคุณ` → ค่ะ). Only a clear favourite is offered (at least a fifth of the pairs after the word), so nothing
+  comes up after words like `you` or `the` unless you have a habit there. When the word just typed is also offered
+  in the other layout (`ok ` → นา), the next words join it after the pause: นา | lets | done | cool. Tab still applies
+  the first; the fourth has no digit, so reach it with the arrow keys or a click. Tab, the arrow keys or a click
+  types a next word. **Settings… → Word suggestions → Suggest the next word** turns it off (prefs.json
   `"next_word": false`); it is also off while **Show suggestions** is Off.
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
@@ -136,6 +140,7 @@ on the others. Options are numbered from the left in the strip and from the top 
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
+| **Hold Shift**, click 👍 / 👎 on an option offered in Thai | Rate that conversion of the word you typed. Its key hint turns into the two thumbs while Shift is held. 👎 moves it behind every other option, now and each time that word is offered again (`ok ` → lets \| done \| cool \| นา, Tab takes lets); it is still offered, first when it is the only option. 👍 puts it back in front. Kept in `prefs.json` as `"offer_last"` |
 | **↑**, then **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. On by default; until ↑ the arrow keys move the cursor |
 | **Esc** | Dismiss the bubble |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |

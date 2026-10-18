@@ -72,6 +72,26 @@ impl Render for BubbleView {
         let (cap_fg, cap_bg) = (t.muted_foreground, t.tokens.muted);
         let cap = move |text: String, w: f64| div().w(px(w as f32)).h(px(bridge::KEYCAP_H as f32)).flex_none().flex().items_center().justify_center()
             .rounded(px(4.)).text_color(cap_fg).text_size(px(bridge::KEYCAP_FONT_PX as f32)).child(text);
+        // a thumb (`Layout::thumbs`): a grey keycap like the digits with Lucide's outline thumb; on hover the thumb is
+        // drawn filled (`icons/`, the same shape with a fill), in the colour of what it does: the accent for up, the
+        // danger red for down. Both icons take the keycap's text colour; the group hover shows one or the other
+        let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
+        let key_bg = Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 });
+        let key_fg = if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) };
+        let danger_fg = t.danger;
+        let thumb_key = move |i: usize, up: bool, w: f64, h: f64, radius: f64| {
+            let id = 2 * i + usize::from(up);
+            let group = SharedString::from(format!("thumb-{id}"));
+            let (outline, filled) = if up { (gpui_kit::assets::IconName::ThumbsUp, "icons/thumbs-up-fill.svg") } else { (gpui_kit::assets::IconName::ThumbsDown, "icons/thumbs-down-fill.svg") };
+            let size = px(bridge::THUMB_ICON as f32);
+            div().id(("thumb", id)).group(group.clone())
+                .w(px(w as f32)).h(px(h as f32)).flex_none().relative().flex().items_center().justify_center().rounded(px(radius as f32))
+                .bg(cap_bg).text_color(cap_fg)
+                .hover(move |s| s.text_color(if up { key_bg } else { danger_fg }))
+                .child(div().flex().group_hover(group.clone(), |s| s.opacity(0.)).child(Icon::new(outline).with_size(size)))
+                .child(div().absolute().size_full().flex().items_center().justify_center().opacity(0.).group_hover(group, |s| s.opacity(1.))
+                    .child(Icon::empty().path(filled).with_size(size)))
+        };
         // why an option is offered: the flag of the language a conversion's text becomes, or the typo icon in the danger
         // red. A row shows it round like gpui-kit's Badge on the row's fill, ringed in the border colour (`Badge::icon`
         // tints its icon one colour, so the flag needs this); a strip button carries it faint in its bottom-right corner,
@@ -125,30 +145,23 @@ impl Render for BubbleView {
                     .children(self.items.iter().enumerate().map(|(i, o)| {
                         let (slot, b, on) = (l.cells[i], l.button(i, selected), i == selected);
                         let label = column(i, o).mt(px(bridge::LABEL_DROP as f32));
-                        let child = if shift {
-                            div().flex().flex_col().items_center().gap(px(2.)).child(label)
-                                .child(div().flex().flex_row().gap(px(4.))
-                                    .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
-                                    .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.))))
-                        } else { label };
                         // the button's own padding would clip the mark: the padding is on this box, sized to the inside of
                         // the button's border (`size_full` lets the label's line box stretch it past the bottom edge)
                         let content = div().w(px((b.w - 2.0 * bridge::OPT_BORDER) as f32)).h(px((b.h - 2.0 * bridge::OPT_BORDER) as f32)).flex_none()
                             .relative().flex().items_center().justify_center()
                             .px(px((if on { bridge::OPT_SEL_PX } else { bridge::OPT_PX }) as f32))
-                            .when_some(o.reason, |d, r| d.child(mark(r))).child(child);
+                            .when_some(o.reason, |d, r| d.child(mark(r))).child(label);
                         div().w(px(slot.w as f32)).h(px(slot.h as f32)).flex_none().flex().items_end()
                             .child(div().flex_none().rounded(radius).bg(surface).shadow_md()
                                 .child(Button::new(("opt", i)).selected(on).w(px(b.w as f32)).h(px(b.h as f32)).px(px(0.))
                                     .when(!on, |b| b.opacity(bridge::DIM)).child(content)))
                     }));
                 // the key hints come after all the buttons, so a neighbour never paints over one; solid in the user's
-                // accent colour, so the key reads over the button's border and over any app
-                let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
-                let key_bg = Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 });
-                let key_fg = if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) };
-                // the others grey (the theme's muted keycap colours over the surface, still solid)
-                let keys = l.key_hints(selected).into_iter().enumerate().map(|(i, at)| { let on = i == selected;
+                // accent colour (`key_bg`), so the key reads over the button's border and over any app
+                // the others grey (the theme's muted keycap colours over the surface, still solid). Shift held: a rated
+                // option shows its thumbs there instead
+                let rated: Vec<bool> = self.items.iter().map(|o| o.rated).collect();
+                let keys = l.key_hints(selected).into_iter().filter(|&(i, _)| !(shift && rated[i])).map(|(i, at)| { let on = i == selected;
                     let key = div().absolute().left(px(at.x as f32)).top(px(at.y as f32)).w(px(at.w as f32)).h(px(at.h as f32)).rounded(px(bridge::KEY_RADIUS as f32)).bg(surface);
                     match hold.filter(|_| on) {
                         // Tab held: grey, the accent sweeping in as the hold fills
@@ -157,8 +170,11 @@ impl Render for BubbleView {
                             .bg(if on { key_bg } else { *cap_bg }).text_color(if on { key_fg } else { cap_fg }).text_size(px(bridge::KEY_FONT_PX as f32))
                             .child(if on { apply_pill.to_string() } else { (i + 1).to_string() })),
                     } });
+                let thumbs = if shift { l.thumbs(&l.cells, selected, &rated) } else { vec![] };
+                let thumbs = thumbs.into_iter().map(|(i, up, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32))
+                    .rounded(px(bridge::KEY_RADIUS as f32)).bg(surface).child(thumb_key(i, up, at.w, at.h, bridge::KEY_RADIUS)));
                 root.pl(px(l.margin as f32)).pt(px(l.margin as f32)).child(buttons)
-                    .children(keys).into_any_element()
+                    .children(keys).children(thumbs).into_any_element()
             }
             BubbleLayout::Vertical => {
                 let panel = div().flex_none().p(px(PAD as f32)).flex().w(px((l.w - 2.0 * l.margin) as f32)).flex_col()
@@ -172,18 +188,18 @@ impl Render for BubbleView {
                             .child(column(i, o))
                             // a row has no corner to hang a badge on: a column before the keys, when any row has one
                             .when(l.reasons.iter().any(Option::is_some), |d| d.child(div().w(px(bridge::BADGE_D as f32)).flex_none().when_some(o.reason, |d, r| d.child(badge(r, if i == selected { row_sel } else { row_bg })))))
-                            .when(shift, |d| d.child(div().flex_none().flex().flex_row().gap(px(4.)).px(px(4.))
-                                .child(Icon::new(gpui_kit::assets::IconName::ThumbsUp).with_size(px(12.)))
-                                .child(Icon::new(gpui_kit::assets::IconName::ThumbsDown).with_size(px(12.)))))
                             // the keys that apply this row: Tab for the highlighted one, Tab + its number for the others
+                            // (a row past `DIGIT_ROWS` has no number: nothing but its Tab when highlighted). Shift held: a
+                            // rated row shows its thumbs there instead (`Layout::thumbs`)
                             .child(div().w(px(bridge::HINT_SLOT_W as f32)).flex_none().flex().flex_row().justify_end().gap(px(bridge::KEYCAP_GAP as f32))
-                                .child(match hold.filter(|_| i == selected) {
-                                    Some(p) => { let a = native::accent().unwrap_or(bridge::ACCENT_FALLBACK);
-                                        let fill = (Hsla::from(Rgba { r: a.0, g: a.1, b: a.2, a: 1.0 }), if bridge::dark_text_on(a) { Hsla::from(rgb(0x1a1a1a)) } else { Hsla::from(rgb(0xffffff)) });
+                                .when(shift && o.rated, |d| d.gap(px(bridge::THUMB_GAP as f32))
+                                    .children([true, false].map(|up| thumb_key(i, up, bridge::DIGIT_CAP_W, bridge::KEYCAP_H, 4.0))))
+                                .when(!(shift && o.rated) && (i == selected || i < bridge::DIGIT_ROWS), |d| d.child(match hold.filter(|_| i == selected) {
+                                    Some(p) => { let fill = (key_bg, key_fg);
                                         sweep(bridge::TAB_CAP_W, bridge::KEYCAP_H, 4.0, apply_key, bridge::KEYCAP_FONT_PX, (*cap_bg, cap_fg), fill, p).flex_none() }
                                     None => cap(if i == selected { apply_key } else { "Tab" }.into(), bridge::TAB_CAP_W).bg(cap_bg),
-                                })
-                                .when(i != selected, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg))))
+                                }))
+                                .when(!(shift && o.rated) && i != selected && i < bridge::DIGIT_ROWS, |d| d.child(cap((i + 1).to_string(), bridge::DIGIT_CAP_W).bg(cap_bg))))
                     }));
                 root.p(px(l.margin as f32)).child(panel).into_any_element()
             }
@@ -213,10 +229,12 @@ gpui_kit::assets::icon_assets!(BadgeIcons, [SpellCheck, Download, Sparkles]);
 struct AppAssets;
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        let flag: Option<&'static [u8]> = match path {
+        let ours: Option<&'static [u8]> = match path {
             "flags/th.svg" => Some(include_bytes!("../../flags/th.svg")), "flags/us.svg" => Some(include_bytes!("../../flags/us.svg")),
-            "flags/th-wide.svg" => Some(include_bytes!("../../flags/th-wide.svg")), "flags/us-wide.svg" => Some(include_bytes!("../../flags/us-wide.svg")), _ => None };
-        if let Some(b) = flag { return Ok(Some(std::borrow::Cow::Borrowed(b))) }
+            "flags/th-wide.svg" => Some(include_bytes!("../../flags/th-wide.svg")), "flags/us-wide.svg" => Some(include_bytes!("../../flags/us-wide.svg")),
+            "icons/thumbs-up-fill.svg" => Some(include_bytes!("../../icons/thumbs-up-fill.svg")), "icons/thumbs-down-fill.svg" => Some(include_bytes!("../../icons/thumbs-down-fill.svg")),
+            _ => None };
+        if let Some(b) = ours { return Ok(Some(std::borrow::Cow::Borrowed(b))) }
         match BadgeIcons.load(path)? { Some(b) => Ok(Some(b)), None => assets::Assets.load(path) }
     }
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -261,6 +279,11 @@ impl Ui {
         }
         solid
     }
+    /// The thumbs on the rated options (`Layout::thumbs`), on the options as laid out.
+    fn laid_thumbs(&self, cx: &App) -> Vec<(usize, bool, Rect)> {
+        let v = self.view.read(cx); let rated: Vec<bool> = v.items.iter().map(|o| o.rated).collect();
+        v.layout.thumbs(&self.cells, v.selected, &rated)
+    }
     fn place(&mut self, size: (f64, f64), cx: &mut App) -> Option<Placement> {
         let anchor = self.anchor?;
         let mons = native::monitors();
@@ -274,7 +297,7 @@ impl Ui {
         // unchanged rect (e.g. a caret-follow that didn't move): don't touch the window -> no flicker
         if self.last != Some(r) || !self.visible { self.last = Some(r); cx.foreground_executor().spawn(async move { native::show(&n, r) }).detach(); }
         self.cells = self.laid_cells(cx);
-        bridge::set_geom(Some(Geom { frame: p.rect, scale: mons[p.monitor].size_scale, cells: self.cells.clone(), solid: self.laid_solid(cx) }));
+        bridge::set_geom(Some(Geom { frame: p.rect, scale: mons[p.monitor].size_scale, cells: self.cells.clone(), solid: self.laid_solid(cx), thumbs: self.laid_thumbs(cx) }));
         self.size = size;
         Some(p)
     }
@@ -459,7 +482,9 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Hold { hold, anchor } => { let over = hold.is_some() && ui.visible;
                             ui.view.update(cx, |v, cx| { v.hold = hold.filter(|_| over); cx.notify(); });
                             badge.hold(hold.filter(|_| !over), anchor, cx) }
-                        UiMsg::Select(i) => ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); }),
+                        // the strip's highlighted button grows: its key hint and thumbs move with it
+                        UiMsg::Select(i) => { ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); });
+                            if let Some(mut g) = bridge::geom() { g.solid = ui.laid_solid(cx); g.thumbs = ui.laid_thumbs(cx); bridge::set_geom(Some(g)) } }
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
                         UiMsg::Paused(p) => { if p { badge.clicked(cx) } if let Some(t) = &tray { t.set_paused(p) } },
                         UiMsg::Stopped => stop = true,
@@ -534,8 +559,8 @@ pub fn probe(secs: f64, lookup: fn() -> (Anchor, String), trusted: bool) {
 
 pub fn demo_items() -> Vec<Opt> {
     use crate::engine::InputLang;
-    vec![Opt { label: "สวัสดีครับ".into(), reason: Some(Reason::Layout(InputLang::Thai)) }, Opt { label: "l;ylfu".into(), reason: Some(Reason::Layout(InputLang::Latin)) },
-        Opt { label: "ภาษาไทย ทดสอบ วรรณยุกต์ ก่ ก้ ก๊ ก๋".into(), reason: None }]
+    vec![Opt { label: "สวัสดีครับ".into(), reason: Some(Reason::Layout(InputLang::Thai)), rated: true }, Opt { label: "l;ylfu".into(), reason: Some(Reason::Layout(InputLang::Latin)), rated: false },
+        Opt { label: "ภาษาไทย ทดสอบ วรรณยุกต์ ก่ ก้ ก๊ ก๋".into(), reason: None, rated: false }]
 }
 
 /// `--demo-bubble`: show the bubble with sample (or `items`) rows anchored at each point (global units; a fake 18-unit
@@ -715,7 +740,7 @@ fn self_check(v: &BubbleView, measured: &[f64]) -> String {
         format!("option {i}: chars {} measured {:.1} (incl slack) label_w {lw:.1} rendered {tw:.1}x{th:.1} pad L {lpad:.1} R {rpad:.1} (expect {:.1}/{:.1}) {}{} {}",
             s.label.chars().count(), measured[i], expect.0, expect.1, if wraps { "WRAPS" } else { "fits" }, if at_ok { "" } else { " MOVED" }, if ok { "OK" } else { "CHECK-FAIL" })
     }).collect();
-    if strip { for (i, at) in l.key_hints(v.selected).into_iter().enumerate() {
+    if strip { for (i, at) in l.key_hints(v.selected) {
         // inside the window, and on no other button (the laid-out ones)
         let inside = at.x >= 0.0 && at.y >= 0.0 && at.right() <= l.w && at.bottom() <= l.h;
         let covers = rb.iter().map(|b| Rect::new(f(b.origin.x), f(b.origin.y), f(b.size.width), f(b.size.height)))

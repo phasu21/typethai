@@ -539,7 +539,7 @@ impl SettingsView {
                 Some(SettingItem::new("Show the input language", badge).description("A flag shows by the caret: when the keyboard switches between Thai and English, and while a text field is focused with nothing typed in it yet.")),
                 self.snap.input_badge.then(|| SettingItem::new("Show it again after", badge_delay).description("How long a pause in typing brings the flag back while the same text field still has focus. Off: it shows once when focus lands in the field, and a pause never brings it back.")),
                 Some(SettingItem::new("Pick with", pick).description("Arrow keys: while the bubble is up, Up moves into it, then Left or Right chooses and Enter or Up applies; Down or Esc leaves. Until Up the arrows move the cursor. Ctrl+1–3: Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion; otherwise those keys reach the app.")),
-                Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first. A new word is suggested after you type it three times.")),
+                Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first, and a word you often type next is offered after a pause. A new word is suggested after you type it three times.")),
                 Some(SettingItem::new("Finish words from my typing", predict).description("A model of your own typing finishes the word you are typing, in Thai or English, offers words the built-in lists do not have, and adds its guess to the next-word rows. Learned from the lines you finish; nothing leaves this computer.")),
                 Some(SettingItem::new("Forget learned words", forget).description(learned))].into_iter().flatten().collect())
     }

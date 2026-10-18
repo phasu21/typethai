@@ -131,8 +131,12 @@
 - [ ] Next word, model beside pairs: type a line with a rare word pair (a name, jargon) and finish it with Enter twice
   or three times, then type the first word and pause: the pair rows come from the built-in list and the last row is the
   model's own follower. Settings → *Finish words from my typing* off: the model's row goes, the built-in rows stay.
+- [ ] Next word, your habits: type `ok cool` (Space between, Enter after) twice, then `ok ` and pause. The strip shows
+  นา first (Tab applies it), then your followers of `ok` best first; with four options the fourth has no digit
+  keycap, Up then arrows or a click picks it. Settings → *Learn from my typing* off: only the built-in pairs remain.
 - [ ] Click each button, or just above a smaller one: that option is applied. Click the gap between two buttons: the click reaches the app, as anywhere outside the buttons.
 - [ ] Shift+↓ / Shift+↑ move the highlight along the strip; clicks still land on the right button afterwards.
+- [ ] Thumbs: type `ok ` (นา offered) and hold Shift: นา's key hint turns into 👍 👎, and the other options keep theirs. Release Shift: the key hint is back. Shift held, click 👎: นา moves behind the next words and Tab applies the first of them; `prefs.json` lists `ok` under `offer_last`. Type `ok ` again: นา shows alone, then lands last after the pause, however many 👎. 👍 puts it back in front. Without Shift a click there applies the option.
 - [ ] The strip sits above the caret line (rows stay below); at the top of the screen it drops below the caret; near the right edge it stays on screen.
 - [ ] ⌃⌥R on a selection, and AI rewrite presets, "Rewriting…" and the result, are always rows.
 - [ ] Settings → Word suggestions → Bubble layout: Vertical gives the old rows on the next bubble and survives a restart (`prefs.json` has `"bubble_layout": "vertical"`); an older prefs.json opens as Horizontal.

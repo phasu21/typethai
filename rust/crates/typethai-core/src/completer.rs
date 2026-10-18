@@ -322,6 +322,8 @@ impl WordMemory {
     pub fn mass(&self) -> f64 { let r = 0.5f64.powf(1.0 / HALF_LIFE); (1.0 - r.powf(self.clock as f64)) / (1.0 - r) }
     /// How many times `word` was finished, decayed.
     pub fn count(&self, word: &str) -> f64 { self.words.get(&word.to_ascii_lowercase()).map_or(0.0, |s| s.at(self.clock)) }
+    /// The words finished right after `prev`, with their decayed counts, in no particular order.
+    pub fn followers<'a>(&'a self, prev: &str) -> impl Iterator<Item = (&'a str, f64)> + 'a { self.after(prev, "") }
     fn with_prefix<'a: 'p, 'p>(&'a self, p: &'p str) -> impl Iterator<Item = (&'a str, f64)> + 'p { starting(&self.words, p, self.clock) }
     fn after<'a: 'p, 'p>(&'a self, prev: &str, p: &'p str) -> impl Iterator<Item = (&'a str, f64)> + 'p {
         self.pairs.get(&prev.to_ascii_lowercase()).into_iter().flat_map(move |m| starting(m, p, self.clock))

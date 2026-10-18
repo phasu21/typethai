@@ -434,19 +434,22 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => { unsafe { CGEventTapEnable(st.tap_port, true) }; false }
         CGEventType::LeftMouseDown | CGEventType::RightMouseDown | CGEventType::OtherMouseDown => {
             let p = e.location();
-            match bridge::geom().and_then(|g| g.hit(p.x, p.y)) {
-                // on the bubble: swallow so the click never reaches (or focuses) it; left click on a row accepts
-                Some(row) => { if let (CGEventType::LeftMouseDown, Some(i)) = (ty, row) { let o = st.app.engine.on_key(Key::Hotkey(Hotkey::Accept(i))); run_actions(st, o.actions); } true }
+            match bridge::geom().and_then(|g| g.hit(p.x, p.y, e.get_flags().bits() & 0x20000 != 0)) {
+                // on the bubble: swallow so the click never reaches (or focuses) it; a left click on an option applies it,
+                // on a thumb rates it
+                Some(hit) => { if let (CGEventType::LeftMouseDown, Some(k)) = (ty, hit.key()) { let o = st.app.engine.on_key(k); run_actions(st, o.actions); st.app.maybe_save(); } true }
                 None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); arm_focus_look(st, false); arm_caret_follow(st); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
+        // Shift is a modifier: pressing or releasing it alone is a flags change, never a KeyDown/KeyUp. The bubble shows
+        // its thumbs while it is held
+        CGEventType::FlagsChanged => { bridge::SHIFT_HELD.store(e.get_flags().bits() & 0x20000 != 0, Ordering::SeqCst); false }
         CGEventType::KeyDown | CGEventType::KeyUp => {
             // every keystroke, whatever becomes of it: typing takes the input-language preview down
             if matches!(ty, CGEventType::KeyDown) { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-            if code == 0x38 || code == 0x3C { bridge::SHIFT_HELD.store(matches!(ty, CGEventType::KeyDown), Ordering::SeqCst); }
             let key = if matches!(ty, CGEventType::KeyUp) {
                 // the only release that matters: Tab, while it is held over the bubble
                 if code != 0x30 || !st.app.engine.is_bubble_key(&Key::TabUp) { return false }
@@ -593,7 +596,7 @@ fn arm_tap(st: &mut State) -> bool {
     st.tap = None; st.tap_port = std::ptr::null();
     if no_permission() { return false }
     let tap = match CGEventTap::new(CGEventTapLocation::Session, CGEventTapPlacement::HeadInsertEventTap, CGEventTapOptions::Default,
-        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e)) {
+        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e)) {
         Ok(t) => t,
         Err(_) => return false,
     };

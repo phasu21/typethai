@@ -44,13 +44,14 @@ impl UiMsg {
     /// a result in place, which should not flip the layout under the reader.
     pub fn show(items: Vec<BubbleItem>, pref: BubbleLayout, anchor: Anchor) -> UiMsg {
         let layout = if items.iter().any(|i| matches!(i.kind, BubbleKind::Rewrite(_))) { BubbleLayout::Vertical } else { pref };
-        UiMsg::Show { items: items.iter().map(|i| Opt { reason: i.reason(), label: i.label.clone() }).collect(), layout, anchor }
+        UiMsg::Show { items: items.iter().map(|i| Opt { reason: i.reason(), label: i.label.clone(), rated: i.rated_word().is_some() }).collect(), layout, anchor }
     }
 }
 
-/// One option as the bubble draws it: its label, and why it is offered (the badge on it).
+/// One option as the bubble draws it: its label, why it is offered (the badge on it), and whether Shift shows thumbs on
+/// it to rate it (`Hotkey::Rate`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Opt { pub label: String, pub reason: Option<Reason> }
+pub struct Opt { pub label: String, pub reason: Option<Reason>, pub rated: bool }
 
 /// The flag on a conversion's badge, a bundled square SVG (`flags/`) for the language its text becomes: the US flag for
 /// English, as the keys are the US layout's. A typo fix's badge shows a spell-check icon instead.
@@ -81,6 +82,9 @@ pub const DIGIT_CAP_W: f64 = 18.0;
 pub const KEYCAP_GAP: f64 = 2.0;
 pub const KEYCAP_H: f64 = 18.0;
 pub const KEYCAP_FONT_PX: f64 = 11.0;
+/// Options with a digit shortcut (Tab+1..3, Ctrl+1..3) and so a digit hint. A fourth (next words beside a layout flip)
+/// is picked with the arrows or a click.
+pub const DIGIT_ROWS: usize = 3;
 /// A row's badge: gpui-kit's Medium `Badge` size, round, in its own column before the key hint.
 pub const BADGE_D: f64 = 16.0;
 pub const BADGE_ICON: f64 = 10.0;
@@ -132,6 +136,11 @@ pub const KEY_TAB_W: f64 = 26.0;
 pub const KEY_DIGIT_W: f64 = 14.0;
 pub const KEY_FONT_PX: f64 = 9.5;
 pub const KEY_RADIUS: f64 = 3.0;
+/// The thumbs Shift shows on a rated option (`Opt::rated`), in place of its key hint: up then down, `THUMB_GAP` apart.
+/// A strip button has them as pills like its key hint (`KEY_H` tall); a row as keycaps in its key hint slot.
+pub const THUMB_W: f64 = 16.0;
+pub const THUMB_GAP: f64 = 2.0;
+pub const THUMB_ICON: f64 = 10.0;
 /// The key hints' fill when the system accent colour cannot be read: macOS's default blue.
 pub const ACCENT_FALLBACK: (f32, f32, f32) = (0.0, 0.478, 1.0);
 /// Text on an accent fill: dark on a light accent (yellow, graphite's light grey), white otherwise. sRGB 0..1.
@@ -228,25 +237,58 @@ pub fn max_width_for(visible_w: f64) -> f64 { visible_w - 2.0 * SCREEN_MARGIN }
 /// `scale` converts logical units to the global units of `frame` (Windows DPI; 1.0 on macOS).
 #[derive(Clone, Debug, PartialEq)]
 /// `solid` = what is drawn besides the options: the rows' panel and badges, a strip's key hints; the window's transparent margin is not.
-pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub solid: Vec<Rect>, pub scale: f64 }
+/// `thumbs` = the thumbs Shift shows on the rated options: (option, up, box).
+pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub solid: Vec<Rect>, pub thumbs: Vec<(usize, bool, Rect)>, pub scale: f64 }
+/// What a click on the bubble lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// An option: it is applied.
+    Pick(usize),
+    /// A thumb on an option, up or down, while Shift is held.
+    Rate(usize, bool),
+    /// What else the bubble draws (the panel's padding, a badge's or key hint's overhang): nothing happens.
+    Bubble,
+}
+impl Hit {
+    /// The engine key a click here sends, if any.
+    pub fn key(self) -> Option<crate::engine::Key> {
+        use crate::engine::{Hotkey, Key};
+        match self { Hit::Pick(i) => Some(Key::Hotkey(Hotkey::Accept(i))), Hit::Rate(i, up) => Some(Key::Hotkey(Hotkey::Rate(i, up))), Hit::Bubble => None }
+    }
+}
 impl Geom {
-    /// Option index under a global point, if the point is on what the bubble draws (Some(None) = on the bubble but not
-    /// on an option: the panel's padding, a badge's or key hint's overhang). None off it, the transparent margin and the
-    /// gaps between strip buttons too,
-    /// so those clicks reach the app.
-    pub fn hit(&self, x: f64, y: f64) -> Option<Option<usize>> {
+    /// What a global point is on, if it is on what the bubble draws. None off it, the transparent margin and the gaps
+    /// between strip buttons too, so those clicks reach the app. The thumbs take clicks only while `shift` is held, as
+    /// that is when they show; they sit over a button's edge, so they win over it.
+    pub fn hit(&self, x: f64, y: f64, shift: bool) -> Option<Hit> {
         if !self.frame.contains(x, y) { return None }
         let (lx, ly) = ((x - self.frame.x) / self.scale, (y - self.frame.y) / self.scale);
-        if let Some(i) = self.cells.iter().position(|c| c.contains(lx, ly)) { return Some(Some(i)) }
-        self.solid.iter().any(|r| r.contains(lx, ly)).then_some(None)
+        if let Some(&(i, up, _)) = self.thumbs.iter().find(|(_, _, r)| shift && r.contains(lx, ly)) { return Some(Hit::Rate(i, up)) }
+        if let Some(i) = self.cells.iter().position(|c| c.contains(lx, ly)) { return Some(Hit::Pick(i)) }
+        self.solid.iter().any(|r| r.contains(lx, ly)).then_some(Hit::Bubble)
     }
 }
 impl Layout {
-    /// Each strip button's key hint with option `sel` highlighted: on its top edge near the left corner, the wider Tab
-    /// one on the highlighted button. Rows keep theirs inline (none here).
-    pub fn key_hints(&self, sel: usize) -> Vec<Rect> {
+    /// Each strip button's key hint with option `sel` highlighted, with the option it belongs to: on its top edge near
+    /// the left corner, the wider Tab one on the highlighted button. A button past `DIGIT_ROWS` has no digit, so only
+    /// its Tab when highlighted. Rows keep theirs inline (none here).
+    pub fn key_hints(&self, sel: usize) -> Vec<(usize, Rect)> {
         if self.kind == BubbleLayout::Vertical { return vec![] }
-        (0..self.cells.len()).map(|i| { let b = self.button(i, sel); Rect::new(b.x + KEY_DX, b.y - KEY_UP, if i == sel { KEY_TAB_W } else { KEY_DIGIT_W }, KEY_H) }).collect()
+        (0..self.cells.len()).filter(|&i| i == sel || i < DIGIT_ROWS)
+            .map(|i| { let b = self.button(i, sel); (i, Rect::new(b.x + KEY_DX, b.y - KEY_UP, if i == sel { KEY_TAB_W } else { KEY_DIGIT_W }, KEY_H)) }).collect()
+    }
+    /// The thumbs on each rated option with option `sel` highlighted: (option, up, box). A strip button has them where
+    /// its key hint is; a row at the right of its key hint slot, centred on the row. `cells`: the options as laid out
+    /// (a row's height follows its wrapped label; a strip button is `button`).
+    pub fn thumbs(&self, cells: &[Rect], sel: usize, rated: &[bool]) -> Vec<(usize, bool, Rect)> {
+        let pair = |x: f64, y: f64, w: f64, h: f64| [(true, Rect::new(x, y, w, h)), (false, Rect::new(x + w + THUMB_GAP, y, w, h))];
+        (0..cells.len().min(rated.len())).filter(|&i| rated[i]).flat_map(|i| {
+            let at = match self.kind {
+                BubbleLayout::Horizontal => { let b = self.button(i, sel); pair(b.x + KEY_DX, b.y - KEY_UP, THUMB_W, KEY_H) }
+                BubbleLayout::Vertical => { let c = cells[i]; pair(c.right() - ROW_PX - 2.0 * DIGIT_CAP_W - THUMB_GAP, c.y + (c.h - KEYCAP_H) / 2.0, DIGIT_CAP_W, KEYCAP_H) }
+            };
+            at.map(|(up, r)| (i, up, r))
+        }).collect()
     }
     /// Each row's badge, centred in the badge column. A strip has none: its buttons carry their reason inside.
     pub fn badges(&self) -> Vec<(Reason, Rect)> {
@@ -256,7 +298,7 @@ impl Layout {
     }
     /// What takes clicks before gpui has laid the bubble out: the surfaces, the badges and the key hints.
     pub fn solid(&self, sel: usize) -> Vec<Rect> {
-        self.surfaces.iter().copied().chain(self.badges().into_iter().map(|(_, r)| r)).chain(self.key_hints(sel)).collect()
+        self.surfaces.iter().copied().chain(self.badges().into_iter().map(|(_, r)| r)).chain(self.key_hints(sel).into_iter().map(|(_, r)| r)).collect()
     }
 }
 pub static SHIFT_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -307,7 +349,7 @@ mod tests {
         match UiMsg::show(items, pref, Anchor { caret: None, field: None, mouse: Some((0.0, 0.0)) }) { UiMsg::Show { items, layout, .. } => (items, layout), m => panic!("{m:?}") }
     }
     fn item(label: &str, kind: BubbleKind) -> BubbleItem { BubbleItem { label: label.into(), kind } }
-    fn opt(label: &str, reason: Option<Reason>) -> Opt { Opt { label: label.into(), reason } }
+    fn opt(label: &str, reason: Option<Reason>) -> Opt { Opt { label: label.into(), reason, rated: false } }
     #[test] fn short_options_make_a_strip_sized_to_its_buttons() {
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
         assert_eq!(l.kind, BubbleLayout::Horizontal);
@@ -358,21 +400,22 @@ mod tests {
     }
     #[test] fn a_click_finds_the_row_or_the_button_under_it() {
         let l = plain(&[60.0, 260.0, 30.0], 300.0, BubbleLayout::Vertical);
-        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0) };
-        assert_eq!(rows.hit(50.0, 50.0), None, "off the bubble");
-        assert_eq!(rows.hit(150.0, 100.0 + INSET + 5.0), Some(Some(0)));
-        assert_eq!(rows.hit(150.0, 100.0 + INSET + ROW_H + 40.0), Some(Some(1)), "the second line of a wrapped row");
-        assert_eq!(rows.hit(150.0, 100.0 + INSET + 3.0 * ROW_H + 1.0), Some(Some(2)));
-        assert_eq!(rows.hit(150.0, 100.0 + SHADOW_M + 2.0), Some(None), "the panel's padding");
-        assert_eq!(rows.hit(150.0, 101.0), None, "the shadow margin: the click is the app's");
+        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let hit = |x: f64, y: f64| rows.hit(x, y, false);
+        assert_eq!(hit(50.0, 50.0), None, "off the bubble");
+        assert_eq!(hit(150.0, 100.0 + INSET + 5.0), Some(Hit::Pick(0)));
+        assert_eq!(hit(150.0, 100.0 + INSET + ROW_H + 40.0), Some(Hit::Pick(1)), "the second line of a wrapped row");
+        assert_eq!(hit(150.0, 100.0 + INSET + 3.0 * ROW_H + 1.0), Some(Hit::Pick(2)));
+        assert_eq!(hit(150.0, 100.0 + SHADOW_M + 2.0), Some(Hit::Bubble), "the panel's padding");
+        assert_eq!(hit(150.0, 101.0), None, "the shadow margin: the click is the app's");
         // strip at 1.5x (Windows DPI): slots at x 10..80, 84..176, 180..302, y 10..44 logical, and no box around them
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
-        let strip = Geom { frame: Rect::new(0.0, 0.0, 468.0, 81.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0) };
-        let at = |x: f64, y: f64| strip.hit(x * 1.5, y * 1.5);
-        assert_eq!((at(15.0, 20.0), at(79.0, 20.0), at(100.0, 20.0), at(250.0, 20.0)), (Some(Some(0)), Some(Some(0)), Some(Some(1)), Some(Some(2))));
-        assert_eq!(at(85.0, 12.0), Some(Some(1)), "a slot takes the click above its smaller button");
+        let strip = Geom { frame: Rect::new(0.0, 0.0, 468.0, 81.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let at = |x: f64, y: f64| strip.hit(x * 1.5, y * 1.5, false);
+        assert_eq!((at(15.0, 20.0), at(79.0, 20.0), at(100.0, 20.0), at(250.0, 20.0)), (Some(Hit::Pick(0)), Some(Hit::Pick(0)), Some(Hit::Pick(1)), Some(Hit::Pick(2))));
+        assert_eq!(at(85.0, 12.0), Some(Hit::Pick(1)), "a slot takes the click above its smaller button");
         assert_eq!(at(82.0, 20.0), None, "the gap between two slots: the app's");
-        assert_eq!(at(95.0, 8.0), Some(None), "a key hint's overhang applies nothing");
+        assert_eq!(at(95.0, 8.0), Some(Hit::Bubble), "a key hint's overhang applies nothing");
         assert_eq!(at(300.0, 5.0), None, "the shadow margin: the click is the app's");
         assert_eq!(at(306.0, 20.0), None, "right of the strip");
     }
@@ -382,6 +425,21 @@ mod tests {
         assert_eq!(shown(vec![word("help"), word("hello")], BubbleLayout::Horizontal), (vec![opt("help", None), opt("hello", None)], BubbleLayout::Horizontal));
         assert_eq!(shown(vec![word("help")], BubbleLayout::Vertical).1, BubbleLayout::Vertical);
         assert_eq!(shown(vec![fix, word("hello")], BubbleLayout::Horizontal).1, BubbleLayout::Vertical);
+    }
+    #[test] fn thumbs_take_clicks_only_while_shift_is_held() {
+        let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
+        // on the first button only, where its key hint is: up then down
+        let t = l.thumbs(&l.cells, 0, &[true, false, false]);
+        assert_eq!(t, vec![(0, true, Rect::new(16.0, 3.0, 16.0, 14.0)), (0, false, Rect::new(34.0, 3.0, 16.0, 14.0))]);
+        let g = Geom { frame: Rect::new(0.0, 0.0, l.w, l.h), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: t };
+        assert_eq!((g.hit(20.0, 12.0, true), g.hit(40.0, 12.0, true)), (Some(Hit::Rate(0, true)), Some(Hit::Rate(0, false))));
+        assert_eq!((g.hit(20.0, 12.0, false), g.hit(40.0, 12.0, false)), (Some(Hit::Pick(0)), Some(Hit::Pick(0))), "no Shift: the button's");
+        // rows: right of the key hint slot, centred on the row
+        let r = plain(&[60.0, 80.0], 1392.0, BubbleLayout::Vertical);
+        let c = r.cells[1];
+        assert_eq!(r.thumbs(&r.cells, 0, &[false, true]), vec![
+            (1, true, Rect::new(c.right() - ROW_PX - 38.0, c.y + (c.h - KEYCAP_H) / 2.0, 18.0, 18.0)),
+            (1, false, Rect::new(c.right() - ROW_PX - 18.0, c.y + (c.h - KEYCAP_H) / 2.0, 18.0, 18.0))]);
     }
     #[test] fn each_option_says_why_it_is_offered() {
         let words = vec![
@@ -394,8 +452,9 @@ mod tests {
             item("hello", BubbleKind::Typo { word: "hello".into() }),
             item("ภาษาไทย", BubbleKind::Complete { typed: "ภาษ".into(), insert: "ภาษาไทย".into() }),
         ];
+        // only the conversion of a finished word gets thumbs
         assert_eq!(shown(words, BubbleLayout::Horizontal).0, vec![
-            opt("สวัสดี", TH), opt("i dont", EN), opt("สวัสดี", TH), opt("i dont", EN), opt("ร้านอาหาร", TH), opt("l;ylfu", EN),
+            opt("สวัสดี", TH), opt("i dont", EN), Opt { rated: true, ..opt("สวัสดี", TH) }, opt("i dont", EN), opt("ร้านอาหาร", TH), opt("l;ylfu", EN),
             opt("hello", TYPO), opt("ภาษาไทย", None)]);
         let rw = |label: &str, r: RewriteRow| item(label, BubbleKind::Rewrite(r));
         let rows = vec![
@@ -417,23 +476,32 @@ mod tests {
         assert_eq!(l.badges(), vec![], "nothing hangs outside a button");
         assert_eq!((l.w, l.h), (312.0, 54.0));
         // the key hints 6 px in from the top-left corners: Tab on the highlighted button, its number on the others
-        assert_eq!(l.key_hints(0), vec![Rect::new(16.0, 3.0, 26.0, 14.0), Rect::new(90.0, 7.0, 14.0, 14.0), Rect::new(186.0, 7.0, 14.0, 14.0)]);
-        assert_eq!(l.key_hints(1)[..2], [Rect::new(16.0, 7.0, 14.0, 14.0), Rect::new(90.0, 3.0, 26.0, 14.0)], "the keycaps follow the buttons");
+        assert_eq!(l.key_hints(0), vec![(0, Rect::new(16.0, 3.0, 26.0, 14.0)), (1, Rect::new(90.0, 7.0, 14.0, 14.0)), (2, Rect::new(186.0, 7.0, 14.0, 14.0))]);
+        assert_eq!(l.key_hints(1)[..2], [(0, Rect::new(16.0, 7.0, 14.0, 14.0)), (1, Rect::new(90.0, 3.0, 26.0, 14.0))], "the keycaps follow the buttons");
         let window = Rect::new(0.0, 0.0, l.w, l.h);
-        for sel in 0..3 { assert!(l.key_hints(sel).iter().all(|b| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "nothing is clipped") }
+        for sel in 0..3 { assert!(l.key_hints(sel).iter().all(|(_, b)| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "nothing is clipped") }
         assert_eq!(l.text_x(), 23.0);
-        let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0) };
-        assert_eq!(g.hit(20.0, 5.0), Some(None), "a key hint's overhang applies nothing");
-        assert_eq!(g.hit(74.0, 5.0), None, "where a badge used to overhang: the app's");
-        assert_eq!(g.hit(76.0, 40.0), Some(Some(0)), "the mark's corner is the button's");
-        assert_eq!(g.hit(82.0, 30.0), None, "between two buttons: the app's");
+        let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let hit = |x: f64, y: f64| g.hit(x, y, false);
+        assert_eq!(hit(20.0, 5.0), Some(Hit::Bubble), "a key hint's overhang applies nothing");
+        assert_eq!(hit(74.0, 5.0), None, "where a badge used to overhang: the app's");
+        assert_eq!(hit(76.0, 40.0), Some(Hit::Pick(0)), "the mark's corner is the button's");
+        assert_eq!(hit(82.0, 30.0), None, "between two buttons: the app's");
+    }
+    #[test] fn a_fourth_option_has_no_digit_hint() {
+        // นา | lets | done | cool: only options 1-3 have a digit; the fourth shows its Tab once highlighted
+        let l = layout(&[20.0, 30.0, 35.0, 30.0], &[TH, None, None, None], 1392.0, BubbleLayout::Horizontal);
+        assert_eq!(l.key_hints(0).iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2]);
+        let on_fourth = l.key_hints(3);
+        assert_eq!(on_fourth.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(on_fourth[3].1.w, KEY_TAB_W, "the highlighted fourth gets the Tab keycap");
     }
     #[test] fn a_short_label_keeps_its_key_hint_clear_of_its_mark() {
         // "ok": the button widens so the Tab keycap on its top-left corner and the mark in its bottom-right one never
         // share a column, highlighted or not
         let l = layout(&[14.0], &[TYPO], 1392.0, BubbleLayout::Horizontal);
         for sel in [0, 1] {
-            let (k, b) = (l.key_hints(sel)[0], l.button(0, sel));
+            let (k, b) = (l.key_hints(sel)[0].1, l.button(0, sel));
             assert!(k.x + KEY_TAB_W <= b.right() - OPT_BORDER - MARK_INSET - MARK_D.max(MARK_FLAG_W), "Tab keycap {k:?} clear of the widest mark in {b:?}");
         }
     }
