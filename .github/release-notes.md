@@ -1,5 +1,22 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.13**
+- **Your own next words, also beside นา.** After a word and a pause, the words *you* usually type next come first
+  (any you typed after that word at least twice, best first), then the built-in pairs. They now also show when the
+  word just typed is offered in Thai: `ok ` → นา | lets | done | cool. The fourth option has no digit; reach it with
+  the arrow keys or a click.
+- **👍 / 👎 on a conversion.** Hold Shift over the bubble: the key hint of an option offered in Thai turns into two
+  thumbs. 👎 moves that conversion behind every other option, now and each time the word comes back (it is still
+  offered); 👍 puts it back in front.
+- **Finish sentence locally.** ⌃⌥R on selected text offers *Finish sentence locally*: a local Ollama model (Gemma 4 8B
+  by default, or the faster Typhoon 2.5 4B) continues it, with no key and nothing uploaded. Review it and press Tab.
+  Settings → AI rewrite → *Local model setup* starts Ollama and downloads the model for you.
+- **A tidier strip.** It sits above the caret line (below only at the top of the screen). The highlighted option is
+  larger and the others dimmed, all on one bottom edge with even gaps and no box around them. Why an option is offered
+  (🇹🇭 / 🇺🇸 or the spelling mark) is a faint mark inside its button.
+- **The arrow keys wait for ↑ again.** ← and → move the cursor until ↑ moves into the bubble, as in 0.5.8; then ←/→
+  choose and ↑ or Enter applies.
+
 **New in 0.5.12**
 - **The Accessibility permission repairs itself.** If typeThai starts without it, it no longer quits: it keeps running
   (the tray shows *Grant Accessibility…*), clears its own Accessibility record once per version so an older copy's
