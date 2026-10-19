@@ -86,6 +86,16 @@ pub fn click() -> Click {
 }
 pub fn check_now() { if let Some(tx) = WAKE.get() { let _ = tx.lock().unwrap().send(()); } }
 
+/// Whether the bubble's rail shows its download chip now. A chip click is the tray item's next step: check (nothing is
+/// known yet with the periodic check off, or the last one failed), restart into the staged update, or open the release
+/// page. No chip while the checker is already at it (`Checking`), once it has confirmed everything current
+/// (`UpToDate`), or while `Idle` with the periodic check on — that is only the moment before the first check, which
+/// happens on its own.
+pub fn chip() -> bool { chip_needed(&status(), AUTO.load(Ordering::SeqCst)) }
+fn chip_needed(s: &Status, auto: bool) -> bool {
+    match s { Status::Idle => !auto, Status::Checking | Status::UpToDate => false, _ => true }
+}
+
 fn check(manual: bool) {
     let before = status();
     if matches!(before, Status::Downloading(_)) { return }
@@ -314,5 +324,16 @@ mod tests {
     #[test] fn the_public_key_is_a_valid_point() {
         let k = <[u8; 32]>::try_from(unhex(PUBLIC_KEY).unwrap().as_slice()).unwrap();
         assert!(ed25519_dalek::VerifyingKey::from_bytes(&k).is_ok());
+    }
+    #[test] fn the_chip_shows_when_a_click_can_say_something() {
+        // hidden when nothing can come of a click; a click is the tray item's next step otherwise
+        assert!(!chip_needed(&Status::Idle, true), "the periodic check is seconds away, on its own");
+        assert!(chip_needed(&Status::Idle, false), "no periodic check: the chip is the way to start one");
+        assert!(!chip_needed(&Status::Checking, true));
+        assert!(!chip_needed(&Status::UpToDate, false));
+        assert!(chip_needed(&Status::Failed, true), "a click retries");
+        assert!(chip_needed(&Status::Downloading("0.5.15".into()), true));
+        assert!(chip_needed(&Status::Ready { version: "0.5.15".into(), staged: PathBuf::new() }, true));
+        assert!(chip_needed(&Status::Available { version: "0.5.15".into(), page: "p".into() }, true));
     }
 }

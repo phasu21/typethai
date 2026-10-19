@@ -45,8 +45,12 @@ Wine 10 on Linux (Notepad, xdotool). This checklist is for real machines. Mark e
 - [ ] AltGr layouts (e.g. Polish, German) on Windows: AltGr = Ctrl+Alt. Check that AltGr+Z / AltGr+X don't trigger undo or force-convert unexpectedly.
 
 ## Suggestion bubble
-- [ ] It appears at the caret in Notepad (GetGUIThreadInfo), Chrome / Word (UIA TextPattern2) and TextEdit / Safari (AXBoundsForRange).
-- [ ] Where no caret is available (some Electron apps, terminals), it appears near the mouse pointer.
+- [ ] It appears at the caret in Notepad (GetGUIThreadInfo), Word (UIA TextPattern2), Chrome / Edge / Electron /
+  Chromium apps (UIA TextPattern: the caret is their collapsed selection) and TextEdit / Safari (AXBoundsForRange).
+- [ ] While typing, the bubble and the input-language preview keep to the caret (Windows re-reads it after the key,
+  like the macOS tap; `set TYPETHAI_DEBUG=1` logs `typethai: anchor source=caret|field|mouse …`).
+- [ ] Where no caret is available (a terminal, an app that hides it, some Chromium widgets), it appears at the field
+  or near the mouse pointer.
 - [ ] It never takes focus: typing continues into the app while it is visible.
 - [ ] It stays on top of full-screen apps (macOS Spaces / full screen; collection behaviour is not set yet, so this may fail).
 - [ ] Thai renders correctly. Windows uses the "Leelawadee UI" font; under Wine it showed tofu boxes because that font is missing there.

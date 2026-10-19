@@ -163,6 +163,21 @@
 - [ ] ⌃⌥P (or the tray menu) while the pill is up: it goes, and does not come back until typeThai is unpaused.
 - [ ] Windows (Notepad): the same, including a click from the browser into Notepad and back.
 
+## Download chip on the bubble (not run live; `--demo-bubble --update` only so far)
+- [x] `--demo-bubble --update --screenshot PNG` (and `--light`): the chip rides at the end of the strip's suggestions,
+  standing on the rail's floor like the buttons, the download icon in the accent colour; the run also exercises the
+  chip's hover tip the way a hover does and writes a `PNG-tip.png` beside the shot. No chip on the vertical rows
+  (`--vertical`), none without `--update`.
+- [ ] Hovering the chip shows the tip under it — *Update to version x.y.z* (or *Update typeThai* before a version is
+  known) — and the tip ignores the mouse: it takes no focus, and a click on it is swallowed instead of reaching the
+  tip. It follows the chip's screen spot, flips above when the screen ends too soon below, and goes away when the
+  bubble moves, hides, or the chip does.
+- [ ] With a real update in progress (publish a release newer than the running one, or point `TYPETHAI_UPDATE_URL` at
+  a fake `releases/latest`): while the checker is downloading, staging or waiting to be opened by hand, the chip
+  appears on the next bubble; clicking it does what the tray's update item does right then — restart into the staged
+  update, start it going, or open the release page. With nothing to act on (checking, all current), no chip.
+- [ ] The chip never takes focus, and clicks elsewhere reach the app as usual.
+
 ## Off in chosen apps (agent-verified on the Mac with System Events keystrokes into TextEdit; Windows not run)
 - [x] Tray shows *Turn off in TextEdit* after a key in TextEdit; clicking it writes `"off_apps":[{"id":"com.apple.textedit","name":"TextEdit"}]` and the item becomes *Turn on in TextEdit*.
 - [x] With TextEdit off, `l;ylfu ` + Tab types `l;ylfu ⇥` unchanged: no bubble, no language preview. *Turn on in TextEdit* and the same keys give `สวัสดี `.

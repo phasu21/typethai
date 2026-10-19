@@ -43,6 +43,10 @@ pub struct BubbleView {
     pub text_bounds: std::rc::Rc<std::cell::RefCell<Vec<Option<Bounds<Pixels>>>>>,
     /// `--probe-caret`: draw a solid red marker instead of the rows.
     pub marker: bool,
+    /// The download chip rides at the strip's end while the updater is not sure everything is current (`update::chip`).
+    pub update: bool,
+    /// The chip's hover tooltip, opened with the bubble (its text is fresh at every show; only set at creation).
+    tip: Option<TooltipWin>,
 }
 
 /// The bundled typeThai Sans; the system Thai fonts only if it failed to load.
@@ -173,7 +177,22 @@ impl Render for BubbleView {
                 let thumbs = if shift { l.thumbs(&l.cells, selected, &rated) } else { vec![] };
                 let thumbs = thumbs.into_iter().map(|(i, up, at)| div().absolute().left(px(at.x as f32)).top(px(at.y as f32))
                     .rounded(px(bridge::KEY_RADIUS as f32)).bg(surface).child(thumb_key(i, up, at.w, at.h, bridge::KEY_RADIUS)));
-                root.pl(px(l.margin as f32)).pt(px(l.margin as f32)).child(buttons)
+                // the download chip at the rail's end, on its own small backing like a keycap, its icon in the user's
+                // accent: no hint, no label, nothing stateful — a click is the tray's update item (see `Hit::Update`),
+                // and hovering it names the release below the chip (the tip panel ignores the mouse)
+                let tip = self.tip.clone();
+                let chip = l.update.map(|c| div().id("chip").absolute().left(px(c.x as f32)).top(px(c.y as f32))
+                    .w(px(bridge::UPDATE_CHIP_D as f32)).h(px(bridge::UPDATE_CHIP_D as f32)).flex_none()
+                    .rounded(px(6.)).bg(surface).shadow_md().flex().items_center().justify_center()
+                    .on_hover(move |hovered, _, cx| {
+                        let Some(tip) = &tip else { return };
+                        if let (true, Some(g)) = (*hovered, bridge::geom()) {
+                            let chip = Rect::new(g.frame.x + c.x * g.scale, g.frame.y + c.y * g.scale, c.w * g.scale, c.h * g.scale);
+                            tip.show(chip, cx);
+                        } else { tip.hide(cx) }
+                    })
+                    .child(Icon::empty().path("icons/download.svg").with_size(px(bridge::UPDATE_CHIP_ICON as f32)).text_color(key_bg)));
+                root.pl(px(l.margin as f32)).pt(px(l.margin as f32)).child(buttons).when_some(chip, |d, c| d.child(c))
                     .children(keys).children(thumbs).into_any_element()
             }
             BubbleLayout::Vertical => {
@@ -249,11 +268,12 @@ impl Ui {
     /// (and widths, if fonts differ) come from the real layout via `reconcile` on the next frames. Returns the initial placement.
     fn show(&mut self, items: Vec<Opt>, wanted: BubbleLayout, anchor: Anchor, cx: &mut App) -> Option<Placement> {
         let view = self.view.clone(); let (visible, real) = (self.visible, self.size);
+        let update_chip = self.view.read(cx).update;
         let res = self.handle.update(cx, |_, window, cx| {
             // up to the visible width of the monitor the bubble will be on (minus margins): rows wrap, a strip gives way to rows
             let mons = native::monitors();
             let max_w = anchor.caret.map(|c| (c.x, c.y)).or(anchor.mouse).and_then(|(x, y)| placement::monitor_for(&mons, x, y)).map(|i| bridge::max_width_for(mons[i].visible.w)).unwrap_or(600.0);
-            let l = bridge::layout(&measure(window, &items), &items.iter().map(|o| o.reason).collect::<Vec<_>>(), max_w, wanted);
+            let l = bridge::layout(&measure(window, &items), &items.iter().map(|o| o.reason).collect::<Vec<_>>(), max_w, wanted, update_chip);
             // rows only know their height once laid out: the same layout as the bubble on screen (typing on, rows
             // refreshed in place) keeps its real size, so the window is not resized to the guess and back
             let size = if visible && l == view.read(cx).layout { real } else { (l.w, l.h) };
@@ -294,10 +314,11 @@ impl Ui {
         let p = placement::place(&anchor, size, &mons, &opts)?;
         // run after the current gpui update returns, so gpui isn't borrowed and receives the resulting resize
         let n = self.native.clone(); let r = p.rect;
-        // unchanged rect (e.g. a caret-follow that didn't move): don't touch the window -> no flicker
-        if self.last != Some(r) || !self.visible { self.last = Some(r); cx.foreground_executor().spawn(async move { native::show(&n, r) }).detach(); }
+        // unchanged rect (e.g. a caret-follow that didn't move): don't touch the window -> no flicker; moved: the tip
+        // would hang off its old spot, so it goes until the pointer enters the chip again
+        if self.last != Some(r) || !self.visible { self.last = Some(r); cx.foreground_executor().spawn(async move { native::show(&n, r) }).detach(); if let Some(tip) = self.view.read(cx).tip.clone() { tip.hide(cx) } }
         self.cells = self.laid_cells(cx);
-        bridge::set_geom(Some(Geom { frame: p.rect, scale: mons[p.monitor].size_scale, cells: self.cells.clone(), solid: self.laid_solid(cx), thumbs: self.laid_thumbs(cx) }));
+        bridge::set_geom(Some(Geom { frame: p.rect, scale: mons[p.monitor].size_scale, cells: self.cells.clone(), solid: self.laid_solid(cx), thumbs: self.laid_thumbs(cx), update: self.view.read(cx).layout.update }));
         self.size = size;
         Some(p)
     }
@@ -307,9 +328,12 @@ impl Ui {
     fn reconcile(&mut self, cx: &mut App) -> Option<Placement> {
         if !self.visible { return None }
         let b = self.view.read(cx).panel.get()?;
-        // the window holds what is drawn and the transparent margin around it
-        let m = self.view.read(cx).layout.margin;
-        let real = ((b.origin.x + b.size.width).as_f32().ceil() as f64 + m, (b.origin.y + b.size.height).as_f32().ceil() as f64 + m);
+        // the window holds what is drawn and the transparent margin around it (the strip's download chip rides after
+        // the buttons, so the drawn part reaches one `OPT_GAP + UPDATE_CHIP_D` further right)
+        let v = self.view.read(cx);
+        let chip = if v.layout.update.is_some() { bridge::OPT_GAP + bridge::UPDATE_CHIP_D } else { 0.0 };
+        let m = v.layout.margin;
+        let real = ((b.origin.x + b.size.width).as_f32().ceil() as f64 + chip + m, (b.origin.y + b.size.height).as_f32().ceil() as f64 + m);
         if (real.0 - self.size.0).abs() < 0.5 && (real.1 - self.size.1).abs() < 0.5 && self.laid_cells(cx) == self.cells { return None }
         self.place(real, cx)
     }
@@ -320,6 +344,7 @@ impl Ui {
     }
     fn hide(&mut self, cx: &mut App) {
         bridge::set_geom(None); self.anchor = None; self.last = None;
+        if let Some(tip) = self.view.read(cx).tip.clone() { tip.hide(cx) }
         if self.visible { let n = self.native.clone(); cx.foreground_executor().spawn(async move { native::hide(&n) }).detach(); self.visible = false; }
     }
 }
@@ -348,7 +373,8 @@ fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut A
     (handle, view, n)
 }
 fn open_bubble(cx: &mut App) -> Ui {
-    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false }));
+    let tip = TooltipWin::open(cx);
+    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical, false), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false, update: false, tip: Some(tip) }));
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![], shift: false }
 }
 
@@ -439,6 +465,80 @@ impl BadgeWin {
     }
 }
 
+/// The download chip's hover tooltip: one short line — most often "Update to version x.y.z", from the updater's status
+/// so it names what the click is about to reach — in a small panel past the chip. It ignores the mouse everywhere
+/// (macOS natively; on Windows the hook swallows a click on it, `bridge::TIP_AT`), so it never takes focus or eats a
+/// keypress anywhere else.
+struct TooltipWin { handle: AnyWindowHandle, view: Entity<TipView>, native: native::Native }
+#[derive(Clone)] struct TipView { text: SharedString }
+const TIP_TEXT_PX: f64 = 13.0; const TIP_PX: f64 = 8.0; const TIP_PY: f64 = 5.0; const TIP_GAP: f64 = 3.0;
+impl Render for TipView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        div().flex_none().px(px(TIP_PX as f32)).py(px(TIP_PY as f32)).rounded(px(6.)).bg(t.popover).border_1()
+            .border_color(t.border).shadow_md().font(thai_font()).text_size(px(TIP_TEXT_PX as f32))
+            .text_color(t.popover_foreground).whitespace_nowrap().child(self.text.clone())
+    }
+}
+impl Clone for TooltipWin {
+    fn clone(&self) -> Self { TooltipWin { handle: self.handle, view: self.view.clone(), native: self.native.clone() } }
+}
+impl TooltipWin {
+    fn open(cx: &mut App) -> TooltipWin {
+        let (handle, view, native) = open_popup(10., 10., cx, |cx| cx.new(|_| TipView { text: SharedString::default() }));
+        native::click_through(&native);
+        TooltipWin { handle, view, native }
+    }
+    /// Under `chip` (global units), right edge on the chip's; above it when the screen ends too soon for the tip.
+    fn show(&self, chip: Rect, cx: &mut App) { self.show_text(chip, &tip_text(), cx) }
+    /// The same placement for an exact text (`--demo-bubble`'s screenshot needs one: the demo's updater never asks GitHub).
+    fn show_text(&self, chip: Rect, text: &str, cx: &mut App) {
+        let (w, th) = self.handle.update(cx, |_, window, _| tip_box(window, text)).unwrap_or((140.0, TIP_TEXT_PX));
+        self.view.update(cx, |v, cx| { v.text = text.into(); cx.notify(); });
+        let h = th + 2.0 * TIP_PY + bridge::BORDER * 2.0;
+        let mon = placement::monitor_for(&native::monitors(), chip.x + chip.w / 2.0, chip.y + chip.h / 2.0).unwrap_or(0);
+        let vis = native::monitors()[mon].visible;
+        let r = Rect::new((chip.right() - w).max(vis.x + 8.0), chip.bottom() + TIP_GAP, w, h);
+        let r = if r.bottom() > vis.bottom() - 8.0 { Rect::new(r.x, chip.y - TIP_GAP - h, r.w, r.h) } else { r };
+        let n = self.native.clone();
+        cx.foreground_executor().spawn(async move { native::show(&n, r) }).detach();
+        self.at(Some(r));
+    }
+    fn hide(&self, cx: &mut App) {
+        self.at(None);
+        let n = self.native.clone();
+        cx.foreground_executor().spawn(async move { native::hide(&n) }).detach();
+    }
+    fn at(&self, r: Option<Rect>) { *bridge::TIP_AT.lock().unwrap() = r; }
+}
+/// The chip's tip text: the release it is on its way to (downloading, staged, or waiting to be opened by hand); before
+/// a version is known, just the promise.
+fn tip_text() -> String {
+    let v = match update::status() {
+        update::Status::Downloading(v) => Some(v),
+        update::Status::Ready { version, .. } | update::Status::Available { version, .. } => Some(version),
+        _ => None,
+    };
+    match v {
+        Some(v) => format!("Update to version {}", v.trim_start_matches('v')),
+        None => "Update typeThai".into(),
+    }
+}
+/// The tip's text as drawn: its width, and its full line box (ascent + descent; Thai marks grow past the px size), so
+/// the window is exactly the tip.
+fn tip_box(window: &Window, text: &str) -> (f64, f64) {
+    let run = TextRun { len: text.len(), font: thai_font(), color: black(), background_color: None, underline: None, strikethrough: None };
+    let s = window.text_system().shape_line(text.into(), px(TIP_TEXT_PX as f32), &[run], None);
+    (s.width.as_f32().ceil() as f64 + 2.0 * TIP_PX + 2.0 * bridge::BORDER, (s.ascent + s.descent).as_f32().ceil() as f64)
+}
+/// The tip's text in the bubble demo: with the version after the built one (`--screenshot` exercises `show_text`, which
+/// takes the text verbatim, without asking the updater, which never talks to GitHub in the demo).
+fn tip_demo_text() -> String {
+    let p: Vec<u32> = update::CURRENT.split('.').filter_map(|s| s.parse().ok()).collect();
+    let next = if p.len() == 3 { format!("{}.{}.{}", p[0], p[1], p[2] + 1) } else { update::CURRENT.into() };
+    format!("Update to version {next}")
+}
+
 fn app() -> Application { application().with_assets(AppAssets).with_quit_mode(QuitMode::Explicit) }
 /// typeThai Sans: Noto Sans Thai with Noto Sans's Latin letters (SIL OFL 1.1, `fonts/OFL.txt`,
 /// `scripts/fonts/build-typethai-sans.py`), bundled so text looks and measures the same on every platform.
@@ -520,7 +620,11 @@ pub fn run(rx: Receiver<UiMsg>) {
         None => {}
     }
                     let g = update::generation();
-                    if g != update_gen { update_gen = g; if let Some(t) = &tray { t.set_update(&update::status()) } settings::refresh(&settings_win, cx) }
+                    if g != update_gen { update_gen = g; if let Some(t) = &tray { t.set_update(&update::status()) } settings::refresh(&settings_win, cx);
+                        let chip = update::chip(); let tip = ui.view.read(cx).tip.clone();
+                        ui.view.update(cx, |v, _| v.update = chip);
+                        if !chip { if let Some(tip) = tip { tip.hide(cx) } }
+                    }
                     let front = bridge::front_app();
                     if front != front_app { if let Some(t) = &tray { t.set_front_app(front.as_ref()) } front_app = front; }
                     #[cfg(target_os = "macos")] super::platform::macos::sync_input_source();
@@ -576,7 +680,7 @@ pub fn demo_items() -> Vec<Opt> {
 /// while typing. With `shot`, shows once (first point or main-monitor centre), lets it lay out and paint,
 /// prints native vs. laid-out geometry and a per-option self-check, captures the bubble's own window to `shot` (PNG), and quits.
 /// `backdrop` (Some(true): light) opens a window of sample text behind the first point, to see the bubble over an app.
-pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, hold: Option<f32>, wanted: BubbleLayout, light: bool, backdrop: Option<bool>) {
+pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, hold: Option<f32>, wanted: BubbleLayout, light: bool, backdrop: Option<bool>, update: bool) {
     let sets = if sets.is_empty() { vec![demo_items()] } else { sets };
     app().run(move |cx| {
         setup(cx);
@@ -594,7 +698,7 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
                 let anchor = if i % 4 == 3 { Anchor { caret: None, field: None, mouse: Some((x, y)) } }
                     else { Anchor { caret: Some(Rect::new(x, y, 2.0, 18.0)), field: Some(Rect::new(x - 40.0, y - 6.0, 360.0, 30.0)), mouse: None } };
                 let kind = if anchor.caret.is_some() { "caret" } else { "mouse" };
-                let pl = cx.update(|cx| { let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; v.focused = focused; v.hold = hold.map(held_at); cx.notify(); }); p });
+                let pl = cx.update(|cx| { ui.view.update(cx, |v, _| v.update = update); let p = ui.show(items.clone(), wanted, anchor, cx); ui.view.update(cx, |v, cx| { v.selected = select; v.focused = focused; v.hold = hold.map(held_at); cx.notify(); }); p });
                 eprintln!("demo {i}: anchor ({x},{y}) {kind} -> {:?}", pl);
                 // let gpui lay out, then fit the window to the real panel (a couple of frames)
                 for _ in 0..10 {
@@ -611,6 +715,20 @@ pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<
                     let chk = cx.update(|cx| { let w = h.update(cx, |_, w, _| measure(w, items)).unwrap_or_default(); self_check(v.read(cx), &w) });
                     eprintln!("{chk}");
                     match native::capture(&ui.native, path) { Ok(()) => eprintln!("screenshot -> {path}"), Err(e) => eprintln!("screenshot failed: {e}") }
+                    // with the chip, also run its tip the way a hover does (`show_text`: the demo's updater never
+                    // asks GitHub, so say the version after the built one) and capture the tip's own window
+                    if update {
+                        let tipchip = cx.update(|cx| { let tip = v.read(cx).tip.clone();
+                            let rect = |g: bridge::Geom, c: placement::Rect| Rect::new(g.frame.x + c.x * g.scale, g.frame.y + c.y * g.scale, c.w * g.scale, c.h * g.scale);
+                            match (tip, bridge::geom()) { (Some(tip), Some(mut g)) if g.update.is_some() => { let c = g.update.take().unwrap(); Some((tip, rect(g, c))) }, _ => None }
+                        });
+                        if let Some((tip, chip)) = tipchip {
+                            cx.update(|cx| tip.show_text(chip, &tip_demo_text(), cx));
+                            cx.background_executor().timer(Duration::from_millis(200)).await;
+                            let tp = path.replace(".png", "-tip.png");
+                            match native::capture(&tip.native, &tp) { Ok(()) => eprintln!("screenshot -> {tp}"), Err(e) => eprintln!("screenshot failed: {e}") }
+                        }
+                    }
                 } else {
                     cx.background_executor().timer(Duration::from_secs_f64(secs)).await;
                 }
@@ -756,8 +874,10 @@ fn self_check(v: &BubbleView, measured: &[f64]) -> String {
         lines.push(format!("key hint {i} at {:.1},{:.1}: inside the window {inside}, on {covers} button(s) {}", at.x, at.y, if ok { "OK" } else { "CHECK-FAIL" }));
     } }
     let (py, pw, ph) = pnl.map_or((-1.0, -1.0, -1.0), |b| (f(b.origin.y), f(b.size.width), f(b.size.height)));
-    // rows wrap, so only a strip's height is known before layout
-    let (w, h) = (l.w - 2.0 * l.margin, l.h - 2.0 * l.margin);
+    // rows wrap, so only a strip's height is known before layout; the chip rides after the buttons, so the panel is
+    // that much narrower than the content
+    let chip = if l.update.is_some() { bridge::OPT_GAP + bridge::UPDATE_CHIP_D } else { 0.0 };
+    let (w, h) = (l.w - 2.0 * l.margin - chip, l.h - 2.0 * l.margin);
     let ok = (pw - w).abs() < 1.0 && (py - l.margin).abs() < 0.5 && (!strip || (ph - h).abs() < 1.0);
     lines.push(format!("panel {:?}: laid out {pw:.1}x{ph:.1} at y {py:.1}, layout {w:.1}x{h:.1} at y {:.1} {}", l.kind, l.margin, if ok { "OK" } else { "CHECK-FAIL" }));
     lines.join("\n")

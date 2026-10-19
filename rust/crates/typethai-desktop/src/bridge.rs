@@ -149,6 +149,11 @@ pub const LABEL_DROP: f64 = 3.0;
 /// A label wider than this stacks the bubble: past about 28 Latin letters an option is a phrase, and phrases side by
 /// side are no longer read at a glance.
 pub const STRIP_LABEL_MAX: f64 = 240.0;
+/// The download chip at a strip's end: a small button beside the rail whose click asks the updater for its next step
+/// (`update::chip` decides when it shows; the capture side raises the tray item's request). Strips only: rows are read
+/// as text, and they get their update from the tray.
+pub const UPDATE_CHIP_D: f64 = 28.0;
+pub const UPDATE_CHIP_ICON: f64 = 15.0;
 
 /// The bubble's geometry in logical px, window-relative. `h` and the rows' `cells` and badges are only the first guess
 /// for the vertical layout (rows wrap; the real heights come from gpui's laid-out panel, see `Ui::reconcile`). The strip
@@ -170,6 +175,9 @@ pub struct Layout {
     pub cells: Vec<Rect>,
     /// Why each option is offered: its badge.
     pub reasons: Vec<Option<Reason>>,
+    /// The download chip's box at the strip's end, when the rail carries one (`layout`'s `update`): a click there is
+    /// what the tray's update item does right now (`Hit::Update`). None on rows.
+    pub update: Option<Rect>,
 }
 impl Layout {
     /// Where the first option's text starts, from the bubble's left edge. Placement puts it at the caret's x, so the
@@ -194,12 +202,12 @@ impl Layout {
 }
 /// Lay out options from their measured one-line label widths and their reasons (a badge each). A strip when `wanted` is
 /// one, every label is at most `STRIP_LABEL_MAX` and the whole strip fits `max_w` (the monitor's visible width minus
-/// margins); otherwise rows.
-pub fn layout(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64, wanted: BubbleLayout) -> Layout {
+/// margins); otherwise rows. `update` rides the download chip onto a strip that fits.
+pub fn layout(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64, wanted: BubbleLayout, update: bool) -> Layout {
     debug_assert_eq!(label_widths.len(), reasons.len());
     let max_w = max_w.max(MIN_W);
     if wanted == BubbleLayout::Horizontal && label_widths.iter().all(|w| *w <= STRIP_LABEL_MAX) {
-        let s = strip(label_widths, reasons);
+        let s = strip(label_widths, reasons, update);
         if s.w <= max_w { return s }
     }
     rows(label_widths, reasons, max_w)
@@ -215,16 +223,18 @@ fn rows(label_widths: &[f64], reasons: &[Option<Reason>], max_w: f64) -> Layout 
     let mut y = inset;
     let cells: Vec<Rect> = label_widths.iter().map(|lw| { let c = Rect::new(inset, y, pw - 2.0 * (PAD + BORDER), ROW_H * (lw / label_w).ceil().max(1.0)); y = c.bottom(); c }).collect();
     let ph = y + PAD + BORDER - m;
-    Layout { kind: BubbleLayout::Vertical, w: pw + 2.0 * m, h: ph + 2.0 * m, margin: m, surfaces: vec![Rect::new(m, m, pw, ph)], label_w: vec![label_w; label_widths.len()], cells, reasons: reasons.to_vec() }
+    Layout { kind: BubbleLayout::Vertical, w: pw + 2.0 * m, h: ph + 2.0 * m, margin: m, surfaces: vec![Rect::new(m, m, pw, ph)], label_w: vec![label_w; label_widths.len()], cells, reasons: reasons.to_vec(), update: None }
 }
 /// One slot per option, left to right, `OPT_GAP` apart, each wide enough for its option highlighted. The key hints hang
-/// outside the buttons, and the slots stay put as the highlight moves.
-fn strip(label_widths: &[f64], reasons: &[Option<Reason>]) -> Layout {
+/// outside the buttons, and the slots stay put as the highlight moves. `update`: the download chip takes a slot of its
+/// own after the buttons, standing on the rail's floor like they do.
+fn strip(label_widths: &[f64], reasons: &[Option<Reason>], update: bool) -> Layout {
     let label_w: Vec<f64> = label_widths.iter().map(|w| w.ceil().max(OPT_MIN_W - 2.0 * (OPT_BORDER + OPT_PX))).collect();
     let mut x = SHADOW_M - OPT_GAP;
     let cells: Vec<Rect> = label_w.iter().map(|lw| { let c = Rect::new(x + OPT_GAP, SHADOW_M, 2.0 * (OPT_BORDER + OPT_SEL_PX) + sel_label_w(*lw), OPT_SEL_H); x = c.right(); c }).collect();
-    let w = cells.last().map_or(SHADOW_M, Rect::right) + SHADOW_M;
-    Layout { kind: BubbleLayout::Horizontal, w, h: OPT_SEL_H + 2.0 * SHADOW_M, margin: SHADOW_M, surfaces: vec![], label_w, cells, reasons: reasons.to_vec() }
+    let update = update.then(|| Rect::new(cells.last().map_or(SHADOW_M, Rect::right) + OPT_GAP, SHADOW_M + OPT_SEL_H - UPDATE_CHIP_D, UPDATE_CHIP_D, UPDATE_CHIP_D));
+    let w = update.as_ref().map_or(cells.last().map_or(SHADOW_M, Rect::right), Rect::right) + SHADOW_M;
+    Layout { kind: BubbleLayout::Horizontal, w, h: OPT_SEL_H + 2.0 * SHADOW_M, margin: SHADOW_M, surfaces: vec![], label_w, cells, reasons: reasons.to_vec(), update }
 }
 /// A label column measured at `FONT_PX`, set at `SEL_FONT_PX`: text widths scale with the font size.
 fn sel_label_w(w: f64) -> f64 { (w * SEL_FONT_PX / FONT_PX).ceil() }
@@ -234,11 +244,12 @@ pub fn max_width_for(visible_w: f64) -> f64 { visible_w - 2.0 * SCREEN_MARGIN }
 
 /// On-screen bubble geometry in global units (set by the UI, read by the capture thread for click-to-accept).
 /// `cells` = each option's box in logical units relative to the bubble's top-left (a row, or a strip button);
-/// `scale` converts logical units to the global units of `frame` (Windows DPI; 1.0 on macOS).
+/// `scale` converts logical units to the global units of `frame` (Windows DPI; 1.0 on macOS). `update` = the strip's
+/// download chip, when it shows one, in the same logical units.
 #[derive(Clone, Debug, PartialEq)]
 /// `solid` = what is drawn besides the options: the rows' panel and badges, a strip's key hints; the window's transparent margin is not.
 /// `thumbs` = the thumbs Shift shows on the rated options: (option, up, box).
-pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub solid: Vec<Rect>, pub thumbs: Vec<(usize, bool, Rect)>, pub scale: f64 }
+pub struct Geom { pub frame: Rect, pub cells: Vec<Rect>, pub solid: Vec<Rect>, pub thumbs: Vec<(usize, bool, Rect)>, pub update: Option<Rect>, pub scale: f64 }
 /// What a click on the bubble lands on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -246,6 +257,9 @@ pub enum Hit {
     Pick(usize),
     /// A thumb on an option, up or down, while Shift is held.
     Rate(usize, bool),
+    /// The download chip at a strip's end: the updater's next step. No engine key (`key` is None): the capture side
+    /// raises the request the tray item's click follows (`REQ_UPDATE_CLICK`), the UI loop acts on it.
+    Update,
     /// What else the bubble draws (the panel's padding, a badge's or key hint's overhang): nothing happens.
     Bubble,
 }
@@ -253,7 +267,7 @@ impl Hit {
     /// The engine key a click here sends, if any.
     pub fn key(self) -> Option<crate::engine::Key> {
         use crate::engine::{Hotkey, Key};
-        match self { Hit::Pick(i) => Some(Key::Hotkey(Hotkey::Accept(i))), Hit::Rate(i, up) => Some(Key::Hotkey(Hotkey::Rate(i, up))), Hit::Bubble => None }
+        match self { Hit::Pick(i) => Some(Key::Hotkey(Hotkey::Accept(i))), Hit::Rate(i, up) => Some(Key::Hotkey(Hotkey::Rate(i, up))), Hit::Update | Hit::Bubble => None }
     }
 }
 impl Geom {
@@ -265,6 +279,7 @@ impl Geom {
         let (lx, ly) = ((x - self.frame.x) / self.scale, (y - self.frame.y) / self.scale);
         if let Some(&(i, up, _)) = self.thumbs.iter().find(|(_, _, r)| shift && r.contains(lx, ly)) { return Some(Hit::Rate(i, up)) }
         if let Some(i) = self.cells.iter().position(|c| c.contains(lx, ly)) { return Some(Hit::Pick(i)) }
+        if self.update.is_some_and(|r| r.contains(lx, ly)) { return Some(Hit::Update) }
         self.solid.iter().any(|r| r.contains(lx, ly)).then_some(Hit::Bubble)
     }
 }
@@ -324,11 +339,15 @@ pub static REQ_SWITCH_INPUT: Mutex<Option<crate::engine::InputLang>> = Mutex::ne
 pub static REQ_BADGE: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
 /// Where the badge is on screen while it is up (global units), for the Windows mouse hook.
 pub static BADGE_AT: Mutex<Option<Rect>> = Mutex::new(None);
+/// Where the download chip's hover tip is up, read by the Windows mouse hook as `BADGE_AT` is: a click on it is
+/// swallowed (the tip is only a label; on macOS the tip panel ignores the mouse on its own).
+pub static TIP_AT: Mutex<Option<Rect>> = Mutex::new(None);
 /// `--settings`: open the Settings window once the UI is up.
 pub static REQ_OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 /// `--settings-page N`: which page that window starts on (0 Word suggestions, 3 AI rewrite, …).
 pub static SETTINGS_PAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The Settings window's update button: handled by the UI loop like the tray's update item.
+/// The Settings window's update button: handled by the UI loop like the tray's update item. The rail's download chip
+/// clicks land here too — the capture side raises it, the UI loop does what the tray item does right now.
 pub static REQ_UPDATE_CLICK: AtomicBool = AtomicBool::new(false);
 /// Settings window wants a fresh snapshot. Commands, if any, are applied first.
 pub static REQ_SETTINGS: AtomicBool = AtomicBool::new(false);
@@ -348,7 +367,7 @@ mod tests {
     use crate::rewrite::{Preset, ReqId};
     // a row's distance from the window's edge: the shadow margin, then the panel's border and padding
     const INSET: f64 = SHADOW_M + PAD + BORDER;
-    fn plain(label_widths: &[f64], max_w: f64, wanted: BubbleLayout) -> Layout { layout(label_widths, &vec![None; label_widths.len()], max_w, wanted) }
+    fn plain(label_widths: &[f64], max_w: f64, wanted: BubbleLayout) -> Layout { layout(label_widths, &vec![None; label_widths.len()], max_w, wanted, false) }
     const TH: Option<Reason> = Some(Reason::Layout(InputLang::Thai));
     const EN: Option<Reason> = Some(Reason::Layout(InputLang::Latin));
     const TYPO: Option<Reason> = Some(Reason::Typo);
@@ -407,7 +426,7 @@ mod tests {
     }
     #[test] fn a_click_finds_the_row_or_the_button_under_it() {
         let l = plain(&[60.0, 260.0, 30.0], 300.0, BubbleLayout::Vertical);
-        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let rows = Geom { frame: Rect::new(100.0, 100.0, 300.0, 120.0), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![], update: None };
         let hit = |x: f64, y: f64| rows.hit(x, y, false);
         assert_eq!(hit(50.0, 50.0), None, "off the bubble");
         assert_eq!(hit(150.0, 100.0 + INSET + 5.0), Some(Hit::Pick(0)));
@@ -417,7 +436,7 @@ mod tests {
         assert_eq!(hit(150.0, 101.0), None, "the shadow margin: the click is the app's");
         // strip at 1.5x (Windows DPI): slots at x 10..80, 84..176, 180..302, y 10..44 logical, and no box around them
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);
-        let strip = Geom { frame: Rect::new(0.0, 0.0, 468.0, 81.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let strip = Geom { frame: Rect::new(0.0, 0.0, 468.0, 81.0), scale: 1.5, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![], update: None };
         let at = |x: f64, y: f64| strip.hit(x * 1.5, y * 1.5, false);
         assert_eq!((at(15.0, 20.0), at(79.0, 20.0), at(100.0, 20.0), at(250.0, 20.0)), (Some(Hit::Pick(0)), Some(Hit::Pick(0)), Some(Hit::Pick(1)), Some(Hit::Pick(2))));
         assert_eq!(at(85.0, 12.0), Some(Hit::Pick(1)), "a slot takes the click above its smaller button");
@@ -438,7 +457,7 @@ mod tests {
         // on the first button only, where its key hint is: up then down
         let t = l.thumbs(&l.cells, 0, &[true, false, false]);
         assert_eq!(t, vec![(0, true, Rect::new(16.0, 3.0, 16.0, 14.0)), (0, false, Rect::new(34.0, 3.0, 16.0, 14.0))]);
-        let g = Geom { frame: Rect::new(0.0, 0.0, l.w, l.h), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: t };
+        let g = Geom { frame: Rect::new(0.0, 0.0, l.w, l.h), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: t, update: None };
         assert_eq!((g.hit(20.0, 12.0, true), g.hit(40.0, 12.0, true)), (Some(Hit::Rate(0, true)), Some(Hit::Rate(0, false))));
         assert_eq!((g.hit(20.0, 12.0, false), g.hit(40.0, 12.0, false)), (Some(Hit::Pick(0)), Some(Hit::Pick(0))), "no Shift: the button's");
         // rows: right of the key hint slot, centred on the row
@@ -476,7 +495,7 @@ mod tests {
             opt("สวัสดี world", TH), opt("is this", TYPO), opt("Fix typos", None), opt("Rewriting…", None), opt("Is this?", None), opt("No suggestions", None)]);
     }
     #[test] fn a_strip_keeps_its_reasons_inside_the_buttons() {
-        let l = layout(&[40.2, 61.0, 90.0], &[TH, TYPO, TYPO], 1392.0, BubbleLayout::Horizontal);
+        let l = layout(&[40.2, 61.0, 90.0], &[TH, TYPO, TYPO], 1392.0, BubbleLayout::Horizontal, false);
         // options with different reasons keep the same OPT_GAP (4) as any others, inside the 10 px shadow margin
         assert_eq!(l.cells, plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal).cells);
         assert_eq!(l.cells, vec![Rect::new(10.0, 10.0, 70.0, 34.0), Rect::new(84.0, 10.0, 92.0, 34.0), Rect::new(180.0, 10.0, 122.0, 34.0)]);
@@ -488,7 +507,7 @@ mod tests {
         let window = Rect::new(0.0, 0.0, l.w, l.h);
         for sel in 0..3 { assert!(l.key_hints(sel).iter().all(|(_, b)| window.contains(b.x, b.y) && window.contains(b.right(), b.bottom())), "nothing is clipped") }
         assert_eq!(l.text_x(), 23.0);
-        let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![] };
+        let g = Geom { frame: window, scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![], update: None };
         let hit = |x: f64, y: f64| g.hit(x, y, false);
         assert_eq!(hit(20.0, 5.0), Some(Hit::Bubble), "a key hint's overhang applies nothing");
         assert_eq!(hit(74.0, 5.0), None, "where a badge used to overhang: the app's");
@@ -497,7 +516,7 @@ mod tests {
     }
     #[test] fn a_fourth_option_has_no_digit_hint() {
         // นา | lets | done | cool: only options 1-3 have a digit; the fourth shows its Tab once highlighted
-        let l = layout(&[20.0, 30.0, 35.0, 30.0], &[TH, None, None, None], 1392.0, BubbleLayout::Horizontal);
+        let l = layout(&[20.0, 30.0, 35.0, 30.0], &[TH, None, None, None], 1392.0, BubbleLayout::Horizontal, false);
         assert_eq!(l.key_hints(0).iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2]);
         let on_fourth = l.key_hints(3);
         assert_eq!(on_fourth.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2, 3]);
@@ -506,7 +525,7 @@ mod tests {
     #[test] fn a_short_label_keeps_its_key_hint_clear_of_its_mark() {
         // "ok": the button widens so the Tab keycap on its top-left corner and the mark in its bottom-right one never
         // share a column, highlighted or not
-        let l = layout(&[14.0], &[TYPO], 1392.0, BubbleLayout::Horizontal);
+        let l = layout(&[14.0], &[TYPO], 1392.0, BubbleLayout::Horizontal, false);
         for sel in [0, 1] {
             let (k, b) = (l.key_hints(sel)[0].1, l.button(0, sel));
             assert!(k.x + KEY_TAB_W <= b.right() - OPT_BORDER - MARK_INSET - MARK_D.max(MARK_FLAG_W), "Tab keycap {k:?} clear of the widest mark in {b:?}");
@@ -518,12 +537,30 @@ mod tests {
         assert!(!dark_text_on((0.55, 0.55, 0.55)), "white on graphite");
     }
     #[test] fn rows_keep_a_badge_column_when_any_row_has_a_badge() {
-        let l = layout(&[100.0, 180.0, 50.0], &[TH, TYPO, None], 1400.0, BubbleLayout::Vertical);
+        let l = layout(&[100.0, 180.0, 50.0], &[TH, TYPO, None], 1400.0, BubbleLayout::Vertical, false);
         // CHROME_W 92 + the badge column (16 + 8) + the widest label, in the 10 px shadow margin; each badge centred
         // before the key hint
         assert_eq!((l.w, l.h, l.label_w[0]), (316.0, 124.0, 180.0));
         assert_eq!(l.badges(), vec![(Reason::Layout(InputLang::Thai), Rect::new(215.0, 24.0, 16.0, 16.0)), (Reason::Typo, Rect::new(215.0, 54.0, 16.0, 16.0))]);
         assert!(l.key_hints(0).is_empty(), "rows keep their key hints inline");
         assert_eq!(plain(&[100.0, 180.0, 50.0], 1400.0, BubbleLayout::Vertical).w, 292.0, "no badges, no column");
+    }
+    #[test] fn the_download_chip_rides_the_strip_but_not_the_rows() {
+        // one gap after the last button, a slot of its own, centred on the rail; the buttons stay put
+        let l = layout(&[40.2, 61.0], &vec![None; 2], 600.0, BubbleLayout::Horizontal, true);
+        let chip = l.update.expect("the strip carries the chip");
+        assert_eq!(l.cells, plain(&[40.2, 61.0], 600.0, BubbleLayout::Horizontal).cells);
+        assert_eq!(chip, Rect::new(l.cells[1].right() + OPT_GAP, SHADOW_M + OPT_SEL_H - UPDATE_CHIP_D, UPDATE_CHIP_D, UPDATE_CHIP_D));
+        assert_eq!(l.w, chip.right() + SHADOW_M);
+        // the chip takes the click, and a click there is no engine key: the capture side raises the tray item's request
+        let g = Geom { frame: Rect::new(0.0, 0.0, l.w, l.h), scale: 1.0, cells: l.cells.clone(), solid: l.solid(0), thumbs: vec![], update: l.update };
+        assert_eq!(g.hit(chip.x + 1.0, chip.y + 1.0, false), Some(Hit::Update));
+        assert_eq!(Hit::Update.key(), None, "the chip is not an option: the engine hears nothing");
+        // a strip that fits bare does not fit with the chip: rows, and rows carry no chip
+        let bare = plain(&[61.0; 4], 1392.0, BubbleLayout::Horizontal);
+        assert_eq!(bare.kind, BubbleLayout::Horizontal);
+        let l = layout(&[61.0; 4], &vec![None; 4], bare.w, BubbleLayout::Horizontal, true);
+        assert_eq!((l.kind, l.update), (BubbleLayout::Vertical, None));
+        assert_eq!(layout(&[61.0], &vec![None; 1], 600.0, BubbleLayout::Vertical, true).update, None, "wanted rows, no chip");
     }
 }

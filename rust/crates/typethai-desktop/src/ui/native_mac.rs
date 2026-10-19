@@ -74,9 +74,12 @@ pub fn capture(n: &Native, path: &str) -> Result<(), String> {
         let st = std::process::Command::new("/usr/sbin/screencapture").args(args).status().map_err(|e| e.to_string())?;
         if st.success() { Ok(()) } else { Err(format!("screencapture exit {st}")) }
     };
-    run(&["-x", "-o", &format!("-l{}", n.win.windowNumber()), path])?;
+    // A window-id shot can be refused by the WindowServer wholesale ("could not create image from window", for `-l`
+    // everywhere, region shots still fine) — then the margin shot takes its place at `path` so the screenshot survives.
+    let by_id = run(&["-x", "-o", &format!("-l{}", n.win.windowNumber()), path]);
     let f = n.win.frame(); let ph = primary_h(); let m = 16.0;
     let region = format!("-R{},{},{},{}", f.origin.x - m, ph - f.origin.y - f.size.height - m, f.size.width + 2.0 * m, f.size.height + 2.0 * m);
+    if let Err(e) = by_id { return run(&["-x", &region, path]).map(|_| eprintln!("note: window-id capture refused, used the screen-region shot ({e})")); }
     let on = match path.strip_suffix(".png") { Some(s) => format!("{s}-onscreen.png"), None => format!("{path}-onscreen.png") };
     run(&["-x", &region, &on])
 }

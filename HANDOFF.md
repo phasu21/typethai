@@ -53,8 +53,9 @@ completion frequencies).
   words, no frequencies, no `hello`) was too thin to spell-check with.
 - `en_items()`: ASCII words (apostrophes allowed, surrounding punctuation kept) at a forward boundary. Left as English:
   rows are the guesses. Offered as Thai: row 2 is the best English guess. Accept is a `Typo` row, so Undo works.
-- The Windows module only type-checks (isolated crate, `windows` 0.62.2); not run on Windows yet. Full
-  `--target x86_64-pc-windows-msvc` check fails in gpui's build script on macOS.
+- The Windows module only type-checks (isolated crate, `windows` 0.62.2); not run on Windows yet. The whole crate
+  type-checks for the Windows target on macOS with `scripts/check-windows.sh` (llvm-rc for gpui's build script, and a
+  stub pkg-config so zstd-sys skips `cc`); running it still needs a Windows machine.
 
 ## Word completion (branch `feat/word-completion`)
 
@@ -171,12 +172,14 @@ completion frequencies).
   `Engine::set_field`: the caret under it is not laid out yet and the keystroke is typing, so the preview waits for the
   pause instead of pinning at a stale line (a terminal scrolling on Enter showed exactly that, off by a line).
   `offer_badge` looks again inside its `blocked` closure.
-- The preview follows the caret: `Action::Badge(true)` arms the same 3-sample `arm_caret_follow` the bubble uses, and
-  the timer sends `UiMsg::MoveBadge` while `Engine::badge_shown()` (a click or a switch arms it too, so focusing
-  another field moves the pill there). `badge_anchor()` logs `typethai: preview anchor …` whenever that rect changes.
-  Windows has no keystroke-driven follow; its window switch and mouse hook re-place the pill directly.
+- The preview follows the caret: `Action::Badge(true)` arms the same 3-sample caret follow the bubble uses
+  (`platform::follow::Follow`), and the timer sends `UiMsg::MoveBadge` while `Engine::badge_shown()` (a click or a
+  switch arms it too, so focusing another field moves the pill there). `badge_anchor()` logs
+  `typethai: preview anchor …` whenever that rect changes.
+  Windows arms the same follow — on a key, on `Action::ShowBubble` and in `offer_badge` — and its 25 ms timer sends
+  `Move` / `MoveBadge`; a click or a window switch still re-places the pill on the spot.
   Windows uses cheap signals (caret / known text app / the gate's cached verdict) and full UIA only in `offer_badge`.
-  The Windows path type-checks (`cargo check --target x86_64-pc-windows-msvc`) but is not run on Windows yet.
+  The Windows path type-checks with `scripts/check-windows.sh` but is not run on Windows yet.
 - `--simulate` has `<Focus>` / `<Blur>` and any key now counts as a keystroke, so the whole policy is smoke-testable;
   `--demo-badge --pin` shows the pinned badge (`--secs 2` proves it outlives `SHOW_FOR`), and `--demo-settings` shows
   the two controls on the Word suggestions page.
@@ -241,6 +244,43 @@ completion frequencies).
   click steps, `--screenshot PNG` captures one). The demo never touches Ollama. `--settings --settings-page 3` opens the
   real app on the AI rewrite page; with `TYPETHAI_FAKE_UNTRUSTED=1` it runs without the event tap, so it can be shown
   beside an installed copy without both acting on the same keystrokes.
+
+## The rail at the caret in Windows Electron / Chromium apps (2026-10-18)
+
+- Reported: on Windows, in an Electron app, the bubble did not follow the caret. Two causes, both Windows-side:
+  - Electron and Chromium answer no `UIA_TextPattern2Id` (Chromium's `GetPatternProviderFactoryMethod` returns nothing
+    for it; `ui/accessibility/platform/ax_platform_node_win.cc`), and they have no Win32 caret either
+    (`GetGUIThreadInfo` -> `hwndCaret` null). So `uia_caret` found no caret and the bubble fell back to the focused
+    element's frame: its left edge, with nothing to follow.
+  - `uia_caret` now asks TextPattern2 first (Word, WinUI) and then TextPattern: the caret is the collapsed selection,
+    and Chromium gives that degenerate range as a 1-px insertion-point rect for UIA (`AXRange::GetRects` builds one on
+    purpose), the same way `marker_caret` reads their caret on macOS. A provider that answers neither falls back to the
+    character the caret sits on (its left edge, or its right edge at the end of the text).
+- Windows had no keystroke-driven caret follow at all (macOS has had one). The state machine is now shared as
+  `platform::follow` (`Follow::arm` / `take`: three reads after a key, 30 ms then 70 ms apart, no faster than 50 ms),
+  driving the macOS tap and the Windows hooks. `arm_caret_follow` fires on `Action::ShowBubble`, on a key while the
+  bubble is up, and whenever `offer_badge` shows; `control()`'s 25 ms timer re-reads and sends `UiMsg::Move` while the
+  bubble is up, `MoveBadge` while the preview is.
+- `TYPETHAI_DEBUG` now says what placed the bubble, on change: `typethai: anchor source=caret|field|mouse caret=… field=…`
+  and `typethai: focus hwnd=… password=… field=Text|NotText|Unknown` (the gate's verdict). The Windows counterpart of
+  macOS's `--probe-caret` / `typethai: preview anchor …`.
+- Verified on the Mac: `cargo test -p typethai-desktop` (297 pass, 3 ignored — including the new `platform::follow`
+  tests, which cover a single arming's three reads, the spacing, and a run spent when nothing is up), and a live run
+  typing `l;ylfu` then `l;ylfukl` into TextEdit (screenshots: the rail sat at the caret both times, moved right with
+  the two characters typed, above the caret line).
+- Verified on a real Windows 11 machine (2026-10-18, over SSH; `sshd` runs in session 0, so every desktop action went
+  through a scheduled task with an interactive token — `schtasks`/`Register-ScheduledTask -LogonType Interactive`):
+  `C:\tmp\typethai-build` (b86bf29 + these files) built with `cargo build -p typethai-desktop`, then typing `l;ylfu`
+  into one `<textarea>` on a `file://` page in Edge logged, per key,
+  `typethai: focus … field=Text` and `typethai: anchor source=caret caret=Some(Rect { x: 981 → 996 → 1010 → 1025 →
+  1040, y: 1098, w: 1, h: 32 })` — the caret read on its line, 1 px wide (Chromium's degenerate-range caret, so the
+  TextPattern path, not `GetGUIThreadInfo`), advancing with each character; the screenshot shows the rail above the
+  caret with its first label at the caret's x. The same typing with the installed 0.5.14 put the rail hundreds of
+  pixels away from the caret (the mouse fallback) — the reported bug. Grok Bot (Electron) also answered `field=Text`
+  and a caret.
+- Not covered: a Chromium element that exposes no caret at all (VS Code's inline prompt widget did that) still falls
+  back to its field or the mouse, and a caret read is a UI Automation round trip, so the 60 ms cap can drop one
+  (`anchor source=field caret=None` on some VS Code keys). The follow's later samples are what correct that.
 
 ## Open limitations
 

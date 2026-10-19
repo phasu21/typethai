@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::{atomic::{AtomicU32, Ordering}, mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use super::field::{self, Field};
+use super::follow;
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -27,6 +28,8 @@ const THAI_KLID: usize = 0x041E;
 /// `layouts`: the foreground window's input language as last seen, for the badge.
 struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
     gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch,
+    /// Caret re-reads after a key (`arm_caret_follow`), for the bubble or the preview that is up.
+    follow: follow::Follow,
     /// When the next look at focus is due, and whether a keystroke armed it (a click, a window switch or a key may have
     /// moved focus, and the handler that saw the trigger cannot wait for UI Automation).
     badge_due: Option<(Instant, bool)> }
@@ -64,20 +67,42 @@ unsafe fn uia_focus(a: Option<&IUIAutomation>, req: Option<&IUIAutomationCacheRe
     let ct = e.CachedControlType().map(|c| c.0).unwrap_or(0);
     (b(UIA_IsPasswordPropertyId), field::uia(ct, b(UIA_IsTextPatternAvailablePropertyId), b(UIA_IsValuePatternAvailablePropertyId), b(UIA_ValueIsReadOnlyPropertyId)))
 }
+/// First rectangle of a text range, on screen (physical pixels). A degenerate (caret) range comes back as the
+/// insertion point itself where the provider has one for it (Chromium builds a 1-px rect for UIA, Word answers the
+/// caret line).
+unsafe fn range_rect(r: &IUIAutomationTextRange) -> Option<RECT> {
+    let sa = r.GetBoundingRectangles().ok()?; if sa.is_null() { return None }
+    let ub = SafeArrayGetUBound(sa, 1).ok()?; let mut p: *mut core::ffi::c_void = std::ptr::null_mut();
+    let out = if ub >= 3 && SafeArrayAccessData(sa, &mut p).is_ok() {
+        let d = std::slice::from_raw_parts(p as *const f64, 4); let _ = SafeArrayUnaccessData(sa);
+        Some(RECT { left: d[0] as i32, top: d[1] as i32, right: (d[0] + d[2]) as i32, bottom: (d[1] + d[3]) as i32 })
+    } else { None };
+    let _ = SafeArrayDestroy(sa); out
+}
+/// The caret of a text range: the range's own rect when the provider gives one for it, else the character the caret
+/// sits on — its left edge, or its right edge when the caret is at the end of the text (the enclosing character is
+/// then the one before it).
+unsafe fn caret_of(range: &IUIAutomationTextRange) -> Option<RECT> {
+    if let Some(r) = range_rect(range) { return Some(r) }
+    let c = range.Clone().ok()?;
+    c.ExpandToEnclosingUnit(TextUnit_Character).ok()?;
+    let r = range_rect(&c)?;
+    let at_end = range.CompareEndpoints(TextPatternRangeEndpoint_Start, &c, TextPatternRangeEndpoint_Start).ok()? > 0;
+    let x = if at_end { r.right } else { r.left };
+    Some(RECT { left: x, top: r.top, right: x + 1, bottom: r.bottom })
+}
+/// Caret rect of the focused element. TextPattern2 answers the caret itself (Word, WinUI); Chromium and Electron
+/// implement TextPattern only, where the caret is the collapsed selection — the degenerate range whose rect Chromium
+/// builds as the insertion point, the same way `marker_caret` reads their caret on macOS.
 unsafe fn uia_caret(e: &IUIAutomationElement) -> Option<RECT> {
-    let tp: IUIAutomationTextPattern2 = e.GetCurrentPatternAs(UIA_TextPattern2Id).ok()?;
-    let mut active = windows::core::BOOL(0);
-    let range = tp.GetCaretRange(&mut active).ok()?;
-    let rect = |r: &IUIAutomationTextRange| -> Option<RECT> {
-        let sa = r.GetBoundingRectangles().ok()?; if sa.is_null() { return None }
-        let ub = SafeArrayGetUBound(sa, 1).ok()?; let mut p: *mut core::ffi::c_void = std::ptr::null_mut();
-        let out = if ub >= 3 && SafeArrayAccessData(sa, &mut p).is_ok() {
-            let d = std::slice::from_raw_parts(p as *const f64, 4); let _ = SafeArrayUnaccessData(sa);
-            Some(RECT { left: d[0] as i32, top: d[1] as i32, right: (d[0] + d[2]) as i32, bottom: (d[1] + d[3]) as i32 })
-        } else { None };
-        let _ = SafeArrayDestroy(sa); out
-    };
-    rect(&range).or_else(|| { let c = range.Clone().ok()?; c.ExpandToEnclosingUnit(TextUnit_Character).ok()?; rect(&c) })
+    if let Ok(tp) = e.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) {
+        let mut active = windows::core::BOOL(0);
+        if let Ok(caret) = tp.GetCaretRange(&mut active) { if let Some(r) = caret_of(&caret) { return Some(r) } }
+    }
+    let tp: IUIAutomationTextPattern = e.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
+    let sel = tp.GetSelection().ok()?;
+    let range = (0..sel.Length().ok()?).find_map(|i| sel.GetElement(i).ok())?;
+    caret_of(&range)
 }
 fn uia_ask(st: &State, q: UiaQuery) -> Option<UiaResp> {
     let (tx, rx) = mpsc::channel(); st.uia.as_ref()?.send((q, tx)).ok()?; rx.recv_timeout(Duration::from_millis(60)).ok()
@@ -97,7 +122,10 @@ unsafe fn password_edit(focus: HWND) -> bool {
 /// (password field, text-field verdict) now, 60 ms cap; no reply is "not a password, unknown".
 unsafe fn focus_check(st: &State, focus: HWND) -> (bool, Field) {
     let (pw, f) = match uia_ask(st, UiaQuery::Focus) { Some(UiaResp::Focus(pw, f)) => (pw, f), _ => (false, Field::Unknown) };
-    (pw || password_edit(focus), f)
+    let pw = pw || password_edit(focus);
+    // `TYPETHAI_DEBUG`: why the gate opened or closed in this app (the bubble shows only where it opens)
+    if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("typethai: focus hwnd={focus:?} password={pw} field={f:?}") }
+    (pw, f)
 }
 /// Closed gate: re-check off-thread; the next key picks the reply up (`field_collect`).
 fn field_refresh(st: &mut State) {
@@ -121,8 +149,10 @@ unsafe fn fullscreen(fg: HWND) -> bool {
     let m = mi.rcMonitor; r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
 }
 fn rect(r: RECT) -> Rect { Rect::new(r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64) }
-/// Caret rect (GetGUIThreadInfo, else UIA TextPattern2), focused element frame (UIA, else the focus HWND) and the
-/// mouse, in physical screen pixels (gpui makes the process per-monitor DPI aware).
+/// `TYPETHAI_DEBUG`: the anchor last logged: which of caret / field / mouse it came from, and the rects it used.
+static LAST_ANCHOR: Mutex<Option<(&'static str, Option<Rect>, Option<Rect>)>> = Mutex::new(None);
+/// Caret rect (GetGUIThreadInfo, else UIA TextPattern2 / TextPattern), focused element frame (UIA, else the focus
+/// HWND) and the mouse, in physical screen pixels (gpui makes the process per-monitor DPI aware).
 unsafe fn anchor(st: &State) -> Anchor {
     let fg = GetForegroundWindow(); let gi = gui_info(fg);
     let mut a = Anchor::default();
@@ -137,6 +167,12 @@ unsafe fn anchor(st: &State) -> Anchor {
     if let Some(UiaResp::Rect(Some(r))) = uia_ask(st, UiaQuery::Field) { a.field = Some(rect(r)); }
     else if let Some(gi) = gi { let mut r = RECT::default(); if !gi.hwndFocus.is_invalid() && GetWindowRect(gi.hwndFocus, &mut r).is_ok() { a.field = Some(rect(r)); } }
     let mut p = POINT::default(); if GetCursorPos(&mut p).is_ok() { a.mouse = Some((p.x as f64, p.y as f64)); }
+    // a bubble that reads as misplaced is otherwise a guess: say which source placed it, and where the caret was
+    if std::env::var_os("TYPETHAI_DEBUG").is_some() {
+        let src = crate::placement::source_of(&a, &crate::placement::Opts::default()).map(|s| s.name()).unwrap_or("none");
+        let mut last = LAST_ANCHOR.lock().unwrap();
+        if *last != Some((src, a.caret, a.field)) { *last = Some((src, a.caret, a.field)); eprintln!("typethai: anchor source={src} caret={:?} field={:?}", a.caret, a.field) }
+    }
     a
 }
 unsafe fn layout_is_thai(fg: HWND) -> bool { (GetKeyboardLayout(GetWindowThreadProcessId(fg, None)).0 as usize & 0xFFFF) == THAI_KLID }
@@ -190,7 +226,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::SwitchInput(l) => switch_input(GetForegroundWindow(), l),
         Action::Select(i) => { let _ = st.tx.send(UiMsg::Select(i)); }
         Action::Focus(f) => { let _ = st.tx.send(UiMsg::Focus(f)); }
-        Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); }
+        Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); arm_caret_follow(st); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
         Action::Rewrite(job) => st.worker.submit(job),
         Action::Badge(on) => if on { let _ = offer_badge(st, GetForegroundWindow(), true); } else { let _ = st.tx.send(UiMsg::UnpinBadge); },
@@ -389,6 +425,9 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     if dbg && !o.actions.is_empty() { eprintln!("  -> swallow={} {:?}", o.swallow, o.actions); }
     if was_paused != st.app.engine.paused { let _ = st.tx.send(UiMsg::Paused(st.app.engine.paused)); }
     run_actions(st, o.actions); st.app.maybe_save();
+    // the caret moves with every keystroke: follow it while the bubble is up (this hook runs before the app handles
+    // the key, so the caret is read again a moment later)
+    if st.app.engine.bubble_visible() { arm_caret_follow(st) }
     o.swallow
 }
 // ---------- mouse thread ----------
@@ -411,13 +450,20 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             if let Some(tx) = MOUSE_TX.get() { let _ = tx.send(UiMsg::HideBadge); }
             return LRESULT(1)
         }
+        // on the chip's hover tip: swallow (it is only a label on Windows; macOS's copy ignores the mouse itself)
+        if bridge::TIP_AT.lock().unwrap().is_some_and(|r| r.contains(pt.x as f64, pt.y as f64)) {
+            return LRESULT(1)
+        }
         match bridge::geom().and_then(|g| g.hit(pt.x as f64, pt.y as f64, bridge::SHIFT_HELD.load(Ordering::SeqCst))) {
             // on the bubble: swallow so it is never clicked/activated; a left click on an option applies it, on a thumb
-            // rates it
+            // rates it, on the download chip it is what the tray's update item does right now
             Some(hit) => {
-                if m == WM_LBUTTONDOWN && hit.key().is_some() {
-                    *CLICK.lock().unwrap() = Some(Click::On(hit));
-                    let _ = PostThreadMessageW(HOOK_TID.load(Ordering::SeqCst), WM_APP, WPARAM(0), LPARAM(0));
+                if m == WM_LBUTTONDOWN {
+                    if matches!(hit, bridge::Hit::Update) { bridge::REQ_UPDATE_CLICK.store(true, Ordering::SeqCst); }
+                    else if hit.key().is_some() {
+                        *CLICK.lock().unwrap() = Some(Click::On(hit));
+                        let _ = PostThreadMessageW(HOOK_TID.load(Ordering::SeqCst), WM_APP, WPARAM(0), LPARAM(0));
+                    }
                 }
                 return LRESULT(1)
             }
@@ -434,7 +480,8 @@ unsafe fn take_click(st: &mut State) {
         None => {}
         Some(Click::Elsewhere) => {
             st.gate.touch(Instant::now()); arm_focus_look(st, false);
-            // the click moved the caret: a preview that is up follows it (Windows has no keystroke-driven follow)
+            // the click moved the caret: a preview that is up follows it here, on the spot (a keystroke-driven follow
+            // would read it before the app has laid it out, `arm_caret_follow`)
             if st.app.engine.badge_shown() { let an = anchor(st); let _ = st.tx.send(UiMsg::MoveBadge(an)); }
             let a = st.app.engine.reset(); run_actions(st, a);
         }
@@ -456,6 +503,9 @@ fn mouse_thread() {
 /// window has settled. The handler that saw the trigger cannot wait for it. `key`: a keystroke armed it, so this is not a
 /// focus the user made (see `Engine::set_field`), and nothing is shown on the spot.
 fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now() + field::SETTLE, key)); }
+/// Schedule the caret re-reads (`platform::follow`): the bubble or the preview that is up follows the caret the app
+/// lays out after the key, which this hook sees before the app does.
+fn arm_caret_follow(st: &mut State) { st.follow.arm(Instant::now()) }
 /// One look at Focus, then the preview's policy: a focus the user made (a click, a window switch) shows the preview and
 /// keeps it up while nothing has been typed in that field; elsewhere, in a password field, or in a game's window it
 /// goes. Cheap signals only (a caret, a known text app, the gate's cached verdict): a full UIA look runs in
@@ -479,7 +529,8 @@ unsafe fn offer_badge(st: &mut State, fg: HWND, pin: bool) -> bool {
         pw || !field::Gate::told(f).open(caret, || fullscreen(fg))
     };
     match crate::badge::anchor_for(on, e.bubble_visible(), blocked, || anchor(st)) {
-        Some(anchor) => { let _ = st.tx.send(UiMsg::Badge { lang, anchor, pin }); true }
+        // the preview follows the caret while it is up: read it again once the app has laid it out (arm the re-reads)
+        Some(anchor) => { let _ = st.tx.send(UiMsg::Badge { lang, anchor, pin }); arm_caret_follow(st); true }
         None => false,
     }
 }
@@ -499,7 +550,13 @@ unsafe fn control(st: &mut State) -> bool {
     let idle = st.app.engine.on_idle(std::time::Instant::now()); run_actions(st, idle);
     if st.gate.refresh_due(Instant::now(), false) { field_refresh(st); }
     let now = Instant::now();
-    if let Some((t, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; unsafe { focus_look(st, key) } }
+    if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; unsafe { focus_look(st, key) } }
+    // the caret under a bubble or preview that is up follows the app's own (`arm_caret_follow`): re-read it now that
+    // the app has laid the glyph out
+    if st.follow.take(now, st.app.engine.bubble_visible() || st.app.engine.badge_shown()) {
+        let an = unsafe { anchor(st) };
+        let _ = st.tx.send(if st.app.engine.bubble_visible() { UiMsg::Move(an) } else { UiMsg::MoveBadge(an) });
+    }
     if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
@@ -509,7 +566,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), badge_due: Some((Instant::now(), false)) }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), follow: follow::Follow::default(), badge_due: Some((Instant::now(), false)) }));
         HOOK_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
         let Ok(kb) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return

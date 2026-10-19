@@ -1,5 +1,18 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.15**
+- **A download chip on the suggestion bubble.** When there is something to act on (a staged release, one being
+  downloaded, or one waiting to be opened by hand), a small download icon rides at the end of the bubble's
+  suggestions: a click is what the tray's update item does right then — restart into the update, start the
+  download, or open the release page. Hovering it says which release it is on its way to (*Update to version
+  x.y.z*). It never takes focus, and neither does its tip.
+
+**Fixed in 0.5.15**
+- **Windows: the bubble now sits at the caret in Chromium and Electron apps** (Chrome, Edge, Slack, VS Code, Grok
+  Bot, …) instead of at the mouse or the edge of the text field, and it keeps to the caret as you type. Those apps
+  answer neither the Windows caret API nor the UI Automation caret query typeThai used before; their caret is read
+  the way it already was on macOS, and it is re-read after each key while the bubble is up.
+
 **New in 0.5.14**
 - **Turn typeThai off in one app.** The menu-bar icon has *Turn off in ‹app›* for the app in front: there typeThai
   shows nothing, converts nothing and every key, hotkeys included, reaches the app. *Turn on in ‹app›* undoes it, and

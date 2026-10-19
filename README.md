@@ -123,7 +123,9 @@ the old typeThai entry from Accessibility and add the app again, once. Later upd
 typeThai looks for a new release on GitHub at launch and every 6 hours, downloads it in the background and checks it
 against typeThai's signing key. The tray menu then shows **Restart to update to …**: nothing changes until you pick
 it. typeThai quits, the new version replaces it, and it starts again. **Check for updates** in the tray, or Settings →
-Updates, checks right away; the automatic check can be turned off there.
+Updates, checks right away; the automatic check can be turned off there. When there is something to act on, a small
+**download chip** also rides at the end of the suggestion bubble: clicking it is the tray item's action, and hovering
+it says which release it is on its way to (*Update to version x.y.z*; Settings → Updates always shows the same thing).
 
 Updating in place works for the app in `/Applications` (or any folder you can write to) and for the Windows
 installer. A copy that can't replace itself (the Windows zip, a build from source) shows **Get typeThai …** instead,

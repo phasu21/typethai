@@ -12,8 +12,8 @@ fn main() {
         // --items "a|b|c" (custom rows instead of the samples; repeat it to update the bubble in place; a row ending in
         // !th, !en or !typo is offered for that reason), --vertical (ask for rows, not a strip), --light,
         // --backdrop light|dark (a window of text behind the bubble), --hold P (Tab held over it, P of the way to the rows),
-        // --shift (Shift held: the thumbs on the options offered in Thai)
-        let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None;
+        // --shift (Shift held: the thumbs on the options offered in Thai), --update (the rail carries its download chip)
+        let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None; let mut update = false;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() {
             if a == "--secs" { secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(3.0); continue }
@@ -26,11 +26,12 @@ fn main() {
             if a == "--focused" { focused = true; continue }
             if a == "--light" { light = true; continue }
             if a == "--shift" { bridge::SHIFT_HELD.store(true, std::sync::atomic::Ordering::SeqCst); continue }
+            if a == "--update" { update = true; continue }
             let v: Vec<f64> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 { pts.push((v[0], v[1])) } else { eprintln!("--demo-bubble: expected x,y but got {a:?}"); std::process::exit(2) }
         }
-        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, hold, layout, light, backdrop); return }
-        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, hold, layout, light, backdrop); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo(pts, secs, shot, items, select, focused, hold, layout, light, backdrop, update); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (pts, secs, shot, items, select, focused, hold, layout, light, backdrop, update); eprintln!("--demo-bubble needs macOS or Windows"); std::process::exit(2) }
     }
     // --demo-badge [x,y ...] [--secs N] [--en] [--light] [--backdrop light|dark] [--screenshot PNG]: the input-language
     // badge at a fake caret at each point (Thai first, then taking turns), no key capture

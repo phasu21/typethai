@@ -7,6 +7,7 @@ use core_foundation::base::CFRange;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 use super::field::{self, Field};
+use super::follow;
 use std::sync::atomic::Ordering;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -61,7 +62,7 @@ const kAXValueCGSizeType: u32 = 2;
 const kAXValueCGRectType: u32 = 3;
 const kAXValueCFRangeType: u32 = 4;
 
-struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, move_due: Option<std::time::Instant>, move_left: u8, last_move: Option<std::time::Instant>, last_src: &'static str,
+struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, follow: follow::Follow, last_src: &'static str,
     gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>>,
     /// When the next look at focus is due, and whether a keystroke armed it (a click, an app switch or a key may have
     /// moved focus, and the handler that saw the trigger cannot wait for AX).
@@ -344,14 +345,9 @@ fn mouse_location() -> Option<(f64, f64)> {
     let s = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?; let e = CGEvent::new(s).ok()?; let p = e.location(); Some((p.x, p.y))
 }
 fn send(m: UiMsg) { TX.with(|t| if let Some(t) = t.borrow().as_ref() { let _ = t.send(m); }) }
-/// Schedule a few caret re-reads. The event tap runs before the focused app lays out the new glyph, so the first
-/// AX rect is still the previous caret; later samples land on it. Does not restart a follow that's already armed.
-fn arm_caret_follow(st: &mut State) {
-    if st.move_due.is_none() {
-        st.move_left = 3;
-        st.move_due = Some(std::time::Instant::now() + std::time::Duration::from_millis(30));
-    }
-}
+/// Schedule the caret re-reads. The event tap runs before the focused app lays out the new glyph, so the first AX
+/// rect is still the previous caret; later samples land on it.
+fn arm_caret_follow(st: &mut State) { st.follow.arm(std::time::Instant::now()) }
 fn run_actions(st: &mut State, acts: Vec<Action>) {
     for a in acts { match a {
         Action::Replace { delete, insert, then } => inject(delete, &insert, then),
@@ -438,8 +434,12 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             let p = e.location();
             match bridge::geom().and_then(|g| g.hit(p.x, p.y, e.get_flags().bits() & 0x20000 != 0)) {
                 // on the bubble: swallow so the click never reaches (or focuses) it; a left click on an option applies it,
-                // on a thumb rates it
-                Some(hit) => { if let (CGEventType::LeftMouseDown, Some(k)) = (ty, hit.key()) { let o = st.app.engine.on_key(k); run_actions(st, o.actions); st.app.maybe_save(); } true }
+                // on a thumb rates it, on the download chip it is what the tray's update item does right now
+                Some(hit) => {
+                    if matches!(hit, bridge::Hit::Update) && matches!(ty, CGEventType::LeftMouseDown) { bridge::REQ_UPDATE_CLICK.store(true, Ordering::SeqCst) }
+                    else if let (CGEventType::LeftMouseDown, Some(k)) = (ty, hit.key()) { let o = st.app.engine.on_key(k); run_actions(st, o.actions); st.app.maybe_save(); }
+                    true
+                }
                 None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); arm_focus_look(st, false); arm_caret_follow(st); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
@@ -582,15 +582,10 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         if st.gate.refresh_due(now, false) { field_refresh(st); }
         if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
         if bridge::REQ_BADGE.lock().unwrap().take().is_some() { offer_badge(st, false); }
-        // a few AX reads after a key (the first is often still the pre-keystroke caret), and one when the preview goes
-        // up: the app lays the caret out under it, and an app that scrolls (a terminal) moves it while the pill shows
-        if st.move_due.is_some_and(|t| now >= t) && st.last_move.is_none_or(|t| now.duration_since(t).as_millis() >= 50) {
-            st.move_due = None; st.last_move = Some(now);
-            let follow = if st.app.engine.bubble_visible() { send(UiMsg::Move(unsafe { anchor() })); true }
-                else if st.app.engine.badge_shown() { send(UiMsg::MoveBadge(badge_anchor())); true }
-                else { false };
-            if follow && st.move_left > 1 { st.move_left -= 1; st.move_due = Some(now + std::time::Duration::from_millis(70)); }
-            else { st.move_left = 0; }
+        // the caret under a bubble or preview that is up follows the app's own: the first read after a key is often
+        // still the pre-keystroke one, and an app that scrolls (a terminal) moves it while the pill shows
+        if st.follow.take(now, st.app.engine.bubble_visible() || st.app.engine.badge_shown()) {
+            if st.app.engine.bubble_visible() { send(UiMsg::Move(unsafe { anchor() })) } else { send(UiMsg::MoveBadge(badge_anchor())) }
         }
         if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); send(UiMsg::Stopped); CFRunLoop::get_current().stop(); }
     });
@@ -639,7 +634,7 @@ fn repair_permission_once(state: &std::path::Path, id: &str, version: &str) {
 
 fn capture_thread(app: App, tx: Sender<UiMsg>) {
     TX.with(|t| *t.borrow_mut() = Some(tx.clone()));
-    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: std::ptr::null(), tap: None, tap_try: None, move_due: None, move_left: 0, last_move: None, last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: std::ptr::null(), tap: None, tap_try: None, follow: follow::Follow::default(), last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
     let armed = with(|st| arm_tap(st)).unwrap_or(false);
     if !armed {
         eprintln!("typeThai: no event tap yet; running without it and trying again once Accessibility is granted");

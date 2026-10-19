@@ -1,6 +1,7 @@
 pub mod sim;
 pub mod spell;
 pub mod field;
+pub mod follow;
 #[cfg(windows)] pub mod windows;
 #[cfg(target_os = "macos")] pub mod macos;
 #[cfg(any(windows, target_os = "macos"))] pub mod tray;
