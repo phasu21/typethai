@@ -349,7 +349,7 @@ const NEXT_WORDS: usize = 3;
 pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
 /// (`ok` -> นา). Words on the don't-translate list are offered the same way.
-pub const REV_ALWAYS: [&str; 1] = ["ok"];
+pub const REV_ALWAYS: [&str; 2] = ["ok", "it"];
 /// Pauses Settings offers for the input-language preview to come back after: long enough to read as a real stop, and
 /// past the pause that brings up word completions. The default is the second: two seconds.
 pub const BADGE_IDLE_CHOICES_MS: [u64; 5] = [1000, 2000, 3000, 5000, 10000];
