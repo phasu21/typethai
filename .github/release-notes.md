@@ -1,5 +1,11 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.17**
+- **Fewer weak word suggestions.** When you pause and the best completion is only a small share of the plausible words
+  (under 15%), the bubble now stays hidden instead of showing three weak guesses. A clear favourite still shows the
+  usual three choices. The local suggestion log now records how confident each row was and when a popup was suppressed,
+  so the cutoff can be tuned from real use.
+
 **New in 0.5.15**
 - **A download chip on the suggestion bubble.** When there is something to act on (a staged release, one being
   downloaded, or one waiting to be opened by hand), a small download icon rides at the end of the bubble's

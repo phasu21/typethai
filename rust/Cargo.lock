@@ -7430,7 +7430,7 @@ dependencies = [
 
 [[package]]
 name = "typethai-desktop"
-version = "0.5.15"
+version = "0.5.17"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
