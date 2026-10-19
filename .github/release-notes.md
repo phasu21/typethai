@@ -1,5 +1,19 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.18**
+- **A notification when an update is ready.** When typeThai finds a release and stages it, it says so with a system
+  notification — *typeThai x.y.z is ready · Click to install it and start typeThai again* — so you no longer have to
+  open the tray to find out. Clicking the notification is exactly what clicking the tray item does. A copy that has to
+  be replaced by hand (*… is available*) opens the release page instead. One notification per release, none for a
+  check that found nothing. macOS asks for notification permission the first time there is something to say.
+- **Updates are checked when the computer wakes.** A laptop that slept through a release finds it on the next wake
+  instead of waiting up to six hours — at most one check an hour, and only while the automatic check is on.
+
+**Fixed in 0.5.18**
+- Update checks no longer use GitHub's API, which allows 60 requests an hour per address and answers a rate-limited
+  check with an error. The check now reads the tag GitHub redirects `releases/latest` to, so it cannot be throttled,
+  and it costs one small request instead of a release document.
+
 **New in 0.5.17**
 - **Fewer weak word suggestions.** When you pause and the best completion is only a small share of the plausible words
   (under 15%), the bubble now stays hidden instead of showing three weak guesses. A clear favourite still shows the
