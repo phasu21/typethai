@@ -560,9 +560,31 @@ unsafe fn control(st: &mut State) -> bool {
     if bridge::take(&bridge::REQ_QUIT) { st.app.save_and_wait(); let _ = st.tx.send(UiMsg::Stopped); return true }
     false
 }
-/// Low-level hooks are delivered to the installing thread's message loop, so the keyboard hook lives on its own thread
-/// with the Engine (the mouse hook on another, `mouse_thread`); gpui owns the main thread. A 25 ms thread timer services
-/// tray requests (pause / quit), clicks and the typing pause that brings up word completions.
+/// Wake from sleep: the machine may have been away for days, so the update check gets a nudge (`update::check_on_wake`,
+/// which throttles itself). The registration lives as long as the process, so the parameters it points at sit in a
+/// static rather than being handed to Windows as a temporary.
+pub fn watch_wake() {
+    use std::ffi::c_void;
+    use windows::Win32::System::Power::{PowerRegisterSuspendResumeNotification, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS};
+    use windows::Win32::UI::WindowsAndMessaging::DEVICE_NOTIFY_CALLBACK;
+
+    static PARAMS: std::sync::LazyLock<Params> = std::sync::LazyLock::new(|| Params(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS { Callback: Some(power_resumed), Context: std::ptr::null_mut() }));
+    let mut handle: *mut c_void = std::ptr::null_mut();
+    let rc = unsafe { PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, HANDLE(&*PARAMS as *const Params as *mut c_void), &mut handle) };
+    if rc.is_err() { eprintln!("typeThai: no wake notification ({rc:?}); updates are still checked every few hours") }
+}
+/// The parameters Windows holds for `PowerRegisterSuspendResumeNotification`.
+struct Params(windows::Win32::System::Power::DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS);
+// SAFETY: written once, never mutated, and only read by the power callback below.
+unsafe impl Send for Params {}
+unsafe impl Sync for Params {}
+
+/// The resume callback: `PBT_APMRESUMEAUTOMATIC` is the one that means the machine is back and usable.
+unsafe extern "system" fn power_resumed(_context: *const std::ffi::c_void, kind: u32, _setting: *const std::ffi::c_void) -> u32 {
+    const PBT_APMRESUMEAUTOMATIC: u32 = 0x0000_0012;
+    if kind == PBT_APMRESUMEAUTOMATIC { crate::update::check_on_wake() }
+    0 // ERROR_SUCCESS
+}
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();

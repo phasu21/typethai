@@ -120,12 +120,19 @@ the old typeThai entry from Accessibility and add the app again, once. Later upd
 
 ### Updates
 
-typeThai looks for a new release on GitHub at launch and every 6 hours, downloads it in the background and checks it
-against typeThai's signing key. The tray menu then shows **Restart to update to …**: nothing changes until you pick
-it. typeThai quits, the new version replaces it, and it starts again. **Check for updates** in the tray, or Settings →
-Updates, checks right away; the automatic check can be turned off there. When there is something to act on, a small
-**download chip** also rides at the end of the suggestion bubble: clicking it is the tray item's action, and hovering
-it says which release it is on its way to (*Update to version x.y.z*; Settings → Updates always shows the same thing).
+typeThai looks for a new release on GitHub at launch, every 6 hours and when the computer wakes from sleep, downloads
+it in the background and checks it against typeThai's signing key. The tray menu then shows **Restart to update to …**:
+nothing changes until you pick it. typeThai quits, the new version replaces it, and it starts again. **Check for
+updates** in the tray, or Settings → Updates, checks right away; the automatic check can be turned off there. When
+there is something to act on, a **system notification** says so — clicking it does what the tray item would (restart
+into the update, or open the page for a copy that has to be replaced by hand) — and a small **download chip** also
+rides at the end of the suggestion bubble: clicking it is the tray item's action, and hovering it says which release it
+is on its way to (*Update to version x.y.z*; Settings → Updates always shows the same thing).
+
+The update check reads the tag GitHub redirects `releases/latest` to, so it never uses the API and cannot be rate
+limited. `typethai-desktop --check-update` prints what it finds without downloading anything, and `--demo-toast` posts
+the notification (saying whether this copy can: macOS needs the app bundle, and the first one asks for notification
+permission).
 
 Updating in place works for the app in `/Applications` (or any folder you can write to) and for the Windows
 installer. A copy that can't replace itself (the Windows zip, a build from source) shows **Get typeThai …** instead,

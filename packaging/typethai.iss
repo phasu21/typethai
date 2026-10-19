@@ -43,7 +43,8 @@ Source: "{#Src}\DATA_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\typeThai"; Filename: "{app}\typethai-desktop.exe"
+; the same AppUserModelID typeThai sets at runtime, so its update toast is attributed to typeThai
+Name: "{autoprograms}\typeThai"; Filename: "{app}\typethai-desktop.exe"; AppUserModelID: "io.github.phasu21.typethai"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "typeThai"; \

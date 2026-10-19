@@ -5,11 +5,20 @@ pub mod follow;
 #[cfg(windows)] pub mod windows;
 #[cfg(target_os = "macos")] pub mod macos;
 #[cfg(any(windows, target_os = "macos"))] pub mod tray;
+/// The update toast (`post`), for the platforms that can show one.
+#[cfg(any(windows, target_os = "macos"))] pub mod notify;
 
 /// Ask the OS for the permission typeThai needs to see keys (macOS: Accessibility, with its pane and prompt; Windows
 /// needs none). Also reachable from the tray, when a first attempt was refused.
 pub fn request_permission() {
     #[cfg(target_os = "macos")] { macos::request_permission() }
+}
+
+/// Watch for the machine waking from sleep, and check for updates when it does (`update::check_on_wake`), so a laptop
+/// that slept through a release finds it without waiting for the periodic check.
+pub fn watch_wake() {
+    #[cfg(windows)] { windows::watch_wake() }
+    #[cfg(target_os = "macos")] { macos::watch_wake() }
 }
 
 pub fn run(app: crate::app::App) {

@@ -7,6 +7,35 @@ Without that variable, every model-backed test prints `SKIP` and passes vacuousl
 fall back to it, so all desktop and core tests really run. Run once with `/tmp/ttmodel/typethai-en.ttm` too (English
 completion frequencies).
 
+## Update toast, wake check, redirect feed (2026-10-19)
+
+- **System notification** (`platform/notify.rs`): one OS notification per release the user can act on. `Ready` →
+  *typeThai x.y.z is ready · Click to install it and start typeThai again*; `Available` (a copy that cannot replace
+  itself) → *… is available · Click to open the download page*. A click sets `bridge::REQ_UPDATE_CLICK`, the same
+  request the tray item raises, so the UI loop applies it (`update::click`: restart into the staged update, open the
+  page, or check). Posting happens on the UI thread from `update::take_toast()`; `NOTIFIED` keeps it to one toast per
+  version per process.
+  - macOS: `UNUserNotificationCenter` + a `define_class!` delegate (`willPresent` → banner even when typeThai is
+    frontmost; `didReceive` → the click). Permission is asked the first time there is something to say, not at launch.
+    A build with no bundle (`cargo run`) is skipped: `currentNotificationCenter` traps without one.
+  - Windows: WinRT toast with `<text>` title/body; the in-process `Activated` event is the click. AUMID
+    `io.github.phasu21.typethai`, set on the process (`SetCurrentProcessExplicitAppUserModelID`) and on the Start-menu
+    shortcut (`packaging/typethai.iss`). Kept alive in `LIVE` so the event still reaches the app.
+- **Wake check**: `platform::watch_wake()` — macOS `NSWorkspaceDidWakeNotification`, Windows
+  `PowerRegisterSuspendResumeNotification` (`PBT_APMRESUMEAUTOMATIC`) — sends `update::check_on_wake()`. The thread runs
+  it only with the periodic check on and the last check ≥ 1 h old (`WAKE_AFTER`), quietly (no Checking/Failed in the
+  tray), so a laptop that naps a lot does not pull an update per lid open.
+- **Feed**: `find()` asks `https://github.com/phasu21/typethai/releases/latest` without following the redirect
+  (`rewrite::http_agent_unfollowed`) and reads the tag off `Location`; `next_for_tag` builds the package and `.sig`
+  URLs from the release's fixed names. `api.github.com` is gone (60 requests/hour per address, and a 403 could not be
+  told from "no update"). `TYPETHAI_UPDATE_URL` still takes a JSON release document for tests.
+- **Diagnostics**: `--check-update` prints the tag GitHub redirects to and what would be installed (no download);
+  `--demo-toast` posts the notification and reports what macOS allows and whether Notification Center took it.
+- Verified: 10 `update::` tests, `--check-update` against live GitHub (v0.5.17 = current; the two constructed asset
+  URLs answer 200), `scripts/check-windows.sh` clean. Not run on Windows. The /tmp bundles used to exercise the toast
+  were refused by macOS (same bundle id as the installed app taken from another path); the installed app asks on first
+  use — if typeThai is off in System Settings → Notifications, the toast is skipped and the tray item still carries it.
+
 ## Nonsense-suggestion fix (2026-10-14)
 
 - Cause 1, personal model: `max_drift` capped each weight, not the total shift. Feature 37 (one-word line) has

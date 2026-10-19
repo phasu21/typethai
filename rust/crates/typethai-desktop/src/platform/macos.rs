@@ -654,6 +654,18 @@ pub fn request_permission() {
     let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility").status();
 }
 
+/// Wake from sleep: the machine may have been away for days, so the update check gets a nudge (`update::check_on_wake`,
+/// which throttles itself). The observation is never removed — it lasts as long as the process — so the token the
+/// center hands back is not kept.
+pub fn watch_wake() {
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceDidWakeNotification};
+    use objc2_foundation::NSNotification;
+    use std::ptr::NonNull;
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let block = block2::RcBlock::new(|_: NonNull<NSNotification>| crate::update::check_on_wake());
+    let _ = unsafe { center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceDidWakeNotification), None, None, &block) };
+}
+
 pub fn run(app: App) {
     if unsafe { !AXIsProcessTrusted() } && !no_permission() {
         // a record that does not match this build is the reported "the switch is on and nothing works": clear our own

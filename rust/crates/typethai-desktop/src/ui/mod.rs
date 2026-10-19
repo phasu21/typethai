@@ -533,10 +533,31 @@ fn tip_box(window: &Window, text: &str) -> (f64, f64) {
 }
 /// The tip's text in the bubble demo: with the version after the built one (`--screenshot` exercises `show_text`, which
 /// takes the text verbatim, without asking the updater, which never talks to GitHub in the demo).
-fn tip_demo_text() -> String {
+fn tip_demo_text() -> String { format!("Update to version {}", next_version()) }
+/// The version after the running one: what the tip and the notification demo name.
+fn next_version() -> String {
     let p: Vec<u32> = update::CURRENT.split('.').filter_map(|s| s.parse().ok()).collect();
-    let next = if p.len() == 3 { format!("{}.{}.{}", p[0], p[1], p[2] + 1) } else { update::CURRENT.into() };
-    format!("Update to version {next}")
+    if p.len() == 3 { format!("{}.{}.{}", p[0], p[1], p[2] + 1) } else { update::CURRENT.into() }
+}
+/// `--demo-toast`: post the system notification an update raises, through the same call the UI loop makes, then ask
+/// Notification Center what it took. It says which it did: a dev build has no bundle, and macOS refuses the
+/// notification center without one.
+pub fn demo_toast() {
+    let title = format!("typeThai {} is ready", next_version());
+    let body = "Click to install it and start typeThai again.";
+    if !super::platform::notify::post(&title, body) {
+        println!("not posted: this copy cannot post notifications (on macOS, run it from the app bundle)");
+        return
+    }
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let shown = super::platform::notify::delivered();
+    if shown.iter().any(|t| t == &title) {
+        println!("posted and in Notification Center: {title}\n  (clicking it is the tray item's action)")
+    } else if cfg!(target_os = "macos") {
+        println!("posted: {title}\n  (not in Notification Center; macOS says notifications are: {})", super::platform::notify::authorization())
+    } else {
+        println!("posted: {title}")
+    }
 }
 
 fn app() -> Application { application().with_assets(AppAssets).with_quit_mode(QuitMode::Explicit) }
@@ -559,6 +580,7 @@ fn setup(cx: &mut App) {
 pub fn run(rx: Receiver<UiMsg>) {
     app().run(move |cx| {
         setup(cx);
+        super::platform::watch_wake();
         let mut ui = open_bubble(cx);
         let mut badge = BadgeWin::open(cx);
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
@@ -624,6 +646,13 @@ pub fn run(rx: Receiver<UiMsg>) {
                         let chip = update::chip(); let tip = ui.view.read(cx).tip.clone();
                         ui.view.update(cx, |v, _| v.update = chip);
                         if !chip { if let Some(tip) = tip { tip.hide(cx) } }
+                    }
+                    // the system notification for a release worth interrupting for (one per version): the tray item and
+                    // the chip carry it afterwards either way
+                    if let Some(t) = update::take_toast() {
+                        if !super::platform::notify::post(&t.title, &t.body) {
+                            eprintln!("typeThai: {} — no system notification from this copy", t.title);
+                        }
                     }
                     let front = bridge::front_app();
                     if front != front_app { if let Some(t) = &tray { t.set_front_app(front.as_ref()) } front_app = front; }

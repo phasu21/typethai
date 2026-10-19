@@ -7,6 +7,13 @@ mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
     let args: Vec<String> = std::env::args().collect();
+    // --check-update: ask GitHub for the latest release (through the redirect, no API) and print what it found
+    if args.iter().any(|a| a == "--check-update") { update::print_check(); return }
+    // --demo-toast: post the system notification an update raises, and say whether this copy can
+    if args.iter().any(|a| a == "--demo-toast") {
+        #[cfg(any(windows, target_os = "macos"))] { ui::demo_toast(); return }
+        #[cfg(not(any(windows, target_os = "macos")))] { eprintln!("--demo-toast needs macOS or Windows"); std::process::exit(2) }
+    }
     if let Some(i) = args.iter().position(|a| a == "--demo-bubble") {
         // extra debug options: --screenshot PATH (capture the bubble's own window to a PNG, then quit),
         // --items "a|b|c" (custom rows instead of the samples; repeat it to update the bubble in place; a row ending in

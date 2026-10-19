@@ -571,9 +571,9 @@ impl SettingsView {
         // the same action as the tray item: check, restart into a downloaded update, or open the release page
         let now = custom_field(view, |_, _, _, _| { let (label, enabled) = update::status().menu();
             Button::new("update-now").label(label).disabled(!enabled).on_click(|_, _, _| bridge::REQ_UPDATE_CLICK.store(true, std::sync::atomic::Ordering::SeqCst)).into_any_element() });
-        page("Updates", Icon::new(gpui_kit::assets::IconName::Download), format!("You have typeThai {}. Updates come from the typeThai releases on GitHub, are checked against typeThai's signing key, and install only when you choose Restart to update.", update::CURRENT),
-            keywords(&["updates", "update", "version", "release", "upgrade", "github", "download", "restart"], std::iter::empty()),
-            vec![SettingItem::new("Check automatically", auto).description("Look for a new version at launch and every 6 hours, and download it in the background. Only GitHub is contacted."),
+        page("Updates", Icon::new(gpui_kit::assets::IconName::Download), format!("You have typeThai {}. Updates come from the typeThai releases on GitHub, are checked against typeThai's signing key, and install only when you choose Restart to update. When one is ready, a notification says so: clicking it is the same as clicking the tray item.", update::CURRENT),
+            keywords(&["updates", "update", "version", "release", "upgrade", "github", "download", "restart", "notification"], std::iter::empty()),
+            vec![SettingItem::new("Check automatically", auto).description("Look for a new version at launch, every 6 hours and when this computer wakes from sleep, and download it in the background. Only GitHub is contacted."),
                 SettingItem::new("Update", now)])
     }
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {

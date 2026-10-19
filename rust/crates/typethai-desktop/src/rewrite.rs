@@ -167,6 +167,13 @@ pub fn http_agent(timeout: Duration) -> ureq::Agent {
     let tls = if cfg!(windows) { TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier) } else { TlsConfig::builder() };
     ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).tls_config(tls.build()).build())
 }
+/// The same client, with redirects left to the caller: the update check reads the tag off `Location` instead of fetching
+/// the page it points at.
+pub fn http_agent_unfollowed(timeout: Duration) -> ureq::Agent {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    let tls = if cfg!(windows) { TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier) } else { TlsConfig::builder() };
+    ureq::Agent::new_with_config(ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).tls_config(tls.build()).build())
+}
 /// Blocking POST, run on its own short-lived thread.
 fn call(run: &Run, key: &secret::ApiKey) -> Result<String, Failure> {
     let agent = http_agent(TIMEOUT);
