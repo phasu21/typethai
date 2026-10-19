@@ -1,12 +1,13 @@
 //! Shared startup: CLI options, model + personal-state loading/saving, hotkey mapping.
 use crate::engine::{Action, Engine, Hotkey, Options};
 use crate::prefs::{self, Prefs};
+use crate::rank;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::path::Path;
 use typethai_core::{completer::WordMemory, personal::{PersonalModel, DEFAULT_PERSONAL}, ModelFiles};
 
-pub struct Cli { pub model: PathBuf, pub state: PathBuf, pub switch_input: bool, pub reverse: bool, pub list_sources: bool, pub eval_live: Option<String>, pub eval_split: String, pub eval_reverse: bool, pub eval_typo: Option<String>, pub slip_rate: Option<f64>, pub seed: u64, pub per_file: usize, pub no_typo: bool, pub simulate: bool, pub auto_convert: bool, pub open_settings: bool, pub settings_page: usize }
+pub struct Cli { pub model: PathBuf, pub state: PathBuf, pub switch_input: bool, pub reverse: bool, pub list_sources: bool, pub eval_live: Option<String>, pub eval_split: String, pub eval_reverse: bool, pub eval_typo: Option<String>, pub slip_rate: Option<f64>, pub seed: u64, pub per_file: usize, pub no_typo: bool, pub simulate: bool, pub auto_convert: bool, pub open_settings: bool, pub settings_page: usize, pub rank_report: Option<String> }
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)] { std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into()).join("typethai") }
     #[cfg(target_os = "macos")] { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into()).join("Library/Application Support/typethai") }
@@ -20,20 +21,22 @@ fn default_model() -> PathBuf {
 }
 impl Cli {
     pub fn parse() -> Cli {
-        let mut c = Cli { model: default_model(), state: config_dir().join("personal.json"), switch_input: true, reverse: true, list_sources: false, eval_live: None, eval_split: "dev".into(), eval_reverse: false, eval_typo: None, slip_rate: None, seed: 1, per_file: 1500, no_typo: false, simulate: false, auto_convert: false, open_settings: false, settings_page: 0 };
-        let mut it = std::env::args().skip(1);
+        let mut c = Cli { model: default_model(), state: config_dir().join("personal.json"), switch_input: true, reverse: true, list_sources: false, eval_live: None, eval_split: "dev".into(), eval_reverse: false, eval_typo: None, slip_rate: None, seed: 1, per_file: 1500, no_typo: false, simulate: false, auto_convert: false, open_settings: false, settings_page: 0, rank_report: None };
+        let mut it = std::env::args().skip(1).peekable();
         while let Some(a) = it.next() { match a.as_str() {
             "--model" => c.model = it.next().expect("--model PATH").into(), "--state" => c.state = it.next().expect("--state PATH").into(),
             "--switch-layout" => c.switch_input = true, "--no-switch-input" => c.switch_input = false, "--no-reverse" => c.reverse = false, "--list-input-sources" => c.list_sources = true,
             "--eval-live" => c.eval_live = it.next(), "--reverse" => c.eval_reverse = true,
             "--eval-typo" => c.eval_typo = it.next(), "--slip-rate" => c.slip_rate = it.next().and_then(|r| r.parse().ok()), "--seed" => c.seed = it.next().and_then(|r| r.parse().ok()).expect("--seed N"), "--per-file" => c.per_file = it.next().and_then(|r| r.parse().ok()).expect("--per-file N"), "--split" => c.eval_split = it.next().expect("--split dev|test"), "--no-typo" => c.no_typo = true, "--simulate" => c.simulate = true, "--auto-convert" => c.auto_convert = true, "--settings" => c.open_settings = true, "--settings-page" => c.settings_page = it.next().and_then(|s| s.parse().ok()).expect("--settings-page N"),
-            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--settings [--settings-page N]] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--vertical] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n       typethai-desktop --demo-badge [x,y ...] [--secs N] [--en] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the input-language badge at a fake caret)\n       typethai-desktop --demo-hold [x,y ...] [--progress P] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the hold-Tab indicator)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row when released, Tab held + 1..3 applies that row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nSettings > Word suggestions > Pick with: Ctrl+1–3 (prefs.json \"pick_with_ctrl\": true, off by default) makes Ctrl+1..3 apply a row while the bubble is up; otherwise those keys reach the app.\nCtrl+Opt/Alt+R: with text selected, offers it in the other layout and with typos fixed (on this computer), then AI Fix typos / Translate when set up in Settings; with nothing selected, offers the conversion and spelling fixes for the word before the caret. Tab held + R does the same for the word just typed (Tab after a word is sent on release).\nSettings > Word suggestions > Accept with: Tab or Space (prefs.json \"accept_with\": \"tab_or_space\") makes Space apply the highlighted row too, only when it is a mid-word conversion, then type the space; over other rows Space is a plain space. With --auto-convert too, a word with a live row up is converted by that row, and other words still convert at the boundary.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable).\n--settings opens the Settings window at launch, for when the tray icon is hidden."); std::process::exit(0) }
+            // the file is optional: without one the log beside the state file is read
+            "--rank-report" => c.rank_report = Some(if it.peek().is_some_and(|s| !s.starts_with("--")) { it.next().unwrap() } else { String::new() }),
+            "-h" | "--help" => { println!("typethai-desktop [--model FILE.ttm|DIR] [--state personal.json] [--no-switch-input] [--no-reverse] [--no-typo] [--auto-convert] [--settings [--settings-page N]] [--simulate] [--list-input-sources]\n       typethai-desktop --demo-bubble [x,y ...] [--secs N]   [--items \"a|b\"] [--select N] [--vertical] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the bubble at screen points, global top-left coords)\n       typethai-desktop --demo-badge [x,y ...] [--secs N] [--en] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the input-language badge at a fake caret)\n       typethai-desktop --demo-hold [x,y ...] [--progress P] [--light] [--backdrop light|dark] [--screenshot PNG]   (show the hold-Tab indicator)\n\nNothing is converted automatically: Space/Enter/punctuation pass through and the bubble offers the conversion (also for the word just finished); Tab or Ctrl+Opt/Alt+1..3 applies it. --auto-convert restores the old convert-at-boundary behaviour.\nWhile the bubble is up: Tab applies the selected row when released, Tab held + 1..3 applies that row, Shift+Up/Down move the selection, Esc dismisses, Ctrl+Opt/Alt+1..3 apply a row.\nSettings > Word suggestions > Pick with: Ctrl+1–3 (prefs.json \"pick_with_ctrl\": true, off by default) makes Ctrl+1..3 apply a row while the bubble is up; otherwise those keys reach the app.\nCtrl+Opt/Alt+R: with text selected, offers it in the other layout and with typos fixed (on this computer), then AI Fix typos / Translate when set up in Settings; with nothing selected, offers the conversion and spelling fixes for the word before the caret. Tab held + R does the same for the word just typed (Tab after a word is sent on release).\nSettings > Word suggestions > Accept with: Tab or Space (prefs.json \"accept_with\": \"tab_or_space\") makes Space apply the highlighted row too, only when it is a mid-word conversion, then type the space; over other rows Space is a plain space. With --auto-convert too, a word with a live row up is converted by that row, and other words still convert at the boundary.\nAfter applying, the OS input source is switched to Thai (Kedmanee) or ABC/US to match (--no-switch-input to disable).\n--settings opens the Settings window at launch, for when the tray icon is hidden.\n--rank-report [FILE] prints what the bubble offered and which row was picked (default: rank.jsonl beside the state file)."); std::process::exit(0) }
             x => { eprintln!("unknown arg {x}"); std::process::exit(2) }
         } }
         c
     }
 }
-pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: PathBuf, pub words_path: PathBuf, saver: Saver,
+pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: PathBuf, pub words_path: PathBuf, pub rank_path: PathBuf, saver: Saver,
     /// Apps typeThai is turned fully off in (see `prefs::app_key`), keyed by the app id as stored; the value is the name
     /// the tray and Settings show. Mirrors `prefs.json`.
     off_apps: std::collections::BTreeMap<String, String>,
@@ -43,7 +46,8 @@ pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: Pa
 /// Writes the state files on a thread of its own, in the order asked: serialising a full words.json takes about 1.5 ms,
 /// too long for the key tap callback that triggers the save.
 struct Saver { tx: mpsc::Sender<Save> }
-enum Save { Text(PathBuf, String), Words(PathBuf, Arc<WordMemory>), Flush(mpsc::Sender<()>) }
+/// The saver's work: whole files rewritten, and the offer log, which is appended to (its flag clears it first).
+enum Save { Text(PathBuf, String), Words(PathBuf, Arc<WordMemory>), Rank(PathBuf, Vec<rank::Event>, bool), Flush(mpsc::Sender<()>) }
 impl Saver {
     fn spawn() -> Saver {
         let (tx, rx) = mpsc::channel();
@@ -51,6 +55,8 @@ impl Saver {
             match s {
                 Save::Text(p, t) => write_file(&p, &t),
                 Save::Words(p, m) => write_file(&p, &m.to_json()),
+                // the log is appended to, not rewritten: a clear is the only time the file goes
+                Save::Rank(p, e, clear) => { if clear { rank::remove(&p) } let _ = rank::append(&p, &e); }
                 Save::Flush(done) => { let _ = done.send(()); }
             }
         });
@@ -86,10 +92,13 @@ impl App {
         (engine.never, engine.offer_last, engine.opts.complete, engine.opts.complete_idle, engine.opts.tab_hold, engine.opts.learn_words, engine.opts.predict, engine.opts.accept, engine.opts.pick_ctrl, engine.opts.pick_arrows, engine.opts.input_badge, engine.opts.badge_idle, engine.opts.next_word, engine.opts.bubble, engine.rewrite, engine.check_updates) = (p.never, p.offer_last, p.completion, p.complete_idle, p.tab_hold, p.learn_words, p.predict, p.accept, p.pick_ctrl, p.pick_arrows, p.input_badge, p.badge_idle, p.next_word, p.bubble, p.rewrite, p.check_updates);
         let words_path = cli.state.with_file_name("words.json");
         engine.words = Arc::new(load_words(&words_path));
+        // a log that has grown past its cap comes down to its last half once, here, not on the typing path
+        let rank_path = rank::path_beside(&cli.state);
+        rank::trim(&rank_path);
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
         engine.load_completers(&mut m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
-        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, off_apps: p.off_apps, front: None, saver: Saver::spawn() };
+        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, rank_path, off_apps: p.off_apps, front: None, saver: Saver::spawn() };
         app.set_predict(app.engine.opts.predict);
         Ok(app)
     }
@@ -110,12 +119,21 @@ impl App {
         self.saver.send(Save::Text(self.state_path.clone(), self.engine.personal.to_json()));
         self.saver.send(Save::Words(self.words_path.clone(), Arc::clone(&self.engine.words)));
         self.engine.events_since_save = 0;
+        self.save_rank();
+    }
+    /// Hand the closed offers to the saver, and drop the log file when learning was reset. Nothing is sent when there
+    /// is nothing to write.
+    fn save_rank(&mut self) {
+        let cleared = std::mem::take(&mut self.engine.rank.cleared);
+        let events = self.engine.rank.take_pending();
+        if cleared || !events.is_empty() { self.saver.send(Save::Rank(self.rank_path.clone(), events, cleared)); }
     }
     /// Save, and return once the files are on disk (quitting).
     pub fn save_and_wait(&mut self) { self.save(); if let Some(p) = &self.engine.predict { p.flush() } self.saver.flush(); }
     /// After a key or a click: the state every few learning events, prefs.json as soon as a rating changed it.
     pub fn maybe_save(&mut self) {
         if self.engine.events_since_save >= 10 { self.save() }
+        else if self.engine.rank.pending() >= rank::FLUSH_EVERY || self.engine.rank.cleared { self.save_rank() }
         if std::mem::take(&mut self.engine.prefs_dirty) { self.save_prefs() }
     }
     pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), offer_last: self.engine.offer_last.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, next_word: self.engine.opts.next_word, bubble: self.engine.opts.bubble, rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates, off_apps: self.off_apps.clone() }.save(&self.prefs_path); }
@@ -123,6 +141,7 @@ impl App {
     /// tell the tray/UI and return the engine's actions (a bubble or preview that was up goes away).
     pub fn set_front_app(&mut self, id: &str, name: &str) -> Vec<Action> {
         self.front = Some((id.to_string(), name.to_string()));
+        self.engine.rank.app = prefs::app_key(id);
         self.refresh_front_off()
     }
     /// Recompute the off state for the app in front and publish it. An empty id is never off (`prefs::app_key`).
@@ -161,7 +180,7 @@ impl App {
     /// A minimal App around a model-free engine, for tests in other modules that never touch the state files.
     pub(crate) fn for_test(engine: Engine) -> App {
         let dir = std::env::temp_dir().join(format!("typethai-app-test-{}", std::process::id()));
-        App { engine, state_path: dir.join("personal.json"), prefs_path: dir.join("prefs.json"), words_path: dir.join("words.json"), off_apps: Default::default(), front: None, saver: Saver::spawn() }
+        App { engine, state_path: dir.join("personal.json"), prefs_path: dir.join("prefs.json"), words_path: dir.join("words.json"), rank_path: dir.join("rank.jsonl"), off_apps: Default::default(), front: None, saver: Saver::spawn() }
     }
 }
 
@@ -180,6 +199,25 @@ mod tests {
         assert_eq!(load_words(&path), m);
         std::fs::write(&path, "{\"clock\":").unwrap();
         assert_eq!(load_words(&path), WordMemory::default(), "corrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn the_saver_appends_the_rank_log_and_a_clear_wipes_it() {
+        let dir = std::env::temp_dir().join(format!("typethai-rank-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("rank.jsonl");
+        let saver = Saver::spawn();
+        let offered = rank::Event { t: 1, app: "com.apple.TextEdit".into(), w: "l;y".into(), prev: None, rev: false,
+            rows: vec![rank::Row { w: "สวัสดี".into(), r: Some("th".into()) }], pick: None, ms: 400 };
+        saver.send(Save::Rank(path.clone(), vec![offered.clone()], false));
+        saver.flush();
+        assert_eq!(rank::load(&path).0, vec![offered.clone()], "offers are appended as they close");
+        saver.send(Save::Rank(path.clone(), vec![], true));
+        saver.flush();
+        assert!(rank::load(&path).0.is_empty(), "a learning reset leaves no offers behind");
+        saver.send(Save::Rank(path.clone(), vec![offered.clone()], false));
+        saver.flush();
+        assert_eq!(rank::load(&path).0, vec![offered], "and the log starts again after it");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]

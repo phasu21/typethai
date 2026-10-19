@@ -5,6 +5,7 @@ use crate::backspace::{self, DeleteUnit};
 use crate::bridge::BubbleLayout;
 use crate::predict;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
+use crate::rank::{Ctx, How, RankLog, Row};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -93,6 +94,17 @@ pub fn lang_of(s: &str) -> InputLang { if s.chars().any(|c| ('\u{0E00}'..='\u{0E
 fn layout_of(insert: &str) -> Option<InputLang> {
     let l = lang_of(insert);
     (l == InputLang::Thai || insert.chars().any(|c| c.is_ascii_alphabetic())).then_some(l)
+}
+/// A bubble row as the rank log keeps it: the text that would be applied, and why it was offered (`th`, `en`, `typo`;
+/// None for a completion, a next-word row or an AI row).
+fn rank_row(i: &BubbleItem) -> Row {
+    let r = match i.reason() {
+        Some(Reason::Layout(InputLang::Thai)) => Some("th".into()),
+        Some(Reason::Layout(InputLang::Latin)) => Some("en".into()),
+        Some(Reason::Typo) => Some("typo".into()),
+        None => None,
+    };
+    Row { w: i.label.clone(), r }
 }
 
 /// Bubble selection: index into the visible items, wrapping. Pure state machine.
@@ -426,11 +438,17 @@ pub struct Engine {
     line_learned: bool,
     /// What one Backspace removes in the focused app; the platform sets it when another app gets the keys.
     pub delete_unit: DeleteUnit,
+    /// The bubble offers this run made and the row applied to each (`rank.rs`): what `--rank-report` measures and what
+    /// a ranker would be trained on. Nothing reads it while you type, and **Learn from my typing** off stops it.
+    pub rank: RankLog,
+    /// How the row being applied was picked; `Hotkey::Accept` alone cannot tell a click from a number. Taken (back to
+    /// `How::Other`) by every apply.
+    pick: How,
 }
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -585,6 +603,7 @@ impl Engine {
     }
     fn reset_inner(&mut self) -> Vec<Action> {
         if !self.off { self.settle(); self.learn_line(); }
+        self.rank.close();
         self.line_learned = false;
         self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
@@ -649,6 +668,9 @@ impl Engine {
         // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks; a conversion rated
         // down goes after everything
         items.sort_by_key(|i| if i.rated_word().is_some_and(|w| self.rated_down(w)) { 3 } else { match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 } });
+        // what this bubble offered, for the rank log: the rows of one word are one offer, and the index a row is
+        // applied by is its place here
+        if self.opts.learn_words { let ctx = self.offer_ctx(&items); self.rank.offer(ctx, items.iter().map(rank_row).collect()) }
         self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
         let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
             else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); self.badge_up = false; Action::ShowBubble(items) };
@@ -686,7 +708,7 @@ impl Engine {
             self.in_bubble = false; let mut o = self.on_key_inner(k); o.actions.insert(0, Action::Focus(false)); return o
         }
         if let Some(o) = self.tab_chord(&k) { return o }
-        let k = match k { Key::PickRow(i) if self.picks_rows() => return self.accept_held(i), Key::PickRow(_) => Key::Nav, k => k };
+        let k = match k { Key::PickRow(i) if self.picks_rows() => return self.pick_with(How::Digit, i), Key::PickRow(_) => Key::Nav, k => k };
         if self.rewriting() && !self.rewrite_keeps(&k) { let mut a = self.reset(); let mut o = self.on_key_inner(k); a.append(&mut o.actions); o.actions = a; return o }
         match k {
             Key::Char(c) => {
@@ -715,7 +737,7 @@ impl Engine {
             // Cmd+Backspace deletes the whole line: nothing of it is left to offer
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
-            Key::Boundary(Boundary::Space) if self.space_accepts() => self.accept_rolled(k),
+            Key::Boundary(Boundary::Space) if self.space_accepts() => { self.pick = How::Space; self.accept_rolled(k) }
             Key::Arrow(a) => self.on_arrow(a),
             // Enter in the bubble applies the selection, like Tab
             Key::Boundary(Boundary::Enter) if (self.fixing || self.in_bubble) && self.bubble_visible() => {
@@ -731,7 +753,7 @@ impl Engine {
         if !self.bubble_visible() || !self.is_arrow_key(&Key::Arrow(a)) { return self.on_key_inner(Key::Nav) }
         let acts = match (self.in_bubble, a) {
             (false, _) => { self.in_bubble = true; vec![Action::Focus(true)] }
-            (true, Arrow::Up) => return self.accept_held(self.sel.idx),
+            (true, Arrow::Up) => return self.pick_with(How::Arrow, self.sel.idx),
             (true, Arrow::Left) => vec![Action::Select(self.sel.prev())],
             (true, Arrow::Right) => vec![Action::Select(self.sel.next())],
             (true, Arrow::Down) => { self.in_bubble = false; vec![Action::Focus(false)] }
@@ -754,13 +776,13 @@ impl Engine {
             // typed on before Tab came up: the Tab goes first, then the key
             (TabChord::Held, Key::Char(_) | Key::Boundary(_)) => { self.tab = TabChord::Up; self.release_tab_before(k.clone()) }
             (TabChord::Held, _) => { self.tab = TabChord::Up; let mut o = self.release_tab(); let p = self.on_key_inner(k.clone()); o.actions.extend(p.actions); o.swallow = p.swallow; o }
-            (TabChord::Armed, Key::TabUp) => { self.tab = TabChord::Up; self.accept_held(self.sel.idx) }
+            (TabChord::Armed, Key::TabUp) => { self.tab = TabChord::Up; self.pick_with(How::Tab, self.sel.idx) }
             (TabChord::Spent, Key::TabUp) => { self.tab = TabChord::Up; swallowed }
             // a digit is never typed while Tab is down; past the last row it does nothing
-            (_, Key::Char(d @ '1'..='3')) => { self.tab = TabChord::Spent; self.accept_held(*d as usize - '1' as usize) }
+            (_, Key::Char(d @ '1'..='3')) => { self.tab = TabChord::Spent; self.pick_with(How::Digit, *d as usize - '1' as usize) }
             // bubble controls work as usual: the release applies whatever is then selected, if the bubble is still up
             (_, Key::SelectPrev | Key::SelectNext | Key::Esc | Key::Hotkey(_)) => return None,
-            (TabChord::Armed, Key::Char(_) | Key::Boundary(_)) => { self.tab = TabChord::Up; self.accept_rolled(k.clone()) }
+            (TabChord::Armed, Key::Char(_) | Key::Boundary(_)) => { self.tab = TabChord::Up; self.pick = How::Tab; self.accept_rolled(k.clone()) }
             // caret moves and deletions drop the held Tab: the bubble no longer matches the text
             _ => { self.tab = TabChord::Up; return None }
         })
@@ -795,6 +817,9 @@ impl Engine {
         o
     }
     fn accept_held(&mut self, i: usize) -> Outcome { let mut o = self.on_hotkey(Hotkey::Accept(i)); o.swallow = true; o }
+    /// Apply row `i`, remembering which key did it (the log's `rank::How`: `Hotkey::Accept` cannot tell a click from a
+    /// number, and a reflex Tab from a deliberate pick).
+    fn pick_with(&mut self, how: How, i: usize) -> Outcome { self.pick = how; self.accept_held(i) }
     /// A key typed before the held Tab came up (fast typing rolls Tab into the next key): the Tab counts as released
     /// first. The key is folded into the replacement instead of passing through, which would put it on screen before
     /// the injected text. Space accepting a live row (`AcceptKeys::TabOrSpace`) goes the same way.
@@ -830,7 +855,7 @@ impl Engine {
             SettingsCmd::AddNever(w) => self.insert_never(&w),
             SettingsCmd::RemoveNever(w) => self.remove_never(&w),
             SettingsCmd::Forget(w) => self.forget_learned(&w),
-            SettingsCmd::ResetLearning => { self.personal.reset(); self.events_since_save += 1; true }
+            SettingsCmd::ResetLearning => { self.personal.reset(); self.rank.reset(); self.events_since_save += 1; true }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
             SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
             SettingsCmd::SetTabHold(d) => { let changed = self.opts.tab_hold != d; self.opts.tab_hold = d; changed }
@@ -842,7 +867,7 @@ impl Engine {
             SettingsCmd::SetBadgeIdle(d) => { let changed = self.opts.badge_idle != d; self.opts.badge_idle = d; changed }
             SettingsCmd::SetNextWord(on) => { let changed = self.opts.next_word != on; self.opts.next_word = on; changed }
             SettingsCmd::SetBubbleLayout(l) => { let changed = self.opts.bubble != l; self.opts.bubble = l; changed }
-            SettingsCmd::ForgetWords => { self.words = Arc::default(); if let Some(p) = &self.predict { p.forget() } self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.events_since_save += 1; true }
+            SettingsCmd::ForgetWords => { self.words = Arc::default(); self.rank.reset(); if let Some(p) = &self.predict { p.forget() } self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.events_since_save += 1; true }
             SettingsCmd::SetPredict(on) => { let changed = self.opts.predict != on; self.opts.predict = on; self.pred_ask = None; self.pred_answer = None; self.pred_shown = None; self.pred_next_ask = None; self.pred_next_answer = None; changed }
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
             SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
@@ -1265,6 +1290,20 @@ impl Engine {
         if c.after().contains('\n') { return None }
         self.screen_words(c.shown()).pop().flatten()
     }
+    /// What the bubble about to show is about (`rank::Ctx`): the buffer being typed, or the word just finished — a
+    /// boundary offers it before it reaches `line`, and the rows name the text they would replace. Rows for one word,
+    /// however many keystrokes refreshed them, are one offer in the rank log.
+    fn offer_ctx(&self, items: &[BubbleItem]) -> Ctx {
+        let w = if !self.word.is_empty() { self.word.clone() } else {
+            items.iter().find_map(|i| match &i.kind {
+                BubbleKind::Live { typed, .. } | BubbleKind::Convert { typed, .. } => Some(typed.clone()),
+                BubbleKind::Typo { word } => Some(word.clone()),
+                BubbleKind::UndoConversion => Some(i.label.clone()),
+                _ => None,
+            }).or_else(|| self.line.last().map(|c| c.shown().to_string())).unwrap_or_default()
+        };
+        Ctx { line: self.line.len(), w, prev: self.word_before(self.line.len()), rev: self.thai_active }
+    }
     /// Give the committed words not learned yet to the word memory, as they are on screen now: what a conversion
     /// replaced is learned as its result. Runs when the next word starts (no bubble can change them any more) and
     /// before the line is forgotten.
@@ -1558,7 +1597,11 @@ impl Engine {
                 self.show(item.into_iter().collect(), &mut acts);
             }
             Hotkey::Accept(i) => {
+                let how = std::mem::take(&mut self.pick);
                 let Some(item) = self.bubble.get(i).cloned() else { return Outcome::pass() };
+                // what the user picked, which is what the log is for; the guards below may still turn down a row that
+                // went stale, and Convert / UndoConversion hand off to their own hotkey and never reach the end
+                self.rank.picked(i, how);
                 match item.kind {
                     BubbleKind::Live { typed, thai, prev } => {
                         if !self.live_current(&typed, prev) { return Outcome::pass() }
@@ -3974,6 +4017,51 @@ mod tests {
         e.reset(); e.set_thai_active(false); typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
         assert_eq!(labels(&e), ["โรงเรยีน", "โรงเรียน", "โรงเรือน"], "ยี swapped");
         e.reset(); typ(&mut e, &format!("{} ", keys("ร้านอาหร"))); assert_eq!(labels(&e), ["ร้านอาหร", "ร้านอาหาร"], "า left out");
+    }
+    #[test] fn the_rank_log_keeps_the_rows_offered_and_the_row_applied() {
+        let Some(mut e) = engine_typo() else { return };
+        e.opts.pick_ctrl = true;
+        // a typo of the word just finished: the corrector's fixes, in its order
+        typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        let rows = e.bubble.len();
+        assert!(rows >= 2, "more than one row to choose between");
+        e.on_key(Key::PickRow(1));
+        let offers = e.rank.take_pending();
+        assert_eq!(offers.len(), 1, "one offer, one line");
+        assert_eq!((offers[0].rows.len(), offers[0].w.as_str()), (rows, keys("โรงเรยีน").as_str()));
+        let pick = offers[0].pick.clone().expect("a row was applied");
+        assert_eq!((pick.i, pick.how), (1, How::Digit), "the second row, picked with a number");
+    }
+    #[test] fn one_word_is_one_offer_however_many_keys_refresh_it() {
+        let Some(mut e) = engine() else { return };
+        typ(&mut e, "l;ylfu");
+        assert!(e.bubble_visible(), "the live row came up while the word was still being typed");
+        e.on_key(Key::Esc);
+        assert_eq!(e.rank.take_pending().len(), 1, "five keystrokes, one word: one line");
+    }
+    #[test] fn a_dismissed_bubble_is_logged_with_no_pick() {
+        let Some(mut e) = engine_typo() else { return };
+        typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        assert!(!e.bubble.is_empty());
+        e.on_key(Key::Esc);
+        let offers = e.rank.take_pending();
+        assert_eq!((offers.len(), offers[0].pick.clone()), (1, None), "nothing was applied, and that is the measurement");
+    }
+    #[test] fn nothing_is_logged_while_learn_from_my_typing_is_off() {
+        let Some(mut e) = engine_typo() else { return };
+        e.opts.learn_words = false;
+        typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        assert!(!e.bubble.is_empty(), "the bubble still offers it");
+        e.on_key(Key::Hotkey(Hotkey::Accept(0)));
+        assert!(e.rank.is_empty(), "the log goes with the setting");
+    }
+    #[test] fn resetting_learning_clears_the_rank_log() {
+        let Some(mut e) = engine_typo() else { return };
+        typ(&mut e, &format!("{} ", keys("โรงเรยีน")));
+        e.on_key(Key::Hotkey(Hotkey::Accept(0)));
+        assert_eq!(e.rank.pending(), 1);
+        assert!(e.apply_settings(SettingsCmd::ResetLearning));
+        assert_eq!((e.rank.pending(), e.rank.cleared, e.rank.is_empty()), (0, true, true), "and the file goes with it");
     }
     #[test] fn model_completers_skip_english_without_its_frequencies() {
         let Some(mut m) = model() else { return };

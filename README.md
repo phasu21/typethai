@@ -199,6 +199,7 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
 | `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
+| `--rank-report [FILE]` | Print what the bubble offered and which row was picked, over the log of this machine (`rank.jsonl` beside the state file, or FILE) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
 | `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
@@ -230,6 +231,11 @@ in between) to run the guess-convert on the current or last word instead of usin
 - With **Learn from my typing** on (the default), the words you finish and which word came before each are counted in
   `words.json`, next to `personal.json`, to rank word suggestions. Text in password fields is never seen. Turn the
   setting off to stop counting, and use **Forget learned words** or delete the file to clear it.
+- The same setting writes `rank.jsonl`, next to it: one line per word the bubble offered, holding the rows that were on
+  it, the word they were offered for, and the row you picked (rank and key) if you picked one. It is what
+  `--rank-report` reads, to see whether the order rows appear in is worth learning from; nothing reads it while you
+  type. It is capped at 4 MB (the older half is dropped at startup) and **Forget learned words** (or **Reset
+  learning**) deletes it.
 - **Finish words from my typing** counts the same lines in `ngram.snapshot`, next to `words.json`: a word n-gram of the
   words you type, with no other data in it. It starts with your first finished lines, so it is strongest once you have
   typed for a while. **Finish words from my typing** off (Word suggestions) stops the model and touches no state file at

@@ -1,7 +1,7 @@
 //! typethai-desktop: system-wide wrong-layout (EN QWERTY -> Thai Kedmanee) auto-converter with a suggestion bubble.
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-mod app; mod backspace; mod bridge; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rewrite; mod predict;
+mod app; mod backspace; mod bridge; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rank; mod rewrite; mod predict;
 mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
@@ -100,6 +100,15 @@ fn main() {
     }
     let cli = app::Cli::parse();
     if cli.list_sources { platform::print_input_sources(); return }
+    if let Some(file) = &cli.rank_report {
+        let path = if file.is_empty() { rank::path_beside(&cli.state) } else { std::path::PathBuf::from(file) };
+        let (events, bad) = rank::load(&path);
+        println!("{}: {} offers", path.display(), events.len());
+        if bad > 0 { println!("{bad} line(s) could not be read and were skipped") }
+        print!("{}", rank::report(&events));
+        if events.is_empty() { println!("(nothing logged yet; the log is off while Learn from my typing is off)") }
+        return
+    }
     bridge::REQ_OPEN_SETTINGS.store(cli.open_settings, std::sync::atomic::Ordering::SeqCst);
     bridge::SETTINGS_PAGE.store(cli.settings_page, std::sync::atomic::Ordering::SeqCst);
     if let Some(dir) = &cli.eval_typo { evaltypo::run(&cli, dir); return }
