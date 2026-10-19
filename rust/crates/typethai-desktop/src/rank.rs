@@ -25,6 +25,14 @@ pub struct Row {
     pub w: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r: Option<String>,
+    /// The producing source's own score, in its own domain. Absent in logs written before the trigger, and for rows
+    /// no producer could score. A completion row carries its offer's score, not a per-row share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c: Option<f32>,
+    /// The generator that produced the row, as a string so a tag a future build adds cannot make an older one drop a
+    /// whole line. Absent in logs written before the trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s: Option<String>,
 }
 /// The key that applied a row. Tab and Space are the reflex keys: they apply whatever is highlighted. The others are
 /// deliberate, so a rank-0 pick with one of them is real evidence.
@@ -74,7 +82,12 @@ pub struct Event {
     /// How long the offer stood.
     #[serde(default)]
     pub ms: u64,
+    /// Rows a non-empty candidate set would have shown but the trigger kept off the bubble. Zero for an ordinary
+    /// offer; written only when it is not, so a log line of an offer that was shown is unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub suppressed: u8,
 }
+fn is_zero(n: &u8) -> bool { *n == 0 }
 /// What an offer is about: which word on the line (`line`, `rev`) and its latest text (`w`, `prev`). One word's rows,
 /// however many keystrokes refreshed them, are one offer; a change of word closes the offer standing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -130,6 +143,14 @@ impl RankLog {
             o.pick = Some(Pick { i, how });
         }
     }
+    /// The gate kept a non-empty candidate set off the bubble: record what was suppressed, and close the offer that
+    /// stood. Without this a suppressed offer is indistinguishable from no offer at all.
+    pub fn suppressed(&mut self, ctx: Ctx, n: u8) {
+        if n == 0 { return }
+        self.close();
+        if self.pending.len() >= MAX_PENDING { self.pending.remove(0); }
+        self.pending.push(Event { t: unix_now(), app: self.app.clone(), w: ctx.w, prev: ctx.prev, rev: ctx.rev, rows: vec![], pick: None, ms: 0, suppressed: n });
+    }
     /// The offer is over (applied, dismissed, or another word started).
     pub fn close(&mut self) {
         let Some(o) = self.open.take() else { return };
@@ -137,7 +158,7 @@ impl RankLog {
         if rows.is_empty() { return }
         if self.pending.len() >= MAX_PENDING { self.pending.remove(0); }
         let ms = o.at.elapsed().as_millis() as u64;
-        self.pending.push(Event { t: unix_now(), app: o.app, w: o.ctx.w, prev: o.ctx.prev, rev: o.ctx.rev, rows, pick: o.pick, ms });
+        self.pending.push(Event { t: unix_now(), app: o.app, w: o.ctx.w, prev: o.ctx.prev, rev: o.ctx.rev, rows, pick: o.pick, ms, suppressed: 0 });
     }
     /// Forget everything (`Forget learned words`), on disk too.
     pub fn reset(&mut self) { self.open = None; self.pending.clear(); self.cleared = true }
@@ -195,6 +216,12 @@ impl Buckets {
 }
 const RANKS: [&str; 4] = ["1st", "2nd", "3rd", "4th+"];
 const ROW_COUNTS: [&str; 4] = ["1", "2", "3", "4+"];
+/// Per source: how often it was offered (once per event, however many rows it contributed), how often one of its rows
+/// was picked, and the mean of the best score it offered in each event. Rows repeat their offer's score, so counting
+/// per row would weight an offer by its row count.
+#[derive(Debug, Default)]
+struct SrcTally { offered: usize, picked: usize, conf_sum: f64, scored: usize }
+
 /// What the report is built from.
 #[derive(Debug, Default)]
 struct Tally {
@@ -210,17 +237,34 @@ struct Tally {
     first_how: [usize; 5],
     /// Reason tag -> (rows offered, rows picked).
     reason: BTreeMap<String, (usize, usize)>,
+    /// Source tag -> counts. `None` in a Row (an old log) is keyed under "-".
+    source: BTreeMap<String, SrcTally>,
+    /// Offers a non-empty candidate set was kept off the bubble for, and the rows that cost them.
+    suppressed: usize,
+    suppressed_rows: usize,
 }
 impl Tally {
     fn add(&mut self, e: &Event) {
+        if e.suppressed > 0 { self.suppressed += 1; self.suppressed_rows += e.suppressed as usize; return }
         self.offers += 1;
         self.rows.add(e.rows.len().saturating_sub(1));
         let contested = e.rows.len() > 1;
         if contested { self.contested += 1 }
+        // one entry per source in this event: its best score is the confidence its offer was made with
+        let mut per: BTreeMap<&str, (bool, Option<f32>)> = BTreeMap::new();
         for (i, r) in e.rows.iter().enumerate() {
             let c = self.reason.entry(r.r.clone().unwrap_or_else(|| "-".into())).or_default();
             c.0 += 1;
             if e.pick.as_ref().is_some_and(|p| p.i == i) { c.1 += 1 }
+            let entry = per.entry(r.s.as_deref().unwrap_or("-")).or_default();
+            if e.pick.as_ref().is_some_and(|p| p.i == i) { entry.0 = true }
+            if let Some(conf) = r.c { entry.1 = Some(entry.1.map_or(conf, |best| best.max(conf))) }
+        }
+        for (tag, (picked, conf)) in per {
+            let t = self.source.entry(tag.to_string()).or_default();
+            t.offered += 1;
+            if picked { t.picked += 1 }
+            if let Some(c) = conf { t.conf_sum += c as f64; t.scored += 1 }
         }
         let Some(p) = &e.pick else { return };
         self.picked += 1;
@@ -245,10 +289,19 @@ impl Tally {
             let reflex: usize = [How::Tab, How::Space].into_iter().map(|h| self.first_how[h.idx()]).sum();
             s.push_str(&format!("in first place, by key: {} — {:.1}% of them by a reflex key\n", counts(&self.first_how), pct(reflex, self.first_how.iter().sum())));
         }
+        if self.suppressed > 0 {
+            s.push_str(&format!("{} offer(s) suppressed by the trigger: {} row(s) kept off the bubble\n", self.suppressed, self.suppressed_rows));
+        }
         if self.reason.is_empty() { return s }
         s.push_str("reason    offered   picked   rate\n");
         for (tag, (offered, picked)) in &self.reason {
             s.push_str(&format!("{tag:<10}{offered:>8}{picked:>9}{:>7.1}%\n", pct(*picked, *offered)));
+        }
+        if self.source.is_empty() { return s }
+        s.push_str("source       offered   picked    rate  mean conf\n");
+        for (tag, t) in &self.source {
+            let mean = if t.scored > 0 { format!("{:.2}", t.conf_sum / t.scored as f64) } else { "-".into() };
+            s.push_str(&format!("{tag:<12}{:>8}{:>9}{:>7.1}%{mean:>11}\n", t.offered, t.picked, pct(t.picked, t.offered)));
         }
         s
     }
@@ -268,7 +321,9 @@ pub fn report(events: &[Event]) -> String {
 mod tests {
     use super::*;
     fn ctx(w: &str) -> Ctx { Ctx { line: 0, w: w.into(), prev: None, rev: false } }
-    fn rows(w: &str) -> Vec<Row> { vec![Row { w: w.into(), r: Some("th".into()) }, Row { w: "b".into(), r: Some("typo".into()) }] }
+    fn rows(w: &str) -> Vec<Row> {
+        vec![Row { w: w.into(), r: Some("th".into()), c: None, s: None }, Row { w: "b".into(), r: Some("typo".into()), c: None, s: None }]
+    }
     fn event(w: &str, pick: Option<(usize, How)>) -> Event {
         let mut l = RankLog::default();
         l.offer(ctx(w), rows(w));
@@ -317,7 +372,7 @@ mod tests {
         l.offer(ctx("l;y"), rows("สวัสดี"));
         l.picked(1, How::Tab);
         // the bubble is refreshed before it closes: the pick still refers to the rows the user saw
-        l.offer(ctx("l;y"), vec![Row { w: "สวัสดีครับ".into(), r: None }]);
+        l.offer(ctx("l;y"), vec![Row { w: "สวัสดีครับ".into(), r: None, c: None, s: None }]);
         l.close();
         let e = &l.pending[0];
         assert_eq!((e.rows.len(), e.pick.clone().unwrap().i), (2, 1));
@@ -412,5 +467,52 @@ mod tests {
         assert_eq!(bad, 0, "the cut lands on a line boundary");
         assert!(events.len() > n / 3, "most of the last half is kept: {} of {n}", events.len());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn old_lines_load_and_new_ones_round_trip() {
+        // a line written before `c`, `s` and `suppressed` existed
+        let old: Event = serde_json::from_str(r#"{"t":1,"app":"Editor","w":"hel","rev":false,"rows":[{"w":"help","r":"th"}],"pick":{"i":0,"how":"tab"},"ms":5}"#).unwrap();
+        assert_eq!(old.rows[0].c, None);
+        assert_eq!(old.rows[0].s, None);
+        assert_eq!(old.suppressed, 0);
+        // a tag this build does not know is still a string, so the line survives
+        let future: Event = serde_json::from_str(r#"{"t":1,"w":"hel","rows":[{"w":"help","c":0.4,"s":"sentence"}],"suppressed":2}"#).unwrap();
+        assert_eq!(future.rows[0].s.as_deref(), Some("sentence"));
+        assert_eq!(future.suppressed, 2);
+        let now = Event { t: 2, app: "Editor".into(), w: "hel".into(), prev: None, rev: false,
+            rows: vec![Row { w: "help".into(), r: None, c: Some(0.5), s: Some("completion".into()) }], pick: None, ms: 3, suppressed: 0 };
+        let line = serde_json::to_string(&now).unwrap();
+        assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), now);
+        assert!(!line.contains("suppressed"), "an ordinary offer keeps the old shape: {line}");
+    }
+    #[test]
+    fn the_report_averages_confidence_per_offer_not_per_row() {
+        let mut one = event("a", None);
+        one.rows = vec![
+            Row { w: "help".into(), r: None, c: Some(0.6), s: Some("completion".into()) },
+            Row { w: "hello".into(), r: None, c: Some(0.6), s: Some("completion".into()) },
+            Row { w: "helmet".into(), r: None, c: Some(0.6), s: Some("completion".into()) },
+            Row { w: "can".into(), r: None, c: Some(0.2), s: Some("next_word".into()) },
+        ];
+        let mut two = event("b", Some((0, How::Tab)));
+        two.rows = vec![
+            Row { w: "help".into(), r: None, c: Some(0.7), s: Some("completion".into()) },
+            Row { w: "hello".into(), r: None, c: Some(0.7), s: Some("completion".into()) },
+        ];
+        let r = report(&[one, two]);
+        assert!(r.contains("source       offered   picked    rate  mean conf"), "{r}");
+        assert!(r.contains("completion         2        1   50.0%       0.65"), "one offer per event, best score each: {r}");
+        assert!(r.contains("next_word          1        0    0.0%       0.20"), "{r}");
+    }
+    #[test]
+    fn a_suppressed_offer_is_recorded() {
+        let mut l = RankLog::default();
+        l.offer(ctx("hel"), rows("help"));
+        l.suppressed(ctx("hello"), 3);
+        assert_eq!((l.pending(), l.pending[0].w.as_str(), l.pending[0].rows.len()), (2, "hel", 2), "the offer that stood is closed as it was");
+        let s = &l.pending[1];
+        assert_eq!((s.w.as_str(), s.suppressed, s.rows.len()), ("hello", 3, 0));
+        let r = report(&l.pending);
+        assert!(r.contains("1 offer(s) suppressed by the trigger: 3 row(s) kept off the bubble"), "{r}");
     }
 }

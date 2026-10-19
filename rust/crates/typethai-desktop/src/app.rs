@@ -208,7 +208,7 @@ mod tests {
         let path = dir.join("rank.jsonl");
         let saver = Saver::spawn();
         let offered = rank::Event { t: 1, app: "com.apple.TextEdit".into(), w: "l;y".into(), prev: None, rev: false,
-            rows: vec![rank::Row { w: "สวัสดี".into(), r: Some("th".into()) }], pick: None, ms: 400 };
+            rows: vec![rank::Row { w: "สวัสดี".into(), r: Some("th".into()), c: None, s: None }], pick: None, ms: 400, suppressed: 0 };
         saver.send(Save::Rank(path.clone(), vec![offered.clone()], false));
         saver.flush();
         assert_eq!(rank::load(&path).0, vec![offered.clone()], "offers are appended as they close");

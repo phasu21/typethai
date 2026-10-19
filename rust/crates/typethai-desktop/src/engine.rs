@@ -3,6 +3,7 @@
 //! returned `Action`s (delete N chars + inject text, show/hide the suggestion bubble). Fully unit-testable on Linux.
 use crate::backspace::{self, DeleteUnit};
 use crate::bridge::BubbleLayout;
+use crate::candidate::{src_of_kind, Candidate, Floors, Src};
 use crate::predict;
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rank::{Ctx, How, RankLog, Row};
@@ -95,16 +96,16 @@ fn layout_of(insert: &str) -> Option<InputLang> {
     let l = lang_of(insert);
     (l == InputLang::Thai || insert.chars().any(|c| c.is_ascii_alphabetic())).then_some(l)
 }
-/// A bubble row as the rank log keeps it: the text that would be applied, and why it was offered (`th`, `en`, `typo`;
-/// None for a completion, a next-word row or an AI row).
-fn rank_row(i: &BubbleItem) -> Row {
-    let r = match i.reason() {
+/// A bubble row as the rank log keeps it: the text that would be applied, why it was offered (`th`, `en`, `typo`;
+/// None for a completion, a next-word row or an AI row), the score its source computed, and the source itself.
+fn rank_row(c: &Candidate) -> Row {
+    let r = match c.item.reason() {
         Some(Reason::Layout(InputLang::Thai)) => Some("th".into()),
         Some(Reason::Layout(InputLang::Latin)) => Some("en".into()),
         Some(Reason::Typo) => Some("typo".into()),
         None => None,
     };
-    Row { w: i.label.clone(), r }
+    Row { w: c.item.label.clone(), r, c: c.conf.map(|v| v as f32), s: Some(c.src.label().to_string()) }
 }
 
 /// Bubble selection: index into the visible items, wrapping. Pure state machine.
@@ -253,6 +254,8 @@ pub struct Options {
     /// Word completion: `Typing` shows it on a keystroke when the top word's share of the prefix's frequency is at
     /// least `complete_conf`; `Pause` shows it, ungated, once no key came for `complete_idle`.
     pub complete: CompleteMode, pub complete_conf: f64, pub complete_idle: Duration,
+    /// The display trigger: per-source confidence floors. Every other source is kept (log-only). No margin yet.
+    pub floors: Floors,
     /// How long Tab is held on its own to open the ⌃⌥R rows (`TAB_HOLD_CHOICES_MS`).
     pub tab_hold: Duration,
     /// Learn the words the user finishes and rank completions by them; off neither learns nor uses what was learned.
@@ -283,7 +286,7 @@ pub struct Options {
 }
 impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
 live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
-    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
+    complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), floors: Floors::default(), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
 /// the bubble comes up as soon as typing stops; under the gap between keys in fluent typing it can flash mid-word, and
 /// 250 ms or more keeps it away until a real pause.
@@ -380,6 +383,9 @@ pub struct Engine {
     line_start: usize,
     /// Items currently on the bubble (accept by index).
     bubble: Vec<BubbleItem>,
+    /// The rows on the bubble in display order, with the scores and sources the trigger saw. Same length and order as
+    /// `bubble`; apply paths read `bubble`, and nothing but `show_candidates` writes either.
+    shown: Vec<Candidate>,
     sel: Selection,
     /// The arrow keys are in the bubble (Up moved into it). Only while it shows.
     in_bubble: bool,
@@ -429,9 +435,9 @@ pub struct Engine {
     /// off or the state could not be opened; the rows it offers are added to the completion rows.
     pub predict: Option<predict::Predict>,
     /// The query the predictor was last asked (`key`, the word being typed, and whether the buffer reads as Thai), the
-    /// answer it gave (`key`, its confidence, the whole word), and the word last shown, which stays while the word is
-    /// typed through: a ghost must not move under the user's fingers.
-    pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String)>,
+    /// answer it gave (`key`, its confidence, the whole word), and the word last shown with its confidence, which stays
+    /// while the word is typed through: a ghost must not move under the user's fingers.
+    pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String, f64)>,
     /// The next-word query asked for this line state (its key), and its answer: the key, confidence, word.
     pred_next_ask: Option<u64>, pred_next_answer: Option<(u64, f64, String)>,
     /// The finished line has been given to the predictor (a line is learned once).
@@ -448,7 +454,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -608,6 +614,7 @@ impl Engine {
         self.word.clear(); self.tab_pending = false; self.tab = TabChord::Up; self.in_bubble = false; self.capturing = None; self.line.clear(); self.line_start = 0; self.live_streak = 0; self.live = false;
         self.last_key = None; self.comp_muted = false;
         self.pred_shown = None;
+        self.shown.clear();
         if self.bubble.is_empty() { vec![] } else { self.bubble.clear(); vec![Action::HideBubble] }
     }
     fn decisions(&self, last: &str) -> Vec<TokenDecision> {
@@ -661,19 +668,47 @@ impl Engine {
         out
     }
     pub fn live_visible(&self) -> bool { self.live && self.bubble_visible() }
-    fn show(&mut self, mut items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
+    /// Display-only: show these items with the source their kind implies and no score. This row can never be gated;
+    /// a producer with a score returns candidates and calls `show_candidates` instead.
+    fn show(&mut self, items: Vec<BubbleItem>, acts: &mut Vec<Action>) {
+        let rows = items.into_iter().map(|item| { let src = src_of_kind(&item.kind); Candidate::bare(item, src) }).collect();
+        self.show_candidates(rows, acts)
+    }
+    /// The rows the bubble would show, sorted as drawn, gated as configured, logged as shown, then mapped back to the
+    /// apply instructions. The one choke point: every ShowBubble / HideBubble goes through here. The gate runs after
+    /// the display sort and before `self.bubble` and the rank offer, so `Pick.i`, the digits, Tab and clicks address
+    /// the shown vector.
+    fn show_candidates(&mut self, mut items: Vec<Candidate>, acts: &mut Vec<Action>) {
         self.fixing = false;
         // new rows start with the arrow keys outside (the UI resets on Show / Hide)
         self.in_bubble = false;
         // grouped as drawn, so a row's index is its place on screen for Tab, the digits and clicks; a conversion rated
         // down goes after everything
-        items.sort_by_key(|i| if i.rated_word().is_some_and(|w| self.rated_down(w)) { 3 } else { match i.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 } });
+        items.sort_by_key(|c| if c.item.rated_word().is_some_and(|w| self.rated_down(w)) { 3 } else { match c.item.reason() { Some(Reason::Layout(_)) => 0, Some(Reason::Typo) => 1, None => 2 } });
+        // the offer is about the rows before the gate (a suppressed set still names the word it was for)
+        let ctx = self.opts.learn_words.then(|| { let all: Vec<BubbleItem> = items.iter().map(|c| c.item.clone()).collect(); self.offer_ctx(&all) });
+        let offered = items.len();
+        let kept = crate::candidate::gate(items, &self.opts.floors);
+        let rows: Vec<BubbleItem> = kept.iter().map(|c| c.item.clone()).collect();
         // what this bubble offered, for the rank log: the rows of one word are one offer, and the index a row is
         // applied by is its place here
-        if self.opts.learn_words { let ctx = self.offer_ctx(&items); self.rank.offer(ctx, items.iter().map(rank_row).collect()) }
-        self.live = matches!(items.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
-        let act = if items.is_empty() { self.phrase = 0; if self.bubble.is_empty() { return } self.bubble.clear(); Action::HideBubble }
-            else { self.sel = Selection::new(items.len()); self.bubble = items.clone(); self.badge_up = false; Action::ShowBubble(items) };
+        if let Some(ctx) = ctx {
+            if kept.is_empty() && offered > 0 { self.rank.suppressed(ctx, offered.min(u8::MAX as usize) as u8) }
+            else { self.rank.offer(ctx, kept.iter().map(rank_row).collect()) }
+        }
+        self.live = matches!(rows.first(), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }));
+        let act = if rows.is_empty() {
+            self.phrase = 0;
+            self.shown.clear();
+            if self.bubble.is_empty() {
+                // an earlier ShowBubble queued in this key must not outlive the empty decision
+                acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
+                return
+            }
+            self.bubble.clear(); Action::HideBubble
+        } else {
+            self.sel = Selection::new(rows.len()); self.bubble = rows.clone(); self.shown = kept; self.badge_up = false; Action::ShowBubble(rows)
+        };
         // one bubble update per key (the live row and the completions under it are worked out one after the other)
         acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
         acts.push(act);
@@ -932,7 +967,7 @@ impl Engine {
         } else { self.live_streak = 0; if self.live_visible() { self.show(vec![], acts); } }
     }
     /// After an edit that left the buffer (possibly) non-empty: re-offer what is still pending, without re-stabilising.
-    fn reoffer(&mut self, was_shown: bool, phrase: usize, up: &[BubbleItem], acts: &mut Vec<Action>) {
+    fn reoffer(&mut self, was_shown: bool, phrase: usize, up: &[Candidate], acts: &mut Vec<Action>) {
         if !self.word.is_empty() {
             if phrase > 1 { self.show_live(phrase - 1, acts) }                    // rest of a reverse phrase: keep it
             else if was_shown && self.live_confident() { self.live_streak = self.opts.live_stable; let prev = self.live_prev(); self.show_live(prev, acts) }
@@ -1003,8 +1038,8 @@ impl Engine {
                 // nothing to offer here (the caret is not after a word): the answer is spent, and the next line asks
                 // again. Without this the late-answer tick would rebuild the rows every tick until a key came.
                 if next.is_empty() { self.pred_next_answer = None }
-                let rows: Vec<BubbleItem> = self.bubble.iter().cloned().chain(next).collect();
-                if rows != self.bubble { self.show(rows, acts) }
+                let rows: Vec<Candidate> = self.shown.iter().cloned().chain(next).collect();
+                if Self::items_of(&rows) != self.bubble { self.show_candidates(rows, acts) }
             }
         }
         // Thai is typed without spaces: a run that ends on a dictionary word offers the next one, ahead of the
@@ -1013,39 +1048,47 @@ impl Engine {
             let rows = self.thai_next_rows();
             if !rows.is_empty() {
                 let mut items = rows;
-                for c in self.completions_up() { if items.len() < 3 && !items.contains(&c) { items.push(c) } }
-                if items != self.bubble { self.show(items, acts) }
+                for c in self.completions_up() { if items.len() < 3 && !items.iter().any(|r| r.item == c.item) { items.push(c) } }
+                if Self::items_of(&items) != self.bubble { self.show_candidates(items, acts) }
             }
         }
     }
+    /// The items of `rows`, in order: what "did the bubble change?" is asked of.
+    fn items_of(rows: &[Candidate]) -> Vec<BubbleItem> { rows.iter().map(|c| c.item.clone()).collect() }
     /// The words to offer after `prev`: the pairs (`next_words`), and the personal model's word in the last slot when
-    /// it has one for this line (the pairs know the language and this user's habits, the model reads the line).
-    fn next_words_here(&self, prev: &str, lang: InputLang) -> Vec<String> {
+    /// it has one for this line and clears the prediction floor (the pairs know the language and this user's habits,
+    /// the model reads the line). Admission is decided before the truncation, so a dropped model word does not cost a
+    /// pair its slot.
+    fn next_words_here(&self, prev: &str, lang: InputLang) -> Vec<(String, Src, Option<f64>)> {
         let mut words = self.next_words(prev, lang);
-        if let Some(w) = self.predicted_next() {
-            if !words.iter().any(|x| *x == w) { words.truncate(NEXT_WORDS - 1); words.push(w) }
+        if let Some((w, conf)) = self.predicted_next() {
+            if !words.iter().any(|(x, ..)| *x == w) && self.opts.floors.admits(Src::Prediction, Some(conf)) {
+                words.truncate(NEXT_WORDS - 1);
+                words.push((w, Src::Prediction, Some(conf)));
+            }
         }
         words
     }
     /// The words likely to follow `prev` in `lang`: first the ones this user finished after it at least twice
     /// (`NEXT_WORD_MINE`, from `words` while `learn_words` is on), best first; then the corpus pairs after it, each at
-    /// least `NEXT_WORD_SHARE` of them (`thank` → you; nothing after `you`, where no word stands out).
-    fn next_words(&self, prev: &str, lang: InputLang) -> Vec<String> {
+    /// least `NEXT_WORD_SHARE` of them (`thank` → you; nothing after `you`, where no word stands out). Each carries its
+    /// source: the user's pairs have no probability, the corpus pairs carry their share.
+    fn next_words(&self, prev: &str, lang: InputLang) -> Vec<(String, Src, Option<f64>)> {
         let cx = self.context(Some(prev), lang);
         if cx.prev.is_none() { return vec![] }
-        let mut words: Vec<String> = vec![];
+        let mut words: Vec<(String, Src, Option<f64>)> = vec![];
         if let Some(memory) = cx.memory {
             let mut mine: Vec<(&str, f64)> = memory.followers(prev).filter(|&(w, n)| n >= NEXT_WORD_MINE && lang_of(w) == lang && !self.blocked(w)).collect();
             mine.sort_by(|a, b| b.1.total_cmp(&a.1));
-            words.extend(mine.into_iter().take(NEXT_WORDS).map(|(w, _)| w.to_string()));
+            words.extend(mine.into_iter().take(NEXT_WORDS).map(|(w, _)| (w.to_string(), Src::NextWord, None)));
         }
         let comp = match lang { InputLang::Thai => &self.thai_comp, InputLang::Latin => &self.en_comp };
         let (Some(comp), Some(b)) = (comp, cx.bigrams) else { return words };
         // ponytail: one word of context; a longer one needs trigrams or a language model (docs/research)
         let mass = b.mass(prev);
-        for (w, _) in b.followers(prev).take(NEXT_WORDS).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass) {
+        for (w, c) in b.followers(prev).take(NEXT_WORDS).take_while(|(_, c)| *c >= NEXT_WORD_SHARE * mass) {
             if words.len() == NEXT_WORDS { break }
-            if comp.knows(w) && !self.blocked(w) && !words.iter().any(|x| x == w) { words.push(w.to_string()) }
+            if comp.knows(w) && !self.blocked(w) && !words.iter().any(|(x, ..)| x == w) { words.push((w.to_string(), Src::NextWord, (mass > 0.0).then(|| c / mass))) }
         }
         words
     }
@@ -1054,27 +1097,30 @@ impl Engine {
     fn next_word_room(&self) -> bool { self.bubble.iter().all(|b| matches!(b.kind, BubbleKind::Convert { .. })) }
     /// The next words when the caret sits after a word and a space, in the input language. Applied like a completion
     /// of nothing. None at the start of a line.
-    fn next_word_rows(&self) -> Vec<BubbleItem> {
+    fn next_word_rows(&self) -> Vec<Candidate> {
         if self.comp_muted || !self.line.last().is_some_and(|c| c.after().ends_with(' ')) { return vec![] }
         let Some(prev) = self.word_before(self.line.len()).map(|w| w.to_lowercase()) else { return vec![] };
         let lang = if self.thai_active { InputLang::Thai } else { InputLang::Latin };
-        self.next_words_here(&prev, lang).into_iter().map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }).collect()
+        self.next_words_here(&prev, lang).into_iter()
+            .map(|(w, src, conf)| Candidate { item: BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: String::new(), insert: w } }, conf, src })
+            .collect()
     }
     /// The next words after the Thai run being typed, when its last word is a dictionary word (`แซ่บ` → มาก). Applied
     /// like a completion of the run, labelled with the next word only.
-    fn thai_next_rows(&self) -> Vec<BubbleItem> {
+    fn thai_next_rows(&self) -> Vec<Candidate> {
         if self.comp_muted || self.blocked(&self.word) { return vec![] }
         let run = en_to_th(&self.word);
         let d = &self.det.th_dict;
         let Some(last) = d.segment(&run).last().map(|w| w.to_string()).filter(|w| d.has(w)) else { return vec![] };
         self.next_words_here(&last, InputLang::Thai).into_iter()
-            .map(|w| BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{run}{w}") } }).collect()
+            .map(|(w, src, conf)| Candidate { item: BubbleItem { label: w.clone(), kind: BubbleKind::Complete { typed: self.word.clone(), insert: format!("{run}{w}") } }, conf, src })
+            .collect()
     }
-    /// The completion rows on the bubble now.
-    fn completions_up(&self) -> Vec<BubbleItem> { self.bubble.iter().filter(|b| matches!(b.kind, BubbleKind::Complete { .. })).cloned().collect() }
+    /// The completion rows on the bubble now, with their scores.
+    fn completions_up(&self) -> Vec<Candidate> { self.shown.iter().filter(|c| matches!(c.item.kind, BubbleKind::Complete { .. })).cloned().collect() }
     /// Re-derive the completion rows under the live row (if it is up); stale ones go. `idle`: the pause has elapsed.
     /// `up`: the rows that were on the bubble before this key.
-    fn update_completions(&mut self, idle: bool, up: &[BubbleItem], acts: &mut Vec<Action>) {
+    fn update_completions(&mut self, idle: bool, up: &[Candidate], acts: &mut Vec<Action>) {
         self.poll_prediction();
         let ask = match (self.opts.complete, idle) {
             (CompleteMode::Typing, false) => Some(Ask::Typing),
@@ -1085,9 +1131,9 @@ impl Engine {
         let (rows, lead) = ask.map_or_else(|| (vec![], None), |ask| self.completion_rows(ask, if ask == Ask::Refresh { up } else { &[] }));
         if ask == Some(Ask::Pause) { self.spell_lead = lead }
         if rows.is_empty() && !self.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Complete { .. })) { return }
-        let live = self.bubble.first().filter(|b| matches!(&b.kind, BubbleKind::Live { typed, .. } if *typed == self.word)).cloned();
-        let items: Vec<BubbleItem> = live.into_iter().chain(rows).collect();
-        if items != self.bubble { self.show(items, acts) }
+        let live = self.shown.first().filter(|c| matches!(&c.item.kind, BubbleKind::Live { typed, .. } if *typed == self.word)).cloned();
+        let items: Vec<Candidate> = live.into_iter().chain(rows).collect();
+        if Self::items_of(&items) != self.bubble { self.show_candidates(items, acts) }
     }
     /// What the line shows in front of `line[..upto]`: every committed word with the boundary after it.
     fn shown_line(&self, upto: usize) -> String {
@@ -1142,27 +1188,27 @@ impl Engine {
     }
     /// The word the predictor offers after the line's last word, when its answer for this line state is in: a name,
     /// jargon or a habit of this user's that the built-in word pairs do not have.
-    fn predicted_next(&self) -> Option<String> {
-        let (key, _, word) = self.pred_next_answer.as_ref()?;
-        (Some(*key) == self.pred_next_ask && !word.is_empty()).then(|| word.clone())
+    fn predicted_next(&self) -> Option<(String, f64)> {
+        let (key, confidence, word) = self.pred_next_answer.as_ref()?;
+        (Some(*key) == self.pred_next_ask && !word.is_empty()).then(|| (word.clone(), *confidence))
     }
-    /// The row the predictor offers for the word being typed: `(label, insert)`, or None while its answer is on the
-    /// way. The query is asked once per state of the word; until the answer arrives the word last shown stays, as long
-    /// as the user is still typing into it.
-    fn predicted(&mut self, head: &str, tail: &str, thai: bool, ask: Ask) -> Option<(String, String)> {
+    /// The row the predictor offers for the word being typed: `(label, insert, confidence)`, or None while its answer
+    /// is on the way. The query is asked once per state of the word; until the answer arrives the word last shown
+    /// stays, as long as the user is still typing into it.
+    fn predicted(&mut self, head: &str, tail: &str, thai: bool, ask: Ask) -> Option<(String, String, f64)> {
         if !self.opts.predict || tail.is_empty() || self.predict.is_none() { return None }
         let line = self.shown_line(self.line.len());
         let key = query_key(&line, head, tail, thai);
         if let Some((answer, confidence, word)) = self.pred_answer.clone() {
             if answer == key {
                 if ask.gated() && confidence < self.opts.complete_conf { return None }
-                self.pred_shown = Some((line, thai, word.clone()));
-                return Some((word.clone(), format!("{head}{word}")))
+                self.pred_shown = Some((line, thai, word.clone(), confidence));
+                return Some((word.clone(), format!("{head}{word}"), confidence))
             }
         }
-        if let Some((shown, shown_thai, word)) = self.pred_shown.clone() {
+        if let Some((shown, shown_thai, word, confidence)) = self.pred_shown.clone() {
             if shown == line && shown_thai == thai && word.len() > tail.len() && word.starts_with(tail) {
-                return Some((word.clone(), format!("{head}{word}")))
+                return Some((word.clone(), format!("{head}{word}"), confidence))
             }
         }
         if self.pred_ask.as_ref().is_none_or(|(asked, ..)| *asked != key) {
@@ -1178,7 +1224,7 @@ impl Engine {
     /// an English word. `ask` sets the length, the gate and the spell checker; rows in `carry` that still extend the
     /// buffer fill what is left, except the spell checker's lead row (`spell_lead`), which stays first. Also returns the
     /// row the spell checker put first, if it did.
-    fn completion_rows(&mut self, ask: Ask, carry: &[BubbleItem]) -> (Vec<BubbleItem>, Option<String>) {
+    fn completion_rows(&mut self, ask: Ask, carry: &[Candidate]) -> (Vec<Candidate>, Option<String>) {
         if self.comp_muted || self.word.is_empty() || self.blocked(&self.word) { return (vec![], None) }
         let live = self.bubble.first().and_then(|b| match &b.kind { BubbleKind::Live { typed, thai, .. } if *typed == self.word => Some(thai.clone()), _ => None });
         // English typed on the Thai layout: the reverse live row is what was meant. A word the app always offers back
@@ -1230,17 +1276,42 @@ impl Engine {
         // the frequency list does not have, typed before, is exactly what the model is for
         let predicted = self.predicted(&head, &tail, thai, ask);
         if !gate(&found) && predicted.is_none() { return (vec![], None) }
-        let carried: Vec<(String, String)> = carry.iter().filter_map(|b| match &b.kind {
-            BubbleKind::Complete { insert, .. } if insert.len() > reading.len() && insert.starts_with(&reading) => Some((b.label.clone(), insert.clone())),
-            _ => None,
-        }).collect();
-        let kept_lead = carried.iter().find(|(_, i)| self.spell_lead.as_ref() == Some(i)).cloned();
-        let extensions = found.words.into_iter().map(|w| (w.clone(), format!("{head}{w}")));
-        let mut rows: Vec<BubbleItem> = vec![];
-        for (label, insert) in kept_lead.into_iter().chain(predicted).chain(extensions).chain(carried) {
+        // one offer, one completion score: every completion candidate carries `found.confidence`, so the gate admits or
+        // drops the source as a whole rather than deleting the tail of a stable shortlist. Only when the offer has no
+        // score at all (no words from the list) do the carried rows keep theirs.
+        let offer_conf = found.confidence;
+        let typed = self.word.clone();
+        let carried: Vec<Candidate> = carry.iter().filter(|c| match &c.item.kind {
+            BubbleKind::Complete { insert, .. } => insert.len() > reading.len() && insert.starts_with(&reading),
+            _ => false,
+        }).cloned().collect();
+        let kept_lead = carried.iter().find(|c| matches!(&c.item.kind, BubbleKind::Complete { insert, .. } if self.spell_lead.as_ref() == Some(insert))).cloned();
+        // a carried row is re-issued for the word as it reads now, keeping its text; its source and score are the new
+        // offer's when there is one
+        let normalize = |c: Candidate| {
+            let label = c.item.label;
+            let kind = match c.item.kind { BubbleKind::Complete { insert, .. } => BubbleKind::Complete { typed: typed.clone(), insert }, kind => kind };
+            let item = BubbleItem { label, kind };
+            if offer_conf > 0.0 { Candidate::scored(item, Src::Completion, offer_conf) } else { Candidate { conf: c.conf, src: c.src, item } }
+        };
+        let kept_lead = kept_lead.map(|c| {
+            let label = c.item.label;
+            let kind = match c.item.kind { BubbleKind::Complete { insert, .. } => BubbleKind::Complete { typed: typed.clone(), insert }, kind => kind };
+            Candidate::bare(BubbleItem { label, kind }, Src::Completion)
+        });
+        let extensions = found.words.into_iter().map(|w| {
+            let insert = format!("{head}{w}");
+            Candidate::scored(BubbleItem { label: w, kind: BubbleKind::Complete { typed: self.word.clone(), insert } }, Src::Completion, offer_conf)
+        });
+        let predicted = predicted.map(|(label, insert, conf)| {
+            Candidate::scored(BubbleItem { label, kind: BubbleKind::Complete { typed: self.word.clone(), insert } }, Src::Prediction, conf)
+        });
+        let mut rows: Vec<Candidate> = vec![];
+        for c in kept_lead.into_iter().chain(predicted).chain(extensions).chain(carried.into_iter().map(|c| normalize(c))) {
             if rows.len() == k { break }
-            if live.as_deref() == Some(insert.as_str()) || rows.iter().any(|r| matches!(&r.kind, BubbleKind::Complete { insert: i, .. } if *i == insert)) { continue }
-            rows.push(BubbleItem { kind: BubbleKind::Complete { typed: self.word.clone(), insert }, label });
+            let Some(insert) = (match &c.item.kind { BubbleKind::Complete { insert, .. } => Some(insert.clone()), _ => None }) else { continue };
+            if live.as_deref() == Some(insert.as_str()) || rows.iter().any(|r| matches!(&r.item.kind, BubbleKind::Complete { insert: i, .. } if *i == insert)) { continue }
+            rows.push(c);
         }
         (rows, lead)
     }
@@ -1369,7 +1440,7 @@ impl Engine {
         let was = self.bubble_visible();
         let mut o = self.on_boundary(Boundary::Enter);
         o.actions.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::Select(_)));
-        if !self.bubble.is_empty() { self.bubble.clear(); self.live = false; self.phrase = 0; }
+        if !self.bubble.is_empty() { self.bubble.clear(); self.shown.clear(); self.live = false; self.phrase = 0; }
         if was && !o.actions.contains(&Action::HideBubble) { o.actions.push(Action::HideBubble) }
         o
     }
@@ -1642,7 +1713,7 @@ impl Engine {
                 let changed = if up { self.offer_last.remove(&key) } else { self.offer_last.insert(key) };
                 // the bubble up now takes the new order too: down, the conversion moves behind the others and Tab
                 // applies what is first now; up, it is back in front
-                if changed { self.prefs_dirty = true; let items = self.bubble.clone(); self.show(items, &mut acts); }
+                if changed { self.prefs_dirty = true; let items = self.shown.clone(); self.show_candidates(items, &mut acts); }
             }
             Hotkey::Rewrite => return self.start_rewrite(),
             Hotkey::TogglePause => unreachable!(),
@@ -3682,6 +3753,49 @@ mod tests {
         assert_eq!(idle(&mut e, 600), vec![]);
         assert_eq!(e.on_key(Key::Char('q')), Outcome::pass(), "no rows up: the next key waits for the pause again");
     }
+    /// Eight equally likely extensions: the best one is an eighth of the offer, under the 0.15 completion floor.
+    fn weak_completer() -> Completer {
+        Completer::new(["held", "helm", "helmet", "helper", "helps", "help", "hello", "helms"].map(|w| (w.to_string(), 10.0)))
+    }
+    #[test] fn a_weak_pause_completion_offer_is_kept_off_the_bubble() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.en_comp = Some(weak_completer());
+        typ(&mut e, "hel");
+        assert_eq!(idle(&mut e, 600), vec![], "the gate emptied the offer on an empty bubble");
+        assert!(!e.bubble_visible());
+        assert_eq!(e.rank.pending(), 1, "the suppressed offer is recorded, not silently dropped");
+    }
+    #[test] fn a_strong_pause_completion_offer_is_kept() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        typ(&mut e, "hel");
+        idle(&mut e, 600);
+        assert_eq!(labels(&e), ["help", "hello", "helmet"], "one word is two thirds of the offer");
+        assert_eq!(e.rank.pending(), 0, "a shown offer stands until it closes");
+    }
+    #[test] fn the_gate_keeps_a_row_with_no_floor() {
+        let Some(mut e) = engine() else { return };
+        let convert = BubbleItem { label: "สวัสดี".into(), kind: BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() } };
+        let mut a = vec![];
+        e.show_candidates(vec![Candidate::bare(convert.clone(), Src::Convert)], &mut a);
+        assert_eq!(a, vec![Action::ShowBubble(vec![convert])]);
+    }
+    #[test] fn indices_address_the_rows_left_after_the_gate() {
+        let Some(mut e) = engine() else { return };
+        let complete = |label: &str, conf: f64| Candidate::scored(BubbleItem { label: label.into(), kind: BubbleKind::Complete { typed: "hel".into(), insert: label.into() } }, Src::Completion, conf);
+        let convert = BubbleItem { label: "สวัสดี".into(), kind: BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() } };
+        e.word = "hel".into();
+        let mut a = vec![];
+        e.show_candidates(vec![complete("help", 0.6), complete("helmet", 0.1), Candidate::bare(convert, Src::Convert)], &mut a);
+        assert_eq!(labels(&e), ["สวัสดี", "help"], "the weak completion is gone, the rest keep display order");
+        assert_eq!(e.shown.iter().map(|c| c.item.clone()).collect::<Vec<_>>(), e.bubble, "shown is the bubble, score for score");
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Accept(2))), Outcome::pass(), "no row at the old index");
+        assert!(e.bubble_visible());
+        let o = e.on_key(Key::Hotkey(Hotkey::Accept(1)));
+        assert_eq!(o.actions[0], Action::Replace { delete: 0, insert: "p".into(), then: None }, "row 1 is help");
+        assert!(!e.bubble_visible());
+    }
     #[test] fn a_key_keeps_the_wrong_layout_thai_rows_under_the_live_row() {
         let Some(mut e) = engine() else { return };
         completers(&mut e, CompleteMode::Pause);
@@ -4005,6 +4119,10 @@ mod tests {
         let (Some(mut m), Some(mut e)) = (model(), engine_typo()) else { return };
         e.opts.complete = CompleteMode::Pause; e.load_completers(&mut m); e.speller = Some(Box::new(CandelSpeller));
         typ(&mut e, "candel"); idle(&mut e, 600);
+        assert!(!e.bubble_visible(), "the slipped reading is 0.085 of the offer, under the completion floor");
+        // the slip machinery itself, with the trigger out of the way
+        e.opts.floors.completion = 0.0;
+        e.reset(); typ(&mut e, "candel"); idle(&mut e, 600);
         assert_eq!(labels(&e), ["candles", "candle", "cancel"], "candle is el swapped; mid-word the word may go on");
         e.opts.slips = None;
         e.reset(); typ(&mut e, "candel"); assert_eq!(idle(&mut e, 600), vec![], "read as typed, no word starts with candel");
