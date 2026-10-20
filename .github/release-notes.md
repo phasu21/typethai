@@ -1,5 +1,17 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.19**
+- **Windows: the bubble stays on the caret.** It could drift away from the text you are typing: the caret was read
+  from the selection when there was one, a read that came back empty moved the bubble to the edge of the text field or
+  to the mouse, and the reading of the caret waited behind the reading of the focused field. The bubble now sits on the
+  caret in every app, and keeps to it as you type.
+
+**New in 0.5.19**
+- **Windows: with no caret, the bubble is where you are typing.** An app that shows no caret at all (VS Code's inline
+  prompt, an Electron app with its accessibility tree off) put the bubble at the far left of the text field, a long way
+  from the word you are writing. It now appears at your pointer — the click that put the focus there, which is where
+  the caret went.
+
 **New in 0.5.18**
 - **A notification when an update is ready.** When typeThai finds a release and stages it, it says so with a system
   notification — *typeThai x.y.z is ready · Click to install it and start typeThai again* — so you no longer have to
