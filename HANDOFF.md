@@ -311,6 +311,64 @@ completion frequencies).
   back to its field or the mouse, and a caret read is a UI Automation round trip, so the 60 ms cap can drop one
   (`anchor source=field caret=None` on some VS Code keys). The follow's later samples are what correct that.
 
+## The bubble anchored to the caret on Windows (2026-10-20)
+
+- Reported: on Windows the bubble sometimes floats somewhere else than the caret. Six causes, all in the anchor the
+  bubble is placed from (`platform::windows::anchor`) and in the fallback order (`placement::place`), none of them in
+  the placement itself:
+  - The Win32 caret rect was taken as it came. `GetGUIThreadInfo`'s `rcCaret` right and bottom carry text-direction
+    and padding information, not the caret's edges (measured: `rcCaret` of a caret made with `CreateCaret` came back
+    as `40 30 -1043475384 14`), and a window that has no caret reports a 1x1 placeholder at the client's origin —
+    anchoring there is the corner of the screen, not the text (the app logged `caret=Some(Rect { x: 0.0, y: 0.0, w: 1.0,
+    h: 1.0 })` with a remote-desktop window in front). `placement::win32_caret` now takes the position and a height
+    that looks like a line's; a 1-px or an inverted rect is not a caret.
+  - The UI Automation caret could be the *selection's* box: `GetSelection()` answers the selection, and its rect is
+    the selected text, so the bubble sat at the selection's edge instead of where the next character goes. The range is
+    collapsed to its end (the caret) before it is measured, the same end macOS reads for an AX selection.
+    TextPattern2's `active` flag is honoured as well: a range that is not the active caret is nobody's caret.
+  - A read that came back without a caret threw the bubble (and the badge) to the field's left edge or to the mouse.
+    `placement::keep_caret` keeps the caret in use when a re-read finds none; the bubble (`Ui::show`, `Ui::reanchor`)
+    and the badge (`BadgeWin::move_to`) use it. A hidden bubble forgets its anchor, so a caret from another window
+    cannot survive a hide.
+  - The caret read shared its worker with the focus read, which is the slow one (the cached element carries five
+    properties, each a round trip to the app), so a focus read in flight could make the caret read miss its 60 ms cap
+    — the `anchor source=field caret=None` the previous section left open. The two now have a worker each, and the
+    focused element and its caret come back in one round trip instead of two. Measured in an idle Edge (60 s, 298
+    words): the caret read is p50 2 ms / p90 6 ms / p99 19 ms / max 28 ms over 2093 reads, the focus read p50 1 ms /
+    max 19 ms over 599 reads — so the cap is only at risk when the app itself stalls, which is when the drops were
+    seen (one in a 45 s session of continuous typing).
+  - The UI Automation cache request was made once at startup. When it failed (it does, in a fresh thread: the first
+    `CreateCacheRequest` on a new automation client can come back empty) every focus read answered "unknown" and the
+    gate never opened, so the app did nothing at all. It is made per read now.
+  - The Windows path now applies the plausibility filter macOS has always had (`placement::plausible_caret`): a caret
+    that does not sit in the focused element is not the caret.
+  - With no caret at all (an app that exposes none), the fallback is the pointer instead of the field's left edge:
+    the field's edge is the far left of the input, away from the text, while the pointer is where the text is. The
+    pointer counts only when it is in the field; a pointer somewhere else (a menu bar) still leaves the field as the
+    closer guess, and the pointer stays the last resort. `placement::mouse_line` + the order in `place` (and in
+    `source_of`, so the log agrees) are the change.
+  - On Windows that pointer is the click that put the focus in the field, not the live pointer: the click is where the
+    caret went, and the pointer moves on. The mouse thread already sees every click's place, so it keeps it
+    (`State::last_click`), and the anchor takes it when it landed in the focused window (`placement::pointer_at`, the
+    same helper macOS uses).
+- `TYPETHAI_DEBUG` says more about the reads: `typethai: uia focus|caret read dropped after N ms` (it missed its cap)
+  and `typethai: uia focus|caret read took N ms` (over 20 ms).
+- Verified on this Windows 11 machine (2026-10-20):
+  - A classic Win32 `EDIT` (focused, typed into with real key events): the app's anchor is the caret's own place and
+    matches `GetGUIThreadInfo` exactly (`rcCaret` client `38 0 39 20` -> screen `259 255`; the app logged
+    `anchor source=caret caret=Some(Rect { x: 259.0, y: 255.0, w: 1.0, h: 20.0 })`), and the caret advances with the
+    text (`231 -> 241 -> 245 -> 249 -> 259`).
+  - An Edge page with a `<textarea>`: `field=Text`, and the caret read advances per key (1 px wide, the insertion point
+    Chromium builds) — 454 caret anchors in a 45 s typing marathon of 189 words, no dropped read, no field or mouse
+    fallback.
+  - `cargo test -p typethai-desktop`: 305 pass (the `prefs` failures are pre-existing and flaky: those tests share a
+    temp directory named after the process id and clobber each other when they run in parallel — each one passes on
+    its own).
+  - New tests in `placement`: `win32_caret_is_the_position_and_the_line_height`,
+    `win32_caret_placeholder_is_not_a_caret`, `win32_caret_rejects_padding_junk`,
+    `a_read_without_a_caret_keeps_the_one_in_use`, `a_read_with_a_caret_replaces_the_one_in_use`,
+    `the_pointer_in_the_field_beats_the_field_edge`, `the_pointer_outside_the_field_leaves_the_field_edge`.
+
 ## Open limitations
 
 - `riht` is 0.82 on a fresh model (hidden now) but 0.93 with the +1 logit the current personal state allows.

@@ -402,7 +402,7 @@ mod tests {
     }
     #[test]
     fn preview_delay_round_trips_and_an_old_file_gets_the_default() {
-        let dir = std::env::temp_dir().join(format!("typethai-prefs-b-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-pd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("prefs.json");
         let quick = Prefs { badge_idle: Some(Duration::from_millis(1000)), ..Prefs::default() };
@@ -426,7 +426,7 @@ mod tests {
     }
     #[test]
     fn prediction_round_trips_and_an_old_file_turns_it_on() {
-        let dir = std::env::temp_dir().join(format!("typethai-prefs-p-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-pr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("prefs.json");
         let off = Prefs { predict: false, ..Prefs::default() };

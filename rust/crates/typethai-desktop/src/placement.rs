@@ -92,6 +92,29 @@ pub fn plausible_caret(c: Rect, field: Option<Rect>, monitors: &[Monitor]) -> bo
         None => true,
     }
 }
+/// A caret from `GetGUIThreadInfo`, in the caret window's client coordinates.
+///
+/// The rect it reports is not a plain rectangle: its right and bottom carry the text direction and padding
+/// information the docs warn about ("it may not give the exact caret location"), so the height is taken from
+/// them only when it looks like a line's height. A window that has no caret reports a 1x1 placeholder at the
+/// client's origin; anchoring the bubble there puts it in the corner of the screen, not at the text.
+pub fn win32_caret(left: i32, top: i32, bottom: i32) -> Option<Rect> {
+    let h = (bottom - top) as f64;
+    if !(h > 1.0 && h <= 400.0) { return None; }
+    Some(Rect::new(left as f64, top as f64, 1.0, h))
+}
+/// The anchor to place the bubble at: the fresh read, keeping the caret of the read before it when the fresh
+/// one has none.
+///
+/// The caret is read over a cross-process call (UI Automation on Windows) that can time out or answer late, and
+/// an app can expose no caret at all. The fallbacks - the field's edge, the mouse - are nowhere near the text,
+/// so a read that found no caret must not move the bubble off the caret it is already on.
+pub fn keep_caret(prev: Option<&Anchor>, next: Anchor) -> Anchor {
+    match (next.caret, prev.and_then(|p| p.caret)) {
+        (None, Some(c)) => Anchor { caret: Some(c), ..next },
+        _ => next,
+    }
+}
 /// The pointer fallback for an app that exposes no caret or field: the last click when it landed in the window being
 /// typed in (that click put the focus there), else where the mouse is now.
 pub fn pointer_at(click: Option<(f64, f64)>, window: Option<Rect>, mouse: Option<(f64, f64)>) -> Option<(f64, f64)> {
@@ -100,12 +123,23 @@ pub fn pointer_at(click: Option<(f64, f64)>, window: Option<Rect>, mouse: Option
 /// Which source `place` would use for this anchor (logging).
 pub fn source_of(a: &Anchor, o: &Opts) -> Option<Source> {
     if a.caret.is_some_and(|r| r.is_valid()) { Some(Source::Caret) }
+    else if mouse_line(a).is_some() { Some(Source::Mouse) }
     else if field_line(a, o).is_some() { Some(Source::Field) }
     else if a.mouse.is_some() { Some(Source::Mouse) } else { None }
 }
 /// Fallback "line" from the focused element frame: its left edge, full height, only for single-line-ish fields.
 fn field_line(a: &Anchor, o: &Opts) -> Option<Rect> {
     a.field.filter(|f| f.is_valid() && f.w > 1.0 && f.h > 1.0 && f.h <= o.max_field_h).map(|f| Rect::new(f.x + 4.0, f.y, 1.0, f.h))
+}
+/// The pointer, when it is in the field: that is where the text is.
+///
+/// An app that exposes no caret (an Electron app with its tree off, VS Code's inline prompt) leaves the field's edge —
+/// the far left of the input, away from the text — as the only other guess. The pointer (or the click that put the
+/// focus there) is much closer to where the next character goes, so it wins when it is in the field.
+fn mouse_line(a: &Anchor) -> Option<Rect> {
+    let (mx, my) = a.mouse?;
+    let f = a.field.filter(|f| f.is_valid() && f.w > 1.0 && f.h > 1.0)?;
+    if f.contains(mx, my) { Some(Rect::new(mx, my, 0.0, 0.0)) } else { None }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement { pub rect: Rect, pub monitor: usize, pub above: bool, pub source: Source }
@@ -121,11 +155,12 @@ fn snap(v: f64, pixel: f64) -> f64 { if pixel > 0.0 { (v * pixel).round() / pixe
 /// Compute the bubble rect. `size` is the bubble's logical size (width, height).
 pub fn place(anchor: &Anchor, size: (f64, f64), monitors: &[Monitor], o: &Opts) -> Option<Placement> {
     let caret = anchor.caret.filter(|r| r.is_valid());
-    let (line, source) = match (caret, field_line(anchor, o), anchor.mouse) {
-        (Some(c), _, _) => (c, Source::Caret),
-        (None, Some(f), _) => (f, Source::Field),
-        (None, None, Some((mx, my))) => (Rect::new(mx, my, 0.0, 0.0), Source::Mouse),
-        (None, None, None) => return None,
+    let (line, source) = match (caret, mouse_line(anchor), field_line(anchor, o), anchor.mouse) {
+        (Some(c), _, _, _) => (c, Source::Caret),
+        (None, Some(m), _, _) => (m, Source::Mouse),
+        (None, None, Some(f), _) => (f, Source::Field),
+        (None, None, None, Some((mx, my))) => (Rect::new(mx, my, 0.0, 0.0), Source::Mouse),
+        (None, None, None, None) => return None,
     };
     let (cx, cy) = (line.x, line.y + line.h / 2.0);
     let mi = monitor_for(monitors, cx, cy)?;
@@ -164,6 +199,32 @@ mod tests {
     #[test] fn below_caret_by_default() {
         let r = p(caret(400.0, 200.0), &[MAC]);
         assert!(!r.above); assert_eq!(r.rect.y, 200.0 + 18.0 + 6.0); assert_eq!(r.rect.x, 383.0); assert_eq!(r.source, Source::Caret);
+    }
+    #[test] fn win32_caret_is_the_position_and_the_line_height() {
+        // a text field's caret: the rect is the caret's, and only its position and height are used
+        let c = win32_caret(44, 0, 20).unwrap();
+        assert_eq!((c.x, c.y, c.h), (44.0, 0.0, 20.0));
+    }
+    #[test] fn win32_caret_placeholder_is_not_a_caret() {
+        // a window with no caret reports 1x1 at the client's origin: anchoring there is the corner of the screen
+        assert!(win32_caret(0, 0, 1).is_none(), "one pixel tall is not a caret");
+    }
+    #[test] fn win32_caret_rejects_padding_junk() {
+        // an app that draws its own caret: the rect's bottom is below its top, so there is no height to trust
+        assert!(win32_caret(40, 30, 14).is_none());
+    }
+    #[test] fn a_read_without_a_caret_keeps_the_one_in_use() {
+        let prev = caret(400.0, 200.0);
+        let next = Anchor { caret: None, field: Some(Rect::new(0.0, 0.0, 800.0, 600.0)), mouse: Some((10.0, 10.0)) };
+        let kept = keep_caret(Some(&prev), next);
+        assert_eq!(kept.caret, prev.caret, "the bubble stays on the caret");
+        assert_eq!(kept.field, next.field, "the rest of the read is still used");
+    }
+    #[test] fn a_read_with_a_caret_replaces_the_one_in_use() {
+        let prev = caret(400.0, 200.0);
+        let next = caret(500.0, 200.0);
+        assert_eq!(keep_caret(Some(&prev), next).caret, next.caret);
+        assert_eq!(keep_caret(None, next).caret, next.caret, "nothing in use: the read stands");
     }
     #[test] fn a_transparent_margin_may_cover_the_gap_but_what_is_drawn_keeps_it() {
         let o = Opts { inset: 10.0, ..Opts::default() };
@@ -294,5 +355,19 @@ mod tests {
         // tall field (document) is not a useful anchor -> mouse
         let a = Anchor { caret: None, field: Some(Rect::new(0.0, 25.0, 1440.0, 875.0)), mouse: Some((600.0, 300.0)) };
         assert_eq!(p(a, &[MAC]).source, Source::Mouse);
+    }
+    #[test] fn the_pointer_in_the_field_beats_the_field_edge() {
+        // an app with no caret: the field's edge is the far left of the input, the pointer is where the text is
+        let a = Anchor { caret: None, field: Some(Rect::new(200.0, 400.0, 600.0, 30.0)), mouse: Some((500.0, 410.0)) };
+        let r = p(a, &[MAC]);
+        assert_eq!(r.source, Source::Mouse);
+        assert_eq!(r.rect.x, 500.0 - 17.0, "the bubble sits at the pointer");
+        assert_eq!(r.rect.y, 410.0 + 22.0 + 6.0, "below it, the pointer's line being 22 px tall");
+        assert_eq!(source_of(&a, &Opts::default()), Some(Source::Mouse));
+    }
+    #[test] fn the_pointer_outside_the_field_leaves_the_field_edge() {
+        // the pointer is somewhere else entirely (a menu bar): the field is the closer guess
+        let a = Anchor { caret: None, field: Some(Rect::new(200.0, 400.0, 600.0, 30.0)), mouse: Some((900.0, 10.0)) };
+        assert_eq!(p(a, &[MAC]).source, Source::Field);
     }
 }
