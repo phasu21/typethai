@@ -1,5 +1,10 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.20**
+- **What's new, after every update.** The first time typeThai starts on a new version, a small window lists what
+  changed since the version you had. *See all* opens Settings → Updates, which now keeps the notes for this version and
+  the two before it, with a link to every release.
+
 **Fixed in 0.5.19**
 - **Windows: the bubble stays on the caret.** It could drift away from the text you are typing: the caret was read
   from the selection when there was one, a read that came back empty moved the bubble to the edge of the text field or
