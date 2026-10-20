@@ -629,6 +629,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                     if sh != ui.shift { ui.shift = sh; ui.view.update(cx, |_, cx| cx.notify()); }
                     if ui.visible && ui.view.read(cx).hold.is_some() { ui.view.update(cx, |_, cx| cx.notify()) }
                     if bridge::take(&bridge::REQ_OPEN_SETTINGS) { settings::open_or_focus(&mut settings_win, cx) }
+                    if let Some(r) = bridge::take_whats_new() { settings::open_whats_new(r, cx) }
                     let tray_cmd = tray.as_ref().and_then(|t| t.poll());
                     let tray_cmd = if bridge::take(&bridge::REQ_UPDATE_CLICK) { Some(super::platform::tray::TrayCmd::CheckUpdate) } else { tray_cmd };
                     match tray_cmd {

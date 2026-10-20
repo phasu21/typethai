@@ -265,7 +265,7 @@ fn newer_release(json: &str, current: &str) -> Option<Next> {
     Some(Next { version: tag.trim_start_matches('v').into(), page: v["html_url"].as_str().unwrap_or(RELEASES_PAGE).into(), package: url(&name)?, signature: url(&format!("{name}.sig"))? })
 }
 /// `tag` (v1.2.3) is a later release than `current` (1.2.3). Pre-release tags (v1.2.3-beta) never are.
-fn newer(tag: &str, current: &str) -> bool {
+pub fn newer(tag: &str, current: &str) -> bool {
     let parse = |s: &str| -> Option<Vec<u64>> { let s = s.trim_start_matches('v'); if s.contains('-') { return None } s.split('.').map(|p| p.parse().ok()).collect() };
     match (parse(tag), parse(current)) { (Some(a), Some(b)) => a > b, _ => false }
 }

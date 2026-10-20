@@ -3,7 +3,7 @@
 use crate::bridge::{self, BubbleLayout};
 use crate::engine::{AcceptKeys, CompleteMode, BADGE_IDLE_CHOICES_MS, COMPLETE_IDLE_CHOICES_MS, TAB_HOLD_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
-use crate::{local_setup, rewrite, update};
+use crate::{local_setup, rewrite, update, whats_new};
 use crate::ui::thai_font;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::hover_card::HoverCard;
@@ -206,6 +206,68 @@ fn build_view(first_page: usize, key_state: Option<KeyState>, window: &mut Windo
         }).detach();
     });
     view
+}
+
+/// The Settings page the Updates page is (its place in `render`'s list).
+const UPDATES_PAGE: usize = 4;
+/// Release notes as the Updates page and the What's new window show them: per release its New and Fixed lists,
+/// headed by the version when `versions`.
+fn release_notes(releases: &[whats_new::Release], paint: Paint, versions: bool) -> AnyElement {
+    let bullet = |text: &str| {
+        let (mut s, mut hl) = (String::new(), vec![]);
+        for (t, bold, code) in whats_new::runs(text) {
+            let start = s.len(); s.push_str(&t);
+            if bold || code {
+                hl.push((start..s.len(), HighlightStyle { font_weight: bold.then_some(FontWeight::SEMIBOLD), background_color: code.then_some(paint.border), ..Default::default() }));
+            }
+        }
+        div().flex().flex_row().gap(px(6.)).text_size(px(13.))
+            .child(div().flex_none().text_color(paint.muted).child("•"))
+            .child(div().flex_1().min_w(px(0.)).child(StyledText::new(s).with_highlights(hl)))
+    };
+    let section = |title: &str, items: &[String]| (!items.is_empty()).then(|| div().flex().flex_col().gap(px(4.))
+        .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(paint.muted).child(title.to_string()))
+        .children(items.iter().map(|i| bullet(i))));
+    div().flex().flex_col().gap(px(16.)).children(releases.iter().map(|r| {
+        let head = versions.then(|| div().font_weight(FontWeight::SEMIBOLD).child(format!("typeThai {}", r.version)));
+        div().flex().flex_col().gap(px(8.)).children(head).children(section("New", &r.new)).children(section("Fixed", &r.fixed))
+    })).into_any_element()
+}
+/// The window shown once after an update: what changed since the version that ran before.
+pub fn open_whats_new(releases: Vec<whats_new::Release>, cx: &mut App) {
+    let title: SharedString = format!("What's new in typeThai {}", update::CURRENT).into();
+    let opts = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(500.), px(440.)), cx))),
+        titlebar: Some(TitlebarOptions { title: Some(title.clone()), ..Default::default() }),
+        focus: true, show: true, kind: WindowKind::Normal, is_movable: true, is_resizable: true,
+        window_min_size: Some(size(px(360.), px(260.))),
+        ..Default::default()
+    };
+    match open_window(opts, cx, |_, cx| cx.new(|_| WhatsNew { releases, title })) {
+        Ok((handle, _)) => {
+            cx.activate(true);
+            let _ = handle.update(cx, |_, window, _| {
+                window.observe_window_appearance(|window, cx| gpui_kit::component::theme::Theme::sync_system_appearance(Some(window), cx)).detach();
+            });
+        }
+        Err(e) => eprintln!("typeThai: what's new window: {e}"),
+    }
+}
+struct WhatsNew { releases: Vec<whats_new::Release>, title: SharedString }
+impl Render for WhatsNew {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (paint, t) = (paint_of(cx), cx.theme());
+        div().size_full().bg(t.background).text_color(t.foreground).font(thai_font()).flex().flex_col()
+            .child(div().px(px(20.)).pt(px(18.)).pb(px(10.)).text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(self.title.clone()))
+            .child(div().id("whats-new").flex_1().min_h(px(0.)).overflow_y_scroll().px(px(20.)).pb(px(8.))
+                .child(release_notes(&self.releases, paint, self.releases.len() > 1)))
+            .child(div().px(px(16.)).py(px(12.)).border_t_1().border_color(paint.border).flex().flex_row().justify_end().gap(px(8.))
+                .child(Button::new("whats-new-all").label("See all").on_click(|_, window, _| {
+                    bridge::SETTINGS_PAGE.store(UPDATES_PAGE, Ordering::SeqCst); bridge::REQ_OPEN_SETTINGS.store(true, Ordering::SeqCst);
+                    window.remove_window();
+                }))
+                .child(Button::new("whats-new-ok").label("OK").primary().on_click(|_, window, _| window.remove_window())))
+    }
 }
 
 fn paint_of(cx: &App) -> Paint {
@@ -574,7 +636,13 @@ impl SettingsView {
         page("Updates", Icon::new(gpui_kit::assets::IconName::Download), format!("You have typeThai {}. Updates come from the typeThai releases on GitHub, are checked against typeThai's signing key, and install only when you choose Restart to update. When one is ready, a notification says so: clicking it is the same as clicking the tray item.", update::CURRENT),
             keywords(&["updates", "update", "version", "release", "upgrade", "github", "download", "restart", "notification"], std::iter::empty()),
             vec![SettingItem::new("Check automatically", auto).description("Look for a new version at launch, every 6 hours and when this computer wakes from sleep, and download it in the background. Only GitHub is contacted."),
-                SettingItem::new("Update", now)])
+                SettingItem::new("Update", now),
+                // this version and the two before it; the rest on GitHub
+                element(view, |_, _, _, paint| div().w_full().flex().flex_col().gap(px(10.))
+                    .child(div().w_full().flex().flex_row().items_center().justify_between()
+                        .child(Label::new("What's new").text_sm())
+                        .child(Button::new("release-notes").ghost().small().label("All release notes").on_click(|_, _, _| update::open_url(update::RELEASES_PAGE))))
+                    .child(release_notes(&whats_new::releases().into_iter().take(3).collect::<Vec<_>>(), paint, true)).into_any_element())])
     }
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         (self.confirm_reset, self.confirm_forget) = (false, false);
