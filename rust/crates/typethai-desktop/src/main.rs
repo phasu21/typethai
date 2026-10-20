@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app; mod backspace; mod bridge; mod candidate; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rank; mod rewrite; mod predict;
-mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update;
+mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update; mod whats_new;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
@@ -126,8 +126,13 @@ fn main() {
     bridge::SETTINGS_PAGE.store(cli.settings_page, std::sync::atomic::Ordering::SeqCst);
     if let Some(dir) = &cli.eval_typo { evaltypo::run(&cli, dir); return }
     if let Some(dir) = &cli.eval_live { if cli.eval_reverse { evallive::run_reverse(&cli, dir, &cli.eval_split) } else { evallive::run(&cli, dir, &cli.eval_split) } return }
+    let prefs_path = prefs::prefs_beside(&cli.state);
+    let first_run = !prefs_path.exists();
     let app = match app::App::load(&cli) { Ok(a) => a, Err(e) => { eprintln!("typethai: {e}"); std::process::exit(1) } };
-    if cli.simulate { platform::sim::run(app) } else { update::spawn(app.engine.check_updates); platform::run(app) }
+    if cli.simulate { platform::sim::run(app); return }
+    let fresh = whats_new::after_update(prefs_path.parent().unwrap_or(std::path::Path::new(".")), first_run);
+    *bridge::WHATS_NEW.lock().unwrap() = if cli.whats_new { whats_new::since(&whats_new::releases(), None, update::CURRENT) } else { fresh };
+    update::spawn(app.engine.check_updates); platform::run(app)
 }
 /// A `--demo-bubble --items` row: its label, and the reason a trailing `!th`, `!en` or `!typo` names. One offered in Thai
 /// is rated, as a conversion is (`BubbleItem::rated_word`).

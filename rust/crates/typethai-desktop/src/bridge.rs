@@ -346,6 +346,9 @@ pub static TIP_AT: Mutex<Option<Rect>> = Mutex::new(None);
 pub static REQ_OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
 /// `--settings-page N`: which page that window starts on (0 Word suggestions, 3 AI rewrite, …).
 pub static SETTINGS_PAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// What's new since the version that ran before, for the UI loop to show once (`whats_new::after_update`).
+pub static WHATS_NEW: std::sync::Mutex<Vec<crate::whats_new::Release>> = std::sync::Mutex::new(Vec::new());
+pub fn take_whats_new() -> Option<Vec<crate::whats_new::Release>> { Some(std::mem::take(&mut *WHATS_NEW.lock().unwrap())).filter(|r| !r.is_empty()) }
 /// The Settings window's update button: handled by the UI loop like the tray's update item. The rail's download chip
 /// clicks land here too — the capture side raises it, the UI loop does what the tray item does right now.
 pub static REQ_UPDATE_CLICK: AtomicBool = AtomicBool::new(false);
