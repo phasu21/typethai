@@ -186,3 +186,11 @@
 - [ ] Settings → Apps → Remove on a live entry turns that app back on without a restart.
 - [ ] Switch to an off app with the bubble or the preview up: it goes at once.
 - [ ] Windows: *Turn off in ‹exe›* names the window in front, never the taskbar after clicking the tray icon.
+
+## Windows caret anchoring (0.5.19; agent-verified by logs and the app's own anchor, not by eye)
+- [ ] Notepad: type a word; the bubble sits on the caret (its first label at the caret's x) and follows it as you type.
+- [ ] Select a word and keep typing: the bubble stays on the caret (at the selection's end), not at the selection's edge.
+- [ ] An app that shows no caret (VS Code's inline prompt): the bubble appears at the pointer — where you clicked — and
+  not at the far left of the text field.
+- [ ] The bubble never jumps to the mouse or to the field's edge while typing, and it does not jump when a read is slow.
+- [ ] Two monitors: the bubble stays on the caret's monitor (the caret is read per monitor, in physical pixels).

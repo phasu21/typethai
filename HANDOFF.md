@@ -369,6 +369,22 @@ completion frequencies).
     `a_read_without_a_caret_keeps_the_one_in_use`, `a_read_with_a_caret_replaces_the_one_in_use`,
     `the_pointer_in_the_field_beats_the_field_edge`, `the_pointer_outside_the_field_leaves_the_field_edge`.
 
+## Release 0.5.19 (2026-10-20)
+
+- The caret fix above, with the pointer as the fallback when there is no caret, released as **v0.5.19** from
+  `release/0.5.8` — the line the 0.5.16-0.5.18 releases came from (`main` was still at 0.5.15; it is now the release
+  too, so the Linux CI compiles again).
+- Published by the tag workflow: the signed macOS universal app (smoke-tested from the DMG), the Windows zip and
+  installer, the ed25519 signatures the updater checks, and the pinned model. The published binary answers
+  `--check-update` with *GitHub's latest release is v0.5.19; this is typeThai 0.5.19*.
+- Three things had to be fixed to get there, none of them in the product:
+  - the `prefs` tests shared a temp directory named after the process id, so two pairs of them clobbered each other
+    when they ran in parallel (a red CI at random);
+  - the predictor tests asked the model before it had learned the line, which failed on a loaded machine (the model
+    trains on its own thread) — they now wait for it;
+  - the crate did not compile on Linux, the platform the release workflow builds on: the `--demo-settings` block named
+    the `ui` module outside the gate that module is declared in.
+
 ## Open limitations
 
 - `riht` is 0.82 on a fresh model (hidden now) but 0.93 with the +1 logit the current personal state allows.
