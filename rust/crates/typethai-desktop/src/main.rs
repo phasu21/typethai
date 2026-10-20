@@ -79,25 +79,31 @@ fn main() {
     // only the Settings window, with sample words and no key capture, prefs or keychain. The local-state options show the
     // Local model setup row in a chosen state (checking, install, start, pull, downloading, ready, failed) instead of
     // asking Ollama, so every branch can be seen without moving Ollama around.
-    if let Some(i) = args.iter().position(|a| a == "--demo-settings") {
-        let mut secs = 30.0; let mut shot: Option<String> = None; let mut search: Option<String> = None; let mut page = 0usize; let mut light = false;
-        let mut local: Option<ui::LocalDemo> = None;
-        let mut it = args[i + 1..].iter();
-        while let Some(a) = it.next() { match a.as_str() {
-            "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(30.0),
-            "--screenshot" => shot = it.next().cloned(),
-            "--search" => search = it.next().cloned(),
-            "--page" => page = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
-            "--light" => light = true,
-            "--local-cycle" => local = ui::demo_local("cycle"),
-            "--local-state" => match it.next().and_then(|s| ui::demo_local(s)) {
-                Some(state) => local = Some(state),
-                None => { eprintln!("--local-state: expected checking, install, start, pull, downloading, ready, failed or cycle"); std::process::exit(2) }
-            },
-            _ => { eprintln!("--demo-settings: unknown option {a:?}"); std::process::exit(2) }
-        } }
-        #[cfg(any(windows, target_os = "macos"))] { ui::demo_settings(secs, shot, search, page, light, local); return }
-        #[cfg(not(any(windows, target_os = "macos")))] { let _ = (secs, shot, search, page, light, local); eprintln!("--demo-settings needs macOS or Windows"); std::process::exit(2) }
+    if let Some(_i) = args.iter().position(|a| a == "--demo-settings") {
+        // the Settings window is gpui's, so this demo needs the platform it is drawn on: the whole block sits inside the
+        // gate, or Linux (the platform the CI builds on) has no `ui` module to name
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let mut secs = 30.0; let mut shot: Option<String> = None; let mut search: Option<String> = None; let mut page = 0usize; let mut light = false;
+            let mut local: Option<ui::LocalDemo> = None;
+            let mut it = args[_i + 1..].iter();
+            while let Some(a) = it.next() { match a.as_str() {
+                "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(30.0),
+                "--screenshot" => shot = it.next().cloned(),
+                "--search" => search = it.next().cloned(),
+                "--page" => page = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+                "--light" => light = true,
+                "--local-cycle" => local = ui::demo_local("cycle"),
+                "--local-state" => match it.next().and_then(|s| ui::demo_local(s)) {
+                    Some(state) => local = Some(state),
+                    None => { eprintln!("--local-state: expected checking, install, start, pull, downloading, ready, failed or cycle"); std::process::exit(2) }
+                },
+                _ => { eprintln!("--demo-settings: unknown option {a:?}"); std::process::exit(2) }
+            } }
+            ui::demo_settings(secs, shot, search, page, light, local);
+            return
+        }
+        #[cfg(not(any(windows, target_os = "macos")))] { eprintln!("--demo-settings needs macOS or Windows"); std::process::exit(2) }
     }
     // --probe-caret [--secs N]: log frontmost app / anchor source / caret rect every 500 ms and mark it on screen
     if args.iter().any(|a| a == "--probe-caret") {
