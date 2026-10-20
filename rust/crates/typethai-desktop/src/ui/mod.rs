@@ -24,8 +24,8 @@ mod settings;
 pub use settings::{demo_local, LocalDemo};
 #[cfg(target_os = "macos")] pub mod native_mac;
 #[cfg(target_os = "macos")] pub use native_mac as native;
-#[cfg(windows)] mod native_win;
-#[cfg(windows)] use native_win as native;
+#[cfg(windows)] pub mod native_win;
+#[cfg(windows)] pub use native_win as native;
 
 pub struct BubbleView {
     pub items: Vec<Opt>, pub layout: Layout,
@@ -267,6 +267,9 @@ impl Ui {
     /// Measure labels -> layout (a strip, or rows when the strip does not fit) -> place -> show. The exact row heights
     /// (and widths, if fonts differ) come from the real layout via `reconcile` on the next frames. Returns the initial placement.
     fn show(&mut self, items: Vec<Opt>, wanted: BubbleLayout, anchor: Anchor, cx: &mut App) -> Option<Placement> {
+        // A read that found no caret must not throw the bubble to the field's edge or the mouse: the caret it was
+        // last seen at is still the text being typed at.
+        let anchor = placement::keep_caret(self.anchor.as_ref(), anchor);
         let view = self.view.clone(); let (visible, real) = (self.visible, self.size);
         let update_chip = self.view.read(cx).update;
         let res = self.handle.update(cx, |_, window, cx| {
@@ -340,6 +343,9 @@ impl Ui {
     /// Caret moved while shown: same size, new anchor.
     fn reanchor(&mut self, anchor: Anchor, cx: &mut App) -> Option<Placement> {
         if !self.visible || self.size.0 <= 0.0 { return None }
+        // A re-read that found no caret must not move the bubble: the fallbacks (the field's edge, the mouse) are
+        // nowhere near the text, so a read that timed out would throw the bubble off the caret.
+        let anchor = placement::keep_caret(self.anchor.as_ref(), anchor);
         self.anchor = Some(anchor); let sz = self.size; self.place(sz, cx)
     }
     fn hide(&mut self, cx: &mut App) {
@@ -411,12 +417,12 @@ fn label_w(window: &Window, text: &'static str) -> f64 {
     let run = TextRun { len: text.len(), font: f, color: black(), background_color: None, underline: None, strikethrough: None };
     window.text_system().shape_line(text.into(), px(badge::LABEL_PX as f32), &[run], None).width().as_f32().ceil() as f64 + 1.0
 }
-struct BadgeWin { handle: AnyWindowHandle, view: Entity<BadgeView>, native: native::Native, shown: badge::Shown, at: Option<Placement> }
+struct BadgeWin { handle: AnyWindowHandle, view: Entity<BadgeView>, native: native::Native, shown: badge::Shown, at: Option<Placement>, last: Option<Anchor> }
 impl BadgeWin {
     fn open(cx: &mut App) -> BadgeWin {
         let (handle, view, native) = open_popup(80., 46., cx, |cx| cx.new(|_| BadgeView { lang: InputLang::Latin, label_w: 0.0, hold: None }));
         native::click_through(&native);
-        BadgeWin { handle, view, native, shown: badge::Shown::default(), at: None }
+        BadgeWin { handle, view, native, shown: badge::Shown::default(), at: None, last: None }
     }
     fn changed(&mut self, lang: InputLang, anchor: Anchor, cx: &mut App) { let c = self.shown.changed(lang, Instant::now()); self.run(c, Some(anchor), cx) }
     /// Focus landed in a text field nothing has been typed in yet: show and stay.
@@ -428,6 +434,9 @@ impl BadgeWin {
     /// have been refused, or a keystroke took it down since), and a spot that has not changed is left alone.
     fn move_to(&mut self, anchor: Anchor, cx: &mut App) {
         let Some(cur) = self.at else { return };
+        // A re-read that found no caret must not move the badge off the caret it is on.
+        let anchor = placement::keep_caret(self.last.as_ref(), anchor);
+        self.last = Some(anchor);
         let w = self.view.read(cx).label_w;
         let Some(p) = badge::place(&anchor, w, &native::monitors()) else { return };
         if p.rect == cur.rect { return }
@@ -447,6 +456,7 @@ impl BadgeWin {
     }
     fn run(&mut self, cmd: Option<Cmd>, anchor: Option<Anchor>, cx: &mut App) {
         let n = self.native.clone();
+        if let Some(a) = anchor { self.last = Some(a); }
         let at = match cmd {
             Some(c @ (Cmd::Show(_) | Cmd::Hold)) => {
                 let text = match c { Cmd::Show(lang) => badge::label(lang), _ => badge::HOLD_LABEL };

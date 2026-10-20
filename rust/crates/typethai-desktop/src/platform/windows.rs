@@ -26,7 +26,10 @@ const ES_PASSWORD_STYLE: i32 = 0x0020;
 const THAI_KLID: usize = 0x041E;
 
 /// `layouts`: the foreground window's input language as last seen, for the badge.
-struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
+struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_fg: HWND, last_focus: HWND, secure: bool, uia: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>, uia_caret: Option<mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)>>,
+    /// Where the last click outside our own windows landed: the caret went there, so it is the pointer the anchor
+    /// falls back to when the app exposes no caret.
+    last_click: Option<(f64, f64)>,
     gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch,
     /// Caret re-reads after a key (`arm_caret_follow`), for the bubble or the preview that is up.
     follow: follow::Follow,
@@ -37,21 +40,31 @@ thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> { ST.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f))) }
 
 // ---------- UI Automation worker (MTA thread, so UIA calls never run on the hook thread) ----------
-enum UiaQuery { Focus, Caret, Field }
-enum UiaResp { Focus(bool, Field), Rect(Option<RECT>) }
+#[derive(Clone, Copy)]
+enum UiaQuery { Focus, Caret }
+enum UiaResp { Focus(bool, Field), Caret { caret: Option<RECT>, field: Option<RECT> } }
+/// A UI Automation worker thread.
+///
+/// The focus read is the slow one: the cached element carries five properties, each a round trip to the app. The
+/// caret read is the one with a deadline, so it gets a worker of its own — a focus read in flight (the periodic
+/// refresh) must not make the caret read miss its cap and leave the bubble without a caret to sit on.
 fn uia_worker() -> mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)> {
     let (tx, rx) = mpsc::channel::<(UiaQuery, mpsc::Sender<UiaResp>)>();
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
         let auto: Option<IUIAutomation> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
-        let req = auto.as_ref().and_then(|a| a.CreateCacheRequest().ok());
-        if let Some(r) = &req { for p in FOCUS_PROPS { let _ = r.AddProperty(p); } }
         for (q, reply) in rx {
             let el = || auto.as_ref().and_then(|a| a.GetFocusedElement().ok());
             let r = match q {
-                UiaQuery::Focus => { let (pw, f) = uia_focus(auto.as_ref(), req.as_ref()); UiaResp::Focus(pw, f) }
-                UiaQuery::Caret => UiaResp::Rect(el().and_then(|e| uia_caret(&e))),
-                UiaQuery::Field => UiaResp::Rect(el().and_then(|e| e.CurrentBoundingRectangle().ok())),
+                UiaQuery::Focus => { let (pw, f) = uia_focus(auto.as_ref()); UiaResp::Focus(pw, f) }
+                UiaQuery::Caret => {
+                    // The focused element and its caret in one round trip: a second query would queue behind this one
+                    // on the worker thread, and the caret read is the one with a deadline.
+                    let e = el();
+                    let field = e.as_ref().and_then(|e| e.CurrentBoundingRectangle().ok());
+                    let caret = e.as_ref().and_then(|e| uia_caret(e));
+                    UiaResp::Caret { caret, field }
+                }
             };
             let _ = reply.send(r);
         }
@@ -60,8 +73,13 @@ fn uia_worker() -> mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)> {
 }
 const FOCUS_PROPS: [UIA_PROPERTY_ID; 5] = [UIA_IsPasswordPropertyId, UIA_ControlTypePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId, UIA_ValueIsReadOnlyPropertyId];
 /// Focused element: (password, text-field verdict), in one cross-process round trip (cache request).
-unsafe fn uia_focus(a: Option<&IUIAutomation>, req: Option<&IUIAutomationCacheRequest>) -> (bool, Field) {
-    let Some(e) = a.zip(req).and_then(|(a, r)| a.GetFocusedElementBuildCache(r).ok()) else { return (false, Field::Unknown) };
+unsafe fn uia_focus(a: Option<&IUIAutomation>) -> (bool, Field) {
+    // The cache request is made per read: made once at startup it can fail (the proxy is not up yet), and then
+    // every read would fail with it and the focus would stay unknown forever.
+    let Some(a) = a else { return (false, Field::Unknown) };
+    let req = match a.CreateCacheRequest() { Ok(r) => r, Err(e) => { debug_uia(&format!("cache request: {e:?}")); return (false, Field::Unknown) } };
+    for p in FOCUS_PROPS { let _ = req.AddProperty(p); }
+    let e = match a.GetFocusedElementBuildCache(&req) { Ok(e) => e, Err(e) => { debug_uia(&format!("focused element: {e:?}")); return (false, Field::Unknown) } };
     // a property the element lacks comes back as the "not supported" sentinel, which is no bool
     let b = |p| e.GetCachedPropertyValue(p).ok().and_then(|v| bool::try_from(&v).ok()).unwrap_or(false);
     let ct = e.CachedControlType().map(|c| c.0).unwrap_or(0);
@@ -97,15 +115,36 @@ unsafe fn caret_of(range: &IUIAutomationTextRange) -> Option<RECT> {
 unsafe fn uia_caret(e: &IUIAutomationElement) -> Option<RECT> {
     if let Ok(tp) = e.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) {
         let mut active = windows::core::BOOL(0);
-        if let Ok(caret) = tp.GetCaretRange(&mut active) { if let Some(r) = caret_of(&caret) { return Some(r) } }
+        // `active` is false when the element has no caret of its own: the range is then somebody else's.
+        if let Ok(caret) = tp.GetCaretRange(&mut active) { if active.as_bool() { if let Some(r) = caret_of(&caret) { return Some(r) } } }
     }
     let tp: IUIAutomationTextPattern = e.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
     let sel = tp.GetSelection().ok()?;
     let range = (0..sel.Length().ok()?).find_map(|i| sel.GetElement(i).ok())?;
-    caret_of(&range)
+    // The selection is not the caret: with text selected its rect is the whole selection, and anchoring the bubble to
+    // that puts it at the selection's edge, not where the next character goes. The caret is where the selection
+    // ends, the same end macOS reads for an AX selection.
+    let caret = range.Clone().ok()?;
+    let _ = caret.MoveEndpointByRange(TextPatternRangeEndpoint_Start, &range, TextPatternRangeEndpoint_End);
+    caret_of(&caret)
 }
+/// `TYPETHAI_DEBUG`: a UI Automation failure worth knowing about.
+fn debug_uia(what: &str) { if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("typethai: uia {what}"); } }
 fn uia_ask(st: &State, q: UiaQuery) -> Option<UiaResp> {
-    let (tx, rx) = mpsc::channel(); st.uia.as_ref()?.send((q, tx)).ok()?; rx.recv_timeout(Duration::from_millis(60)).ok()
+    // each query kind has its own worker: the slow focus read must not hold up the caret read
+    let worker = match q { UiaQuery::Focus => st.uia.as_ref()?, UiaQuery::Caret => st.uia_caret.as_ref()? };
+    let (tx, rx) = mpsc::channel();
+    let t0 = Instant::now();
+    if worker.send((q, tx)).is_err() { return None }
+    let r = rx.recv_timeout(Duration::from_millis(60)).ok();
+    // a read that missed its cap is a caret that is not there: say so, it is the one that misplaces the bubble
+    if std::env::var_os("TYPETHAI_DEBUG").is_some() {
+        let ms = t0.elapsed().as_millis();
+        let kind = match q { UiaQuery::Focus => "focus", UiaQuery::Caret => "caret" };
+        if r.is_none() { eprintln!("typethai: uia {kind} read dropped after {ms} ms"); }
+        else if ms > 20 { eprintln!("typethai: uia {kind} read took {ms} ms"); }
+    }
+    r
 }
 
 // ---------- focus / secure / caret ----------
@@ -150,28 +189,45 @@ unsafe fn fullscreen(fg: HWND) -> bool {
 }
 fn rect(r: RECT) -> Rect { Rect::new(r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64) }
 /// `TYPETHAI_DEBUG`: the anchor last logged: which of caret / field / mouse it came from, and the rects it used.
-static LAST_ANCHOR: Mutex<Option<(&'static str, Option<Rect>, Option<Rect>)>> = Mutex::new(None);
+static LAST_ANCHOR: Mutex<Option<(&'static str, Option<Rect>, Option<Rect>, Option<(f64, f64)>)>> = Mutex::new(None);
 /// Caret rect (GetGUIThreadInfo, else UIA TextPattern2 / TextPattern), focused element frame (UIA, else the focus
 /// HWND) and the mouse, in physical screen pixels (gpui makes the process per-monitor DPI aware).
 unsafe fn anchor(st: &State) -> Anchor {
     let fg = GetForegroundWindow(); let gi = gui_info(fg);
     let mut a = Anchor::default();
     if let Some(gi) = gi {
-        if !gi.hwndCaret.is_invalid() && (gi.rcCaret.right > gi.rcCaret.left || gi.rcCaret.bottom > gi.rcCaret.top) {
-            let (mut p1, mut p2) = (POINT { x: gi.rcCaret.left, y: gi.rcCaret.top }, POINT { x: gi.rcCaret.right, y: gi.rcCaret.bottom });
-            let _ = ClientToScreen(gi.hwndCaret, &mut p1); let _ = ClientToScreen(gi.hwndCaret, &mut p2);
-            a.caret = Some(Rect::new(p1.x as f64, p1.y as f64, (p2.x - p1.x).max(1) as f64, (p2.y - p1.y) as f64));
+        // The Win32 caret, for the apps that make one (a text field, a console). Only the position is the caret's:
+        // the rect's right and bottom carry the text direction and padding, not the caret's edges, and a window with
+        // no caret reports a 1x1 placeholder at the client's origin - anchoring to that is the corner of the screen.
+        if !gi.hwndCaret.is_invalid() {
+            if let Some(c) = crate::placement::win32_caret(gi.rcCaret.left, gi.rcCaret.top, gi.rcCaret.bottom) {
+                let mut p = POINT { x: gi.rcCaret.left, y: gi.rcCaret.top };
+                let _ = ClientToScreen(gi.hwndCaret, &mut p);
+                a.caret = Some(Rect::new(p.x as f64, p.y as f64, c.w, c.h));
+            }
         }
     }
-    if a.caret.is_none() { if let Some(UiaResp::Rect(Some(r))) = uia_ask(st, UiaQuery::Caret) { a.caret = Some(rect(r)); } }
-    if let Some(UiaResp::Rect(Some(r))) = uia_ask(st, UiaQuery::Field) { a.field = Some(rect(r)); }
-    else if let Some(gi) = gi { let mut r = RECT::default(); if !gi.hwndFocus.is_invalid() && GetWindowRect(gi.hwndFocus, &mut r).is_ok() { a.field = Some(rect(r)); } }
+    // UI Automation, for the apps with no Win32 caret (Chromium, Electron). The caret is only trusted when it lands
+    // in the focused element: a provider that answers with an element-relative or off-screen rect would put the
+    // bubble nowhere near the text.
+    if a.caret.is_none() {
+        if let Some(UiaResp::Caret { caret, field }) = uia_ask(st, UiaQuery::Caret) {
+            let field = field.map(rect);
+            if let Some(c) = caret.map(rect) { if crate::placement::plausible_caret(c, field, &crate::ui::native::monitors()) { a.caret = Some(c); } }
+            a.field = field;
+        }
+    }
+    // the focused window's frame, and the click that put the focus there: the caret went where the user clicked, so
+    // that is the pointer to fall back on when the app exposes no caret (the pointer itself moves on since)
+    let focus_win = gi.and_then(|g| { let mut r = RECT::default(); if !g.hwndFocus.is_invalid() && GetWindowRect(g.hwndFocus, &mut r).is_ok() { Some(rect(r)) } else { None } });
+    if a.field.is_none() { a.field = focus_win; }
     let mut p = POINT::default(); if GetCursorPos(&mut p).is_ok() { a.mouse = Some((p.x as f64, p.y as f64)); }
+    a.mouse = crate::placement::pointer_at(st.last_click, focus_win, a.mouse);
     // a bubble that reads as misplaced is otherwise a guess: say which source placed it, and where the caret was
     if std::env::var_os("TYPETHAI_DEBUG").is_some() {
         let src = crate::placement::source_of(&a, &crate::placement::Opts::default()).map(|s| s.name()).unwrap_or("none");
         let mut last = LAST_ANCHOR.lock().unwrap();
-        if *last != Some((src, a.caret, a.field)) { *last = Some((src, a.caret, a.field)); eprintln!("typethai: anchor source={src} caret={:?} field={:?}", a.caret, a.field) }
+        if *last != Some((src, a.caret, a.field, a.mouse)) { *last = Some((src, a.caret, a.field, a.mouse)); eprintln!("typethai: anchor source={src} caret={:?} field={:?} mouse={:?}", a.caret, a.field, a.mouse) }
     }
     a
 }
@@ -433,7 +489,7 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
 // ---------- mouse thread ----------
 /// The last click the mouse thread saw, for the hook thread: elsewhere (the caret may have moved), or a left click on
 /// an option or one of its thumbs. Taken before the next key and on the timer, so a key typed after a click sees it first.
-enum Click { Elsewhere, On(bridge::Hit) }
+enum Click { Elsewhere(f64, f64), On(bridge::Hit) }
 static CLICK: Mutex<Option<Click>> = Mutex::new(None);
 /// The hook thread, woken (WM_APP) to apply a clicked row right away.
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
@@ -467,7 +523,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
                 }
                 return LRESULT(1)
             }
-            None => *CLICK.lock().unwrap() = Some(Click::Elsewhere),
+            None => *CLICK.lock().unwrap() = Some(Click::Elsewhere(pt.x as f64, pt.y as f64)),
         }
     }
     CallNextHookEx(None, code, wp, lp)
@@ -478,7 +534,10 @@ unsafe fn take_click(st: &mut State) {
     let click = CLICK.lock().unwrap().take();
     match click {
         None => {}
-        Some(Click::Elsewhere) => {
+        Some(Click::Elsewhere(x, y)) => {
+            // the click that put the focus in the field is where the caret went: the anchor's pointer, when the app
+            // exposes no caret of its own
+            st.last_click = Some((x, y));
             st.gate.touch(Instant::now()); arm_focus_look(st, false);
             // the click moved the caret: a preview that is up follows it here, on the spot (a keystroke-driven follow
             // would read it before the app has laid it out, `arm_caret_follow`)
@@ -566,7 +625,7 @@ unsafe fn control(st: &mut State) -> bool {
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), follow: follow::Follow::default(), badge_due: Some((Instant::now(), false)) }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), uia_caret: Some(uia_worker()), last_click: None, gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), follow: follow::Follow::default(), badge_due: Some((Instant::now(), false)) }));
         HOOK_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
         let Ok(kb) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return

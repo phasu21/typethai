@@ -3393,9 +3393,14 @@ mod tests {
         let oracle = Arc::new(typethai_core::predict::KnownWords::new(Arc::new(typethai_core::dict::Dict::new(words.iter().cloned())), Arc::new(words)));
         e.predict = Some(crate::predict::Predict::spawn(dir, oracle));
     }
+    /// Wait for the predictor's thread to have taken the line in: the model learns on that thread, so a test that asks
+    /// before the learning lands is a race, not a failure.
+    fn learned(e: &mut Engine) { if let Some(p) = &e.predict { p.flush() } }
     /// Tick the idle timer until `done`: the model answers from its own thread, so the row arrives a tick later.
+    /// The budget is generous: the model trains on that thread and a loaded machine (the whole suite at once, a CI
+    /// runner) can take seconds, which is not the test being wrong.
     fn until_idle(e: &mut Engine, done: impl Fn(&Engine) -> bool) -> bool {
-        for _ in 0..200 {
+        for _ in 0..600 {
             e.on_idle(Instant::now() + Duration::from_millis(600));
             if done(e) { return true }
             std::thread::sleep(Duration::from_millis(5));
@@ -3423,6 +3428,7 @@ mod tests {
         predictor(&mut e, "line", &["please", "refactor", "the", "parser"]);
         // the line the user finished is what the model learns from
         typ(&mut e, "please refactor the parser\n");
+        learned(&mut e);
         typ(&mut e, "pars");
         assert!(until_idle(&mut e, |e| labels(e).iter().any(|l| l == "parser")), "no predicted row: {:?}", labels(&e));
     }
@@ -3432,6 +3438,7 @@ mod tests {
         e.opts.complete = CompleteMode::Typing; e.opts.slips = None;
         predictor(&mut e, "accept", &["please", "refactor", "the", "parser"]);
         typ(&mut e, "please refactor the parser\n");
+        learned(&mut e);
         typ(&mut e, "pars");
         assert!(until_idle(&mut e, |e| labels(e).iter().any(|l| l == "parser")), "no predicted row: {:?}", labels(&e));
         // the row carries the whole word as its insert, and Tab applies it exactly like a completion: what the keys
@@ -3551,6 +3558,7 @@ mod tests {
         predictor(&mut e, "next-word", &["zorble", "quux"]);
         // a line the user finished: the model learns it when the line ends
         typ(&mut e, "zorble quux"); e.on_key(Key::Boundary(Boundary::Enter));
+        learned(&mut e);
         // then its word follows "zorble ", where the built-in pairs know nothing
         typ(&mut e, "zorble ");
         let got = until_idle(&mut e, |e| labels(e).iter().any(|l| l == "quux"));
