@@ -1,5 +1,11 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.21**
+- **Windows: fast typing no longer stutters.** Typing quickly, words the spell checker does not know above all (`aswd
+  aswd`), made typing hitch and typeThai use more and more CPU: every Space and every short pause waited for the
+  system spell checker. Typing never waits more than a moment for it now, and a word it has already checked costs
+  nothing.
+
 **New in 0.5.20**
 - **What's new, after every update.** The first time typeThai starts on a new version, a small window lists what
   changed since the version you had. *See all* opens Settings → Updates, which now keeps the notes for this version and
