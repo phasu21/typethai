@@ -37,7 +37,8 @@ const PREDICT_BEFORE_CHARS: usize = 2000;
 fn query_key(line: &str, head: &str, tail: &str, thai: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (line, head, tail, thai).hash(&mut h);
-    h.finish()
+    // the next-word bit stays clear, or the answer would be read as a next-word one and dropped
+    h.finish() & !NEXT_WORD_KEY
 }
 /// The end of `text` the spell checker reads as a word's context: its last line, at most `SPELL_CONTEXT` bytes.
 fn spell_context(text: &str) -> &str {
@@ -438,6 +439,9 @@ pub struct Engine {
     /// answer it gave (`key`, its confidence, the whole word), and the word last shown with its confidence, which stays
     /// while the word is typed through: a ghost must not move under the user's fingers.
     pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String, f64)>,
+    /// An answer for the word being typed came in and no rows were built from it yet. Any poll may take it in (the
+    /// pause tick polls again after it asks), so the tick that shows it goes by this, not by which poll saw it.
+    pred_fresh: bool,
     /// The next-word query asked for this line state (its key), and its answer: the key, confidence, word.
     pred_next_ask: Option<u64>, pred_next_answer: Option<(u64, f64, String)>,
     /// The finished line has been given to the predictor (a line is learned once).
@@ -454,7 +458,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), in_bubble: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_fresh: false, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -988,8 +992,8 @@ impl Engine {
         if self.paused || self.off { return acts }
         // the model's answer lands a tick or two after the state that asked for it: the rows that state shows take it
         // in, without the pause's spell checker call
-        let answered = self.poll_prediction();
-        if answered && !self.word.is_empty() && self.opts.complete != CompleteMode::Off
+        self.poll_prediction();
+        if std::mem::take(&mut self.pred_fresh) && !self.word.is_empty() && self.opts.complete != CompleteMode::Off
             && (self.opts.complete == CompleteMode::Typing || self.last_key.is_none())
         {
             let up = self.completions_up();
@@ -1160,20 +1164,18 @@ impl Engine {
     }
     /// Take the predictor's answers. The thread answers at most one query at a time and may answer none, so only a
     /// reply for the query the user is still on counts; the others are the states already typed past.
-    fn poll_prediction(&mut self) -> bool {
-        let Some(p) = &self.predict else { return false };
-        let mut answered = false;
+    fn poll_prediction(&mut self) {
+        let Some(p) = &self.predict else { return };
         while let Some((key, suffix, confidence)) = p.answer() {
-            if key & NEXT_WORD_KEY != 0 { self.pred_next_answer = Some((key, confidence, suffix)); answered = true; continue }
+            if key & NEXT_WORD_KEY != 0 { self.pred_next_answer = Some((key, confidence, suffix)); continue }
             let Some((asked, tail, thai)) = self.pred_ask.clone() else { continue };
             if asked != key { continue }
             let typed = format!("{tail}{suffix}");
             // Latin words come back lowercased; the row is what the keys typed, case included
             let word = if thai { typed } else { typethai_core::completer::recase(&typed, &tail) };
             self.pred_answer = Some((key, confidence, word));
-            answered = true;
+            self.pred_fresh = true;
         }
-        answered
     }
     /// Ask the predictor for the word that follows the line, once per line state: the answer is in hand by the pause
     /// that shows the next-word rows. The context is the line as the model reads it (`predict_text`).
@@ -1196,6 +1198,7 @@ impl Engine {
     /// is on the way. The query is asked once per state of the word; until the answer arrives the word last shown
     /// stays, as long as the user is still typing into it.
     fn predicted(&mut self, head: &str, tail: &str, thai: bool, ask: Ask) -> Option<(String, String, f64)> {
+        self.pred_fresh = false;
         if !self.opts.predict || tail.is_empty() || self.predict.is_none() { return None }
         let line = self.shown_line(self.line.len());
         let key = query_key(&line, head, tail, thai);
@@ -3558,16 +3561,19 @@ mod tests {
     /// Wait for the predictor's thread to have taken the line in: the model learns on that thread, so a test that asks
     /// before the learning lands is a race, not a failure.
     fn learned(e: &mut Engine) { if let Some(p) = &e.predict { p.flush() } }
-    /// Tick the idle timer until `done`: the model answers from its own thread, so the row arrives a tick later.
-    /// The budget is generous: the model trains on that thread and a loaded machine (the whole suite at once, a CI
-    /// runner) can take seconds, which is not the test being wrong.
+    /// Tick the idle timer until `done`: the model answers from its own thread, so the row arrives a tick later. The
+    /// thread takes its jobs in order, so once `learned` returns every query a tick asked has been answered, and the
+    /// next tick reads it: no sleeping, and a few ticks are all any state needs.
     fn until_idle(e: &mut Engine, done: impl Fn(&Engine) -> bool) -> bool {
-        for _ in 0..600 {
+        for _ in 0..8 {
             e.on_idle(Instant::now() + Duration::from_millis(600));
             if done(e) { return true }
-            std::thread::sleep(Duration::from_millis(5));
+            learned(e);
         }
-        done(e)
+        false
+    }
+    #[test] fn a_predictor_completion_query_never_reads_as_a_next_word_one() {
+        assert!((0..256).all(|i| query_key(&i.to_string(), "", "pars", false) & NEXT_WORD_KEY == 0));
     }
     /// A word the app always offers back as its English (`ok` -> นา) gets that row after the pause too — first, with the
     /// Thai completions under it — and Tab applies the English.
@@ -3630,8 +3636,7 @@ mod tests {
         e.opts.predict = false;
         typ(&mut e, "pars");
         // the model may still answer; the setting keeps every row off the bubble
-        for _ in 0..40 { e.on_idle(Instant::now() + Duration::from_millis(600)); std::thread::sleep(Duration::from_millis(5)); }
-        assert_eq!(labels(&e), Vec::<String>::new(), "a row with the setting off");
+        assert!(!until_idle(&mut e, |e| !labels(e).is_empty()), "a row with the setting off: {:?}", labels(&e));
     }
     /// What one predicted word costs the predictor's thread, on a model bootstrapped from this build's word lists:
     /// `cargo test --release -p typethai-desktop predict_cost -- --ignored --nocapture`.
