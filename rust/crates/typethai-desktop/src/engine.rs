@@ -3452,6 +3452,54 @@ mod tests {
         e.reset(); typ_th(&mut e, "แซ่"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
         e.reset(); e.opts.next_word = false; typ_th(&mut e, "แซ่บ"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
     }
+    /// Gibberish typed fast (`aswd aswd ...`, no Enter) with the app's sources on, every key followed by a typing pause:
+    /// per-key and per-pause cost in 25-word windows, to see whether it grows. `PREDICT=1` starts the predictor too.
+    #[test] #[ignore] fn gibberish_cost() {
+        let (Some(mut m), Some(mut e)) = (model(), engine()) else { return };
+        e.load_completers(&mut m); e.corrector = Some(m.corrector()); e.opts.typo_suggestions = true; e.speller = crate::platform::spell::system();
+        e.opts.complete = CompleteMode::Pause; e.set_thai_active(std::env::var_os("THAI").is_some());
+        if std::env::var_os("NOSPELL").is_some() { e.speller = None }
+        if std::env::var_os("NOTYPO").is_some() { e.corrector = None }
+        if std::env::var_os("NOSLIPS").is_some() { e.opts.slips = None }
+        if std::env::var_os("NOCOMPLETE").is_some() { e.opts.complete = CompleteMode::Off }
+        if std::env::var_os("PREDICT").is_some() {
+            let dir = std::env::temp_dir().join(format!("tt-gib-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
+            let oracle = Arc::new(typethai_core::predict::KnownWords::new(Arc::clone(&e.det.th_dict), Arc::clone(&e.det.en_words)));
+            e.predict = Some(crate::predict::Predict::spawn(dir, oracle));
+        }
+        let word = std::env::var("WORD").unwrap_or_else(|_| "aswd".into());
+        let (mut keys_us, mut idle_us, mut sp_us, mut worst) = (0f64, 0f64, 0f64, (0f64, String::new()));
+        for wi in 1..=300 {
+            for c in word.chars().chain([' ']) {
+                let k = if c == ' ' { Key::Boundary(Boundary::Space) } else { Key::Char(c) };
+                let t = Instant::now(); std::hint::black_box(e.on_key(k)); let d = t.elapsed().as_secs_f64() * 1e6;
+                if c == ' ' { sp_us += d } else { keys_us += d }
+                if d > worst.0 { worst = (d, format!("key {c:?} word {wi}")) }
+                let t = Instant::now(); std::hint::black_box(e.on_idle(Instant::now() + Duration::from_millis(60))); let d = t.elapsed().as_secs_f64() * 1e6;
+                idle_us += d; if d > worst.0 { worst = (d, format!("idle after {c:?} word {wi}")) }
+            }
+            if wi % 25 == 0 {
+                let n = word.chars().count() as f64 * 25.0;
+                println!("words {:>3}: key {:>8.1} us  space {:>8.1} us  pause {:>8.1} us  (line {} words, worst {:.1} ms at {})", wi, keys_us / n, sp_us / 25.0, idle_us / (n + 25.0), e.line.len(), worst.0 / 1e3, worst.1);
+                (keys_us, idle_us, sp_us, worst) = (0.0, 0.0, 0.0, (0.0, String::new()));
+            }
+        }
+    }
+    /// The system spell checker alone: each call's cost on gibberish, then calls fired faster than it answers (a
+    /// burst of typing) to see whether waits pile up.
+    #[test] #[ignore] fn speller_cost() {
+        let Some(sp) = crate::platform::spell::system() else { return };
+        for w in ["aswd", "asdfgh", "qwerty", "zxcvbn", "sdfsdf", "helo", "the", "jjjj"] {
+            let t = Instant::now(); let g = sp.guesses("", w).map_or(0, |g| g.len()); let a = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now(); let c = sp.completions("i want ", w).len(); let b = t.elapsed().as_secs_f64() * 1e3;
+            println!("{w:>8}: guesses {g} in {a:.1} ms, completions {c} in {b:.1} ms");
+        }
+        let words = ["asw", "aswd", "qwe", "qwer", "zxc", "zxcv", "sdf", "sdfs"];
+        let t0 = Instant::now(); let mut waits = vec![];
+        for i in 0..80 { let t = Instant::now(); let w = words[i % words.len()]; if i % 5 == 4 { sp.guesses("", w); } else { sp.completions("", w); } waits.push(t.elapsed().as_secs_f64() * 1e3); }
+        let total = t0.elapsed().as_secs_f64() * 1e3; waits.sort_by(f64::total_cmp);
+        println!("burst of 80: {total:.0} ms, wait p50 {:.1} p90 {:.1} max {:.1} ms", waits[40], waits[72], waits[79]);
+    }
     fn complete(typed: &str, insert: &str) -> BubbleItem { BubbleItem { label: insert.into(), kind: BubbleKind::Complete { typed: typed.into(), insert: insert.into() } } }
     /// One English letter is enough: after the pause the frequency list ranks `h` to its top words, and Tab applies the
     /// whole word to the single typed letter.
