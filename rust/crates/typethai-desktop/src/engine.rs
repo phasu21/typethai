@@ -482,11 +482,12 @@ impl Engine {
     pub fn app_off(&self) -> bool { self.off }
     /// The platform's gate looked at focus: it is (`text`) or is not in a text field. Focus landing in one shows the
     /// input-language preview and keeps it up: nothing has been typed there yet, so the language about to be typed is
-    /// what the user needs to see. Focus leaving a text field takes it down.
+    /// what the user needs to see. Focus leaving a text field takes it down, and the bubble with it (`left_field`).
     pub fn on_focus(&mut self, text: bool) -> Vec<Action> {
         self.focus = text; self.typed_at = None;
+        if !text { return self.left_field() }
         if self.off { return self.hide_badge() }
-        if text { self.badge_show() } else { self.hide_badge() }
+        self.badge_show()
     }
     /// The platform's gate looked at focus after a keystroke that may have moved it (Tab, ⌘K), so this is not a focus
     /// the user made: the verdict decides whether the preview may be up at all, and one that is up goes when it is no
@@ -494,7 +495,15 @@ impl Engine {
     /// preview, on a caret that has settled (the keystroke may have scrolled or laid the field out under it).
     pub fn set_field(&mut self, text: bool) -> Vec<Action> {
         self.focus = text;
-        if self.off || text { vec![] } else { self.hide_badge() }
+        if text { vec![] } else { self.left_field() }
+    }
+    /// Focus is no longer in a text field: whatever is on screen there goes — the bubble (left up over a field the user
+    /// has gone from, it reads as typeThai having frozen), a held Tab's indicator and the preview — and the state starts
+    /// fresh, as for a click elsewhere.
+    fn left_field(&mut self) -> Vec<Action> {
+        let mut a = self.reset();
+        a.extend(self.hide_badge());
+        a
     }
     /// A keystroke the user made, however the platform then routes it (a converted key, a bypassed one, one of ours):
     /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field
@@ -3798,6 +3807,47 @@ mod tests {
         assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 2), vec![], "no preview over the bubble");
         let o = e.on_key(Key::Esc); assert_eq!(o.actions, vec![Action::HideBubble]);
         assert_eq!(e.on_idle(t + e.opts.badge_idle.expect("the default pause") * 3), vec![Action::Badge(true)], "the bubble is gone");
+    }
+    #[test] fn focus_leaving_the_field_takes_the_bubble_down() {
+        // a click elsewhere, an app switch or a window closing that no key went with: the look at focus that follows
+        // finds no text field, and the rail must not stay up over the field the user has gone from
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.on_focus(true);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
+        assert_eq!(e.on_focus(false), vec![Action::HideBubble]);
+        assert!(!e.bubble_visible() && e.buffer().is_empty(), "a fresh state, as for a click");
+        assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![], "and nothing comes back on its own");
+        assert_eq!(e.on_focus(false), vec![], "already down");
+    }
+    #[test] fn a_look_after_a_key_takes_the_bubble_down_off_a_text_field() {
+        // Enter sends a chat message and the app moves focus off the box: the look armed by the key finds no field
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.on_focus(true);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
+        assert_eq!(e.set_field(true), vec![], "still in the field: the rows stay");
+        assert!(e.bubble_visible());
+        assert_eq!(e.set_field(false), vec![Action::HideBubble]);
+        assert!(!e.bubble_visible());
+    }
+    #[test] fn focus_leaving_takes_the_bubble_and_the_preview_down_together() {
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.on_focus(true);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
+        e.badge_up = true; // the preview is up as well (it came back over the field at some point)
+        assert_eq!(e.on_focus(false), vec![Action::HideBubble, Action::Badge(false)]);
+    }
+    #[test] fn focus_leaving_takes_a_held_tab_indicator_down() {
+        let Some(mut e) = engine() else { return };
+        e.on_focus(true);
+        typ(&mut e, "hel");
+        let t = Instant::now();
+        assert!(e.on_key(Key::Tab).swallow, "held back in case R follows");
+        e.tab_at = Some(t);
+        assert!(e.on_idle(t + TAB_CHORD_MIN).iter().any(|a| matches!(a, Action::Hold(Some(_)))));
+        assert_eq!(e.on_focus(false).first(), Some(&Action::Hold(None)));
     }
     #[test] fn a_key_with_pause_rows_up_updates_them_in_place() {
         let Some(mut e) = engine() else { return };

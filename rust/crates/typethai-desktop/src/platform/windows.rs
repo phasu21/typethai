@@ -31,6 +31,8 @@ struct State { app: App, worker: rewrite::Worker, tx: mpsc::Sender<UiMsg>, last_
     /// falls back to when the app exposes no caret.
     last_click: Option<(f64, f64)>,
     gate: field::Gate, field_rx: Option<mpsc::Receiver<UiaResp>>, text_app: bool, layouts: crate::badge::Watch,
+    /// The bubble's focus watch (`field::Watch`) and its look in flight.
+    watch: field::Watch, watch_rx: Option<mpsc::Receiver<UiaResp>>,
     /// Caret re-reads after a key (`arm_caret_follow`), for the bubble or the preview that is up.
     follow: follow::Follow,
     /// When the next look at focus is due, and whether a keystroke armed it (a click, a window switch or a key may have
@@ -435,7 +437,7 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     take_click(st);
     if std::env::var_os("TYPETHAI_DEBUG").is_some() { eprintln!("vk {vk:#x} up={up}"); }
     // every keystroke, whatever becomes of it: typing takes the input-language preview down
-    if !up { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
+    if !up { seen_input(st); let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
     let fg = GetForegroundWindow();
     if typing_in_our_window(st, fg) { return false }
     let key = if up {
@@ -537,7 +539,7 @@ unsafe fn take_click(st: &mut State) {
         Some(Click::Elsewhere(x, y)) => {
             // the click that put the focus in the field is where the caret went: the anchor's pointer, when the app
             // exposes no caret of its own
-            st.last_click = Some((x, y));
+            st.last_click = Some((x, y)); seen_input(st);
             st.gate.touch(Instant::now()); arm_focus_look(st, false);
             // the click moved the caret: a preview that is up follows it here, on the spot (a keystroke-driven follow
             // would read it before the app has laid it out, `arm_caret_follow`)
@@ -562,6 +564,37 @@ fn mouse_thread() {
 /// window has settled. The handler that saw the trigger cannot wait for it. `key`: a keystroke armed it, so this is not a
 /// focus the user made (see `Engine::set_field`), and nothing is shown on the spot.
 fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now() + field::SETTLE, key)); }
+/// A key or a click: the bubble's focus watch waits again, and a look it has in flight is stale.
+fn seen_input(st: &mut State) { st.watch.input(Instant::now()); st.watch_rx = None; }
+/// The bubble is up and nothing the hooks saw moved focus: the window in front or its focused control changed anyway
+/// (a window closing, an app or a toast taking focus), or, after a quiet spell (`field::Watch`), UI Automation says
+/// focus is no longer in a text field (in a Chromium page focus moves without the control changing). Either takes the
+/// bubble down; the key that follows does the rest of a window switch (the tray, the gate).
+unsafe fn watch_bubble(st: &mut State, now: Instant) {
+    if let Some(rx) = st.watch_rx.take() {
+        match rx.try_recv() {
+            Ok(UiaResp::Focus(pw, f)) => {
+                st.watch.answered(now);
+                let fg = GetForegroundWindow(); let caret = st.text_app || gui_info(fg).is_some_and(|g| !g.hwndCaret.is_invalid());
+                if pw || !field::Gate::told(f).open(caret, || fullscreen(fg)) { let a = st.app.engine.on_focus(false); run_actions(st, a); }
+            }
+            Err(mpsc::TryRecvError::Empty) => { st.watch_rx = Some(rx); return }
+            _ => st.watch.answered(now),
+        }
+    }
+    if !st.app.engine.bubble_visible() { st.watch.due(now, false); return }
+    let fg = GetForegroundWindow();
+    let focus = gui_info(fg).map(|g| g.hwndFocus).unwrap_or_default();
+    if !fg.is_invalid() && (fg != st.last_fg || focus != st.last_focus) {
+        // what the gate knew was about the old focus; `last_fg` / `last_focus` stay, so the next key still does the rest
+        st.secure = false; st.gate.reset(); st.field_rx = None;
+        let a = st.app.engine.reset(); run_actions(st, a); arm_focus_look(st, false); st.watch.due(now, false); return
+    }
+    if st.watch.due(now, true) {
+        let (tx, rx) = mpsc::channel();
+        if st.uia.as_ref().is_some_and(|u| u.send((UiaQuery::Focus, tx)).is_ok()) { st.watch_rx = Some(rx) } else { st.watch.answered(now) }
+    }
+}
 /// Schedule the caret re-reads (`platform::follow`): the bubble or the preview that is up follows the caret the app
 /// lays out after the key, which this hook sees before the app does.
 fn arm_caret_follow(st: &mut State) { st.follow.arm(Instant::now()) }
@@ -610,6 +643,7 @@ unsafe fn control(st: &mut State) -> bool {
     if st.gate.refresh_due(Instant::now(), false) { field_refresh(st); }
     let now = Instant::now();
     if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; unsafe { focus_look(st, key) } }
+    unsafe { watch_bubble(st, now) }
     // the caret under a bubble or preview that is up follows the app's own (`arm_caret_follow`): re-read it now that
     // the app has laid the glyph out
     if st.follow.take(now, st.app.engine.bubble_visible() || st.app.engine.badge_shown()) {
@@ -647,7 +681,7 @@ unsafe extern "system" fn power_resumed(_context: *const std::ffi::c_void, kind:
 fn hook_thread(app: App, tx: mpsc::Sender<UiMsg>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).expect("module").into();
-        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), uia_caret: Some(uia_worker()), last_click: None, gate: field::Gate::default(), field_rx: None, text_app: false, layouts: crate::badge::Watch::new(), follow: follow::Follow::default(), badge_due: Some((Instant::now(), false)) }));
+        ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(WinHost::new), tx: tx.clone(), last_fg: HWND::default(), last_focus: HWND::default(), secure: false, uia: Some(uia_worker()), uia_caret: Some(uia_worker()), last_click: None, gate: field::Gate::default(), field_rx: None, watch: field::Watch::default(), watch_rx: None, text_app: false, layouts: crate::badge::Watch::new(), follow: follow::Follow::default(), badge_due: Some((Instant::now(), false)) }));
         HOOK_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
         let Ok(kb) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), Some(hinst), 0) else {
             eprintln!("SetWindowsHookEx failed"); let _ = tx.send(UiMsg::Stopped); return

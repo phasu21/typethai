@@ -328,6 +328,9 @@ pub static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 pub fn geom() -> Option<Geom> { GEOM.lock().unwrap().clone() }
 pub fn set_geom(g: Option<Geom>) { *GEOM.lock().unwrap() = g; }
 
+/// macOS: another app came to the front (the main thread's workspace notification); the capture thread takes the
+/// bubble down and looks at focus in the new app.
+pub static FRONT_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Tray -> capture thread requests (polled by a timer on the capture thread).
 pub static REQ_TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
 pub static REQ_QUIT: AtomicBool = AtomicBool::new(false);

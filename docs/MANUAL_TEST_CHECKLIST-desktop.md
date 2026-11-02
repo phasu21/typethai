@@ -149,6 +149,19 @@
 - [ ] Permission revoked while running: the tap keeps working for that session (macOS does not kill it), and the next launch repairs and re-prompts once.
 - [ ] Tray reads `Accessibility: on` once granted, with the tooltip no longer saying the permission is needed.
 
+## The bubble goes when focus leaves the field (agent-verified with --simulate; the live look at focus is not run)
+- [x] `--simulate`: `<Focus>hel<Idle><Blur>` prints `ShowBubble(...)` after the pause and `HideBubble` on `<Blur>`.
+- [ ] Type `hel` in TextEdit and wait for the rows. Then three-finger swipe to another Space or app, or let another app
+  come forward by itself (a notification you click, a dialog): the bubble goes at once, not on the next key.
+- [ ] Type `hel` in a chat box (Messages, Slack), wait for the rows, then press Enter so the app sends and moves focus
+  off the box: the bubble goes within ~40 ms.
+- [ ] Type `hel`, wait for the rows, then close the window with the mouse on its red button, or let the app move focus
+  away on its own: the bubble goes within about a second.
+- [ ] Open Settings from the tray while the bubble is up: the bubble goes.
+- [ ] Normal typing is unchanged: the rows still come after the pause, Tab / the arrows / a click on a row still apply
+  them, and a bubble left up in a field you are still in stays (no flicker every second).
+- [ ] Windows (Notepad, a browser): the same, including Alt+Tab and a toast taking focus.
+
 ## Input-language preview on focus (agent-verified with --demo-badge --pin; the live look at focus is not run)
 - [x] `--demo-badge --pin --secs 2` keeps the pill up for the whole 2 s (`still up … true`), where `--demo-badge --secs 2` hides it after `SHOW_FOR` (1.2 s).
 - [x] `--simulate`: `ab<Focus>x<Idle>y<Idle><Blur>` prints `Badge(true)` on `<Focus>`, `Badge(false)` on the key, `Badge(true)` after the pause; inside a bubble the pause shows completions instead and no `Badge`.
