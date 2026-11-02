@@ -1880,8 +1880,10 @@ impl Engine {
             Reply::Captured { id, sel, has_key } if self.capturing == Some(id) => {
                 self.capturing = None;
                 let rows = match sel {
-                    // pasting over the selection edits text the line does not track
-                    Captured::Text(t) if !t.trim().is_empty() => { self.reset(); self.selection_offer(&t, has_key) }
+                    // pasting over the selection edits text the line does not track. The Tab that opened the rows
+                    // may still be down: it stays Spent, so its repeats and its release apply nothing (only a fresh
+                    // Tab, Enter, an arrow or a click confirms a row)
+                    Captured::Text(t) if !t.trim().is_empty() => { let tab = self.tab; self.reset(); self.tab = tab; self.selection_offer(&t, has_key) }
                     Captured::Text(_) | Captured::NoSelection => match self.word_options() {
                         Some(rows) if !rows.is_empty() => rows,
                         Some(_) => vec![row(rewrite::NO_SUGGESTIONS, RewriteRow::Notice)],
@@ -2666,6 +2668,49 @@ mod tests {
         assert_eq!(o.actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste("hello world".into()))]);
         assert!(!e.bubble_visible());
         assert!(types_only_a_tab(&tab(&mut e)), "the session is over: Tab is a tab again");
+    }
+    /// Tab pressed and held over a selection until the rows open, with the worker answering while it is still down.
+    fn hold_tab_open(e: &mut Engine, sel: &str) {
+        let t = Instant::now();
+        assert!(e.on_key(Key::Tab).swallow);
+        e.tab_at = Some(t);
+        let o = e.on_idle(t + e.opts.tab_hold);
+        let id = match o.iter().find_map(|a| match a { Action::Rewrite(Job::Capture(id)) => Some(*id), _ => None }) { Some(id) => id, None => panic!("the hold opens a capture: {o:?}") };
+        e.on_reply(captured(id, Captured::Text(sel.into())));
+        assert!(e.bubble_visible(), "the rows are up while Tab is still held");
+    }
+    fn applies(o: &Outcome) -> bool { o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Paste(_) | Job::Run(_)) | Action::Replace { .. })) }
+    #[test] fn holding_tab_only_opens_the_rows_and_its_release_applies_nothing() {
+        let Some(mut e) = engine() else { return };
+        hold_tab_open(&mut e, "l;ylfu");
+        let rows = e.bubble.clone();
+        // the key repeats of the Tab still down, then its release: the rows stay, nothing is applied
+        for _ in 0..10 { let o = e.on_key(Key::Tab); assert!(o.swallow); assert!(!applies(&o), "{o:?}"); }
+        let o = e.on_key(Key::TabUp); assert!(o.swallow); assert!(!applies(&o), "{o:?}");
+        assert_eq!(e.bubble, rows, "the same rows, still up");
+        assert!(e.on_idle(Instant::now() + Duration::from_secs(5)).iter().all(|a| !matches!(a, Action::Rewrite(_))), "the hold does not start over");
+        // a fresh Tab is the confirm: it applies the highlighted row
+        assert!(e.on_key(Key::Tab).swallow);
+        let o = e.on_key(Key::TabUp);
+        assert!(o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Paste(t)) if t == "สวัสดี")), "{o:?}");
+    }
+    #[test] fn held_tab_rows_confirm_with_enter_or_the_arrows_and_cancel_with_esc_or_focus_loss() {
+        let Some(mut e) = engine() else { return };
+        hold_tab_open(&mut e, "l;ylfu");
+        e.on_key(Key::TabUp);
+        let o = e.on_key(Key::Boundary(Boundary::Enter)); assert!(o.swallow);
+        assert!(o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Paste(t)) if t == "สวัสดี")), "Enter confirms: {o:?}");
+        hold_tab_open(&mut e, "l;ylfu");
+        e.on_key(Key::TabUp);
+        assert_eq!(e.on_key(Key::Arrow(Arrow::Up)).actions, vec![Action::Focus(true)], "Up goes into the rail");
+        let o = e.on_key(Key::Arrow(Arrow::Up));
+        assert!(o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Paste(t)) if t == "สวัสดี")), "Up again picks: {o:?}");
+        hold_tab_open(&mut e, "l;ylfu");
+        let o = e.on_key(Key::Esc); assert!(o.swallow); assert!(!applies(&o)); assert!(!e.bubble_visible(), "Esc while Tab is still down cancels");
+        assert!(!applies(&e.on_key(Key::TabUp)));
+        hold_tab_open(&mut e, "l;ylfu");
+        let a = e.on_focus(false); assert!(!applies(&Outcome { swallow: false, actions: a })); assert!(!e.bubble_visible(), "focus leaving cancels");
+        assert!(!applies(&e.on_key(Key::TabUp)));
     }
     #[test] fn rewrite_select_next_or_click_picks_translate() {
         let Some(mut e) = engine() else { return };
