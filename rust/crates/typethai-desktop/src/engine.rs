@@ -1834,8 +1834,11 @@ impl Engine {
         }
         rows
     }
-    /// A rewrite row's label: its text, cut to a preview.
-    fn rewrite_label(&self, text: &str) -> String { rewrite::preview(text, rewrite::PREVIEW_CHARS) }
+    /// A rewrite row's label: its text, cut to fit a rail button when the bubble is a rail (`BubbleLayout`), else to a
+    /// preview. Tab still pastes the whole text.
+    fn rewrite_label(&self, text: &str) -> String {
+        rewrite::preview(text, if self.opts.bubble == BubbleLayout::Horizontal { rewrite::RAIL_PREVIEW_CHARS } else { rewrite::PREVIEW_CHARS })
+    }
     /// Each word typed on the wrong layout, flipped, and whether that is the reverse direction: English keys that read
     /// as Thai, and Thai that reads as English keys. Each direction scores its words as one line.
     fn selection_flips(&self, text: &str, spans: &[(usize, usize)]) -> Vec<Option<(String, bool)>> {
@@ -2978,6 +2981,29 @@ mod tests {
         assert_eq!(swap_layout("  "), None);
         assert_eq!(swap_layout("1234, 56"), None, "no letters: nothing typed on the wrong layout");
     }
+    #[test] fn rewrite_labels_fit_the_rail_and_the_rows_paste_the_whole_text() {
+        let Some(mut e) = engine() else { return };
+        e.rewrite.enabled = false;
+        let long = "asdf ".repeat(20);
+        options(&mut e, Captured::Text(long.clone()));
+        assert_eq!(e.bubble[0].label.chars().count(), rewrite::RAIL_PREVIEW_CHARS, "cut to a rail button, with an ellipsis");
+        assert!(e.bubble[0].label.ends_with('…'));
+        assert_eq!(tab(&mut e).actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste(swapped(&long)))]);
+        e.opts.bubble = BubbleLayout::Vertical;
+        options(&mut e, Captured::Text(long.clone()));
+        assert_eq!(e.bubble[0].label, swapped(&long), "stacked rows have room for it");
+    }
+    #[test] fn the_rewrite_rail_takes_the_arrow_keys_as_the_suggestion_rail_does() {
+        let Some(mut e) = engine_typo() else { return };
+        e.speller = Some(Box::new(FakeSpeller));
+        options(&mut e, Captured::Text("is ths".into()));
+        assert_eq!(e.on_key(Key::Arrow(Arrow::Up)).actions, vec![Action::Focus(true)]);
+        assert_eq!(e.on_key(Key::Arrow(Arrow::Right)).actions, vec![Action::Select(1)]);
+        assert_eq!(e.on_key(Key::Arrow(Arrow::Left)).actions, vec![Action::Select(0)]);
+        assert_eq!(e.on_key(Key::Arrow(Arrow::Right)).actions, vec![Action::Select(1)]);
+        let o = e.on_key(Key::Boundary(Boundary::Enter)); assert!(o.swallow);
+        assert_eq!(o.actions, vec![Action::HideBubble, Action::Rewrite(Job::Paste(swapped("is ths")))], "Enter applies the highlighted one");
+    }
     #[test] fn the_swap_goes_first_when_it_is_all_there_is_and_tab_applies_it() {
         let Some(mut e) = engine() else { return };
         e.rewrite.enabled = false;
@@ -3022,7 +3048,8 @@ mod tests {
         e.speller = Some(Box::new(FakeSpeller));
         // nothing to fix: only the layout swap, which is always offered
         for text in ["hello world", "สวัสดีครับ ยินดีที่ได้รู้จัก", "วันนี้อากาศดีมากเลยนะ"] {
-            selection_options(&mut e, text, &[swapped(text).as_str()]);
+            let label = e.rewrite_label(&swapped(text));
+            selection_options(&mut e, text, &[label.as_str()]);
             e.on_key(Key::Esc);
         }
         let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: false });
@@ -3074,7 +3101,7 @@ mod tests {
     #[test] fn a_long_selection_skips_the_local_rows() {
         let Some(mut e) = engine() else { return };
         let long = "l;ylfu ".repeat(50);
-        let swap = rewrite::preview(&swapped(&long), rewrite::PREVIEW_CHARS);
+        let swap = rewrite::preview(&swapped(&long), rewrite::RAIL_PREVIEW_CHARS);
         selection_options(&mut e, &long, &[swap.as_str()]);
     }
     #[test] fn rewrite_secure_refuses_silently() {

@@ -1,6 +1,6 @@
 //! Messages and shared state between the key-capture thread (CGEventTap / low-level hooks, owns the Engine) and the
 //! gpui UI thread (bubble window + tray).
-use crate::engine::{BubbleItem, BubbleKind, InputLang, Reason};
+use crate::engine::{BubbleItem, InputLang, Reason};
 use crate::placement::{Anchor, Rect};
 use crate::prefs::{SettingsCmd, SettingsSnap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,12 +39,11 @@ pub enum UiMsg {
 }
 
 impl UiMsg {
-    /// The bubble for the engine's `items`, laid out as the setting `pref` says. Rewrite rows (the AI presets,
-    /// "Rewriting…", results and notices) are always stacked: they are sentences, and one rewrite moves from presets to
-    /// a result in place, which should not flip the layout under the reader.
+    /// The bubble for the engine's `items`, laid out as the setting `pref` says: the rewrite rows of a selection too, so
+    /// holding Tab over one opens the same rail the suggestions use (their labels are cut to fit a rail button,
+    /// `Engine::rewrite_label`). `layout` still stacks a strip whose labels or width do not fit.
     pub fn show(items: Vec<BubbleItem>, pref: BubbleLayout, anchor: Anchor) -> UiMsg {
-        let layout = if items.iter().any(|i| matches!(i.kind, BubbleKind::Rewrite(_))) { BubbleLayout::Vertical } else { pref };
-        UiMsg::Show { items: items.iter().map(|i| Opt { reason: i.reason(), label: i.label.clone(), rated: i.rated_word().is_some() }).collect(), layout, anchor }
+        UiMsg::Show { items: items.iter().map(|i| Opt { reason: i.reason(), label: i.label.clone(), rated: i.rated_word().is_some() }).collect(), layout: pref, anchor }
     }
 }
 
@@ -369,7 +368,7 @@ pub fn take_settings() -> Vec<SettingsCmd> { std::mem::take(&mut SETTINGS_CMDS.l
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::RewriteRow;
+    use crate::engine::{BubbleKind, RewriteRow};
     use crate::rewrite::{Preset, ReqId};
     // a row's distance from the window's edge: the shadow margin, then the panel's border and padding
     const INSET: f64 = SHADOW_M + PAD + BORDER;
@@ -451,12 +450,14 @@ mod tests {
         assert_eq!(at(300.0, 5.0), None, "the shadow margin: the click is the app's");
         assert_eq!(at(306.0, 20.0), None, "right of the strip");
     }
-    #[test] fn rewrite_rows_are_stacked_and_word_options_follow_the_setting() {
+    #[test] fn rewrite_rows_and_word_options_follow_the_setting() {
         let word = |w: &str| item(w, BubbleKind::Complete { typed: "he".into(), insert: w.into() });
-        let fix = item("hello world", BubbleKind::Rewrite(RewriteRow::Result("hello world".into())));
+        let fix = || item("hello world", BubbleKind::Rewrite(RewriteRow::Result("hello world".into())));
+        let swap = || item("้ำสสน", BubbleKind::Rewrite(RewriteRow::Swap(InputLang::Thai, "้ำสสน".into())));
         assert_eq!(shown(vec![word("help"), word("hello")], BubbleLayout::Horizontal), (vec![opt("help", None), opt("hello", None)], BubbleLayout::Horizontal));
         assert_eq!(shown(vec![word("help")], BubbleLayout::Vertical).1, BubbleLayout::Vertical);
-        assert_eq!(shown(vec![fix, word("hello")], BubbleLayout::Horizontal).1, BubbleLayout::Vertical);
+        assert_eq!(shown(vec![swap(), fix()], BubbleLayout::Horizontal), (vec![opt("้ำสสน", TH), opt("hello world", None)], BubbleLayout::Horizontal), "the rail, as for suggestions");
+        assert_eq!(shown(vec![swap(), fix()], BubbleLayout::Vertical).1, BubbleLayout::Vertical);
     }
     #[test] fn thumbs_take_clicks_only_while_shift_is_held() {
         let l = plain(&[40.2, 61.0, 90.0], 1392.0, BubbleLayout::Horizontal);

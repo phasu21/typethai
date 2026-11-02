@@ -78,7 +78,7 @@
 - [ ] Settings → AI rewrite: Save key with an OpenRouter key shows "Key saved in the Keychain"; reopening Settings still shows it; Save key with an empty field shows "No key saved yet".
 - [ ] Base URL `http://example.com/v1` + Save shows the inline error and saves nothing; `http://localhost:11434/v1` is accepted. Turn off: ⌃⌥R reaches the app untouched.
 - [ ] No key: ⌃⌥R on a selection shows "Add an API key in Settings". Nothing selected: "No selected text found".
-- [ ] TextEdit: select `helo wrld`, ⌃⌥R shows "Fix typos" / "Translate TH↔EN"; Tab shows "Rewriting…", then the result; Tab replaces the selection. ⌘V afterwards pastes what was on the clipboard before.
+- [ ] TextEdit: select `helo wrld`, ⌃⌥R shows the spelling fix and the layout swap, then "Fix typos" / "Translate TH↔EN"; highlight "Fix typos" (Shift+Down, or Up then →) and Tab shows "Rewriting…", then the result; Tab replaces the selection. ⌘V afterwards pastes what was on the clipboard before.
 - [ ] Translate: a Thai sentence becomes English and back; no ครับ/ค่ะ is added to a casual sentence.
 - [ ] Instructions `Answer in UPPERCASE.` + Save: Fix typos and Translate both return uppercase text; reopening Settings still shows the instructions; clearing them + Save goes back to normal output.
 - [ ] Chrome (a textarea and a contenteditable such as Gmail compose), and Slack or VS Code: the rows appear and Tab replaces the selection. VS Code with nothing selected says "No selected text found" and the clipboard is unchanged (no whole-line copy).
@@ -87,6 +87,27 @@
 - [ ] Cancel: Esc, typing a key, a click elsewhere, or switching apps at the preset rows, while "Rewriting…", and at the result: the bubble closes, the text is unchanged, and a late result never appears.
 - [ ] A clipboard manager (Maccy, Raycast, Paste) does not record the pasted result.
 - [ ] Windows Notepad and Edge: select text, Ctrl+Alt+R, Tab, Tab replaces it; the menu bar is not activated by the Alt release; Win+V history has no entry for the result; the previous clipboard comes back.
+
+## Select text, then hold Tab to rewrite (engine tests and `--demo-bubble` only; not run live by the agent)
+- [ ] Always the layout swap: select `l;ylfu` and hold Tab: สวัสดี is offered first. Select `สวัสดี`: `l;ylfu`. Select
+  gibberish such as `asdfjkl;` or `qwpzxv`, or Thai no dictionary knows: the whole selection re-typed on the other
+  layout is still offered, with the flag of the language it becomes. Select `l;ylfu world`: สวัสดี world first, then
+  every word swapped. Select `helo wrld` (with the spell checker): the fix first, then the swap, then the AI rows.
+  Select only numbers (`1234`): no swap row.
+- [ ] The rail: with Settings → bubble layout on the strip (the default), the rewrite options show as the same
+  horizontal rail as word suggestions, at the caret / selection, with Tab on the highlighted button and 2, 3 on the
+  next ones. A long selection's buttons end in "…" and Tab still pastes the whole text. With the setting on rows, they
+  stack as before.
+- [ ] Arrow keys on the rail: Up goes into it, ← / → move the highlight, Enter or Up again applies; Shift+Down/Up also
+  move it, and Down leaves it.
+- [ ] Holding Tab only opens the rows: select text and keep Tab down well past the key-repeat delay (2–3 s): the rows
+  open once and stay; nothing is pasted, nothing flickers or reopens, and no tab is typed. Let Tab go: still nothing
+  applied.
+- [ ] Confirm: after letting go, a fresh Tab tap applies the highlighted row; so do Enter, Up-into-the-rail then Up,
+  Ctrl+1..3 (when on) and a click on a button.
+- [ ] Cancel: Esc (also while Tab is still down), typing, a click elsewhere or switching apps: the rows go and the text
+  is unchanged.
+- [ ] Windows (Notepad, Edge): the same checks.
 
 ## Local sentence completion (⌃⌥R → *Finish sentence locally*; exercised in `--simulate` only, see `docs/research/llm-sentence-completion-in-app.md`)
 - [ ] With no API key saved and **Offer AI rewrite** on, ⌃⌥R on a selection shows *Finish sentence locally* (and no *Fix typos* / *Translate TH↔EN*); with **Offer AI rewrite** off it is gone too.

@@ -28,6 +28,9 @@ pub const NO_KEY: &str = "Add an API key in Settings";
 pub const REWRITING: &str = "Rewriting…";
 /// Longest result label on the bubble; Tab still pastes the whole text.
 pub const PREVIEW_CHARS: usize = 600;
+/// The same for a rewrite row on the rail: about what fits a rail button (`bridge::STRIP_LABEL_MAX`) before the
+/// strip would have to stack.
+pub const RAIL_PREVIEW_CHARS: usize = 24;
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
 const TIMEOUT: Duration = Duration::from_secs(20);
