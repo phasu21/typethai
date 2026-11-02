@@ -80,10 +80,10 @@ pub fn run(mut app: App) {
                         let o = app.engine.on_key(k.clone()); a.extend(o.actions); Outcome { swallow: o.swallow, actions: a } }
                     None => Outcome { swallow: false, actions: app.engine.on_idle(std::time::Instant::now() + app.engine.opts.complete_idle.max(app.engine.opts.badge_idle.unwrap_or_default())) },
                 };
-                let captures: Vec<_> = o.actions.iter().filter_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }).collect();
+                let captures: Vec<_> = o.actions.iter().filter_map(|a| if let Action::Rewrite(Job::Capture(id, _)) = a { Some(*id) } else { None }).collect();
                 for id in captures {
                     let sel = selection.take().map_or(Captured::NoSelection, Captured::Text);
-                    o.actions.extend(app.engine.on_reply(Reply::Captured { id, sel, has_key: true }));
+                    o.actions.extend(app.engine.on_reply(Reply::Captured { id, sel, has_key: true, local: true }));
                 }
                 let completion = o.actions.iter().find_map(|a| match a {
                     Action::Rewrite(Job::Run(run)) if run.preset == Preset::Finish => Some((run.req, crate::completion::run(&run.text, &run.cfg.local_model))),

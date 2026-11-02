@@ -93,8 +93,9 @@ fn scheme_host(url: &str) -> Option<(&str, &str)> {
 /// Work the engine hands out through `Action::Rewrite`. No variant can hold the API key.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Job {
-    /// Read the focused field's selection. Answers `Reply::Captured`.
-    Capture(ReqId),
+    /// Read the focused field's selection. Answers `Reply::Captured`. The tag is the local completion model to look
+    /// for (empty: AI rewriting is off, nothing to look for).
+    Capture(ReqId, String),
     /// Call the endpoint. Answers `Reply::Rewritten`.
     Run(Run),
     /// Replace the selection with this text through the clipboard. No answer.
@@ -113,8 +114,10 @@ pub enum Captured {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
-    /// `has_key`: an API key is stored (read only when text was captured).
-    Captured { id: ReqId, sel: Captured, has_key: bool },
+    /// `has_key`: an API key is stored, so the cloud presets can run. `local`: Ollama is up with the local model
+    /// downloaded, so *Finish sentence locally* can (`local_setup::Step::Ready`). Both are read only when text was
+    /// captured.
+    Captured { id: ReqId, sel: Captured, has_key: bool, local: bool },
     Rewritten(ReqId, Result<String, Failure>),
 }
 
@@ -277,7 +280,13 @@ impl Worker {
     pub fn spawn<H: Host>(make: impl FnOnce() -> H + Send + 'static) -> Worker {
         let (tx, rx) = mpsc::channel(); let (desk, jobs) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("typethai-desk".into()).spawn(move || { let mut h = make(); for job in jobs { match job {
-            Job::Capture(id) => { let sel = capture(&mut h); let has_key = matches!(sel, Captured::Text(_)) && secret::load().is_some(); let _ = tx.send(Reply::Captured { id, sel, has_key }); }
+            Job::Capture(id, tag) => {
+                let sel = capture(&mut h); let text = matches!(sel, Captured::Text(_));
+                let has_key = text && secret::load().is_some();
+                // the same check as the Settings row; refused at once when nothing listens on Ollama's port
+                let local = text && !tag.is_empty() && crate::local_setup::check(&tag) == crate::local_setup::Step::Ready;
+                let _ = tx.send(Reply::Captured { id, sel, has_key, local });
+            }
             Job::Paste(text) => paste(&mut h, &text),
             Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = execute(&r); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
         } } }).expect("desk thread");

@@ -1757,7 +1757,8 @@ impl Engine {
         if self.capturing.is_some() { return Outcome { swallow: true, actions: vec![] } }
         let mut a = vec![]; self.show(vec![], &mut a); self.tab = TabChord::Up;
         let id = self.mint(); self.capturing = Some(id);
-        a.push(Action::Rewrite(Job::Capture(id)));
+        let tag = if self.rewrite.enabled { self.rewrite.local_model.clone() } else { String::new() };
+        a.push(Action::Rewrite(Job::Capture(id, tag)));
         Outcome { swallow: true, actions: a }
     }
     fn accept_rewrite(&mut self, r: RewriteRow) -> Outcome {
@@ -1802,10 +1803,12 @@ impl Engine {
         rows
     }
     /// Rows for selected text: the local fixes, then the AI presets when they can run. A notice when there is nothing.
-    fn selection_offer(&self, text: &str, has_key: bool) -> Vec<BubbleItem> {
+    /// The cloud presets need a stored key (`has_key`), *Finish sentence locally* a ready local model (`local`): a
+    /// preset that cannot run is left out rather than offered to fail.
+    fn selection_offer(&self, text: &str, has_key: bool, local: bool) -> Vec<BubbleItem> {
         let mut rows = self.selection_rows(text);
         if self.rewrite.enabled {
-            rows.extend(Preset::ALL.into_iter().filter(|p| has_key || *p == Preset::Finish)
+            rows.extend(Preset::ALL.into_iter().filter(|p| if *p == Preset::Finish { local } else { has_key })
                 .map(|p| row(p.label(), RewriteRow::Preset(p, text.to_string()))));
         }
         if rows.is_empty() { rows.push(row(rewrite::NO_SUGGESTIONS, RewriteRow::Notice)) }
@@ -1896,13 +1899,13 @@ impl Engine {
         if self.off { return vec![] }
         let mut a = vec![];
         match r {
-            Reply::Captured { id, sel, has_key } if self.capturing == Some(id) => {
+            Reply::Captured { id, sel, has_key, local } if self.capturing == Some(id) => {
                 self.capturing = None;
                 let rows = match sel {
                     // pasting over the selection edits text the line does not track. The Tab that opened the rows
                     // may still be down: it stays Spent, so its repeats and its release apply nothing (only a fresh
                     // Tab, Enter, an arrow or a click confirms a row)
-                    Captured::Text(t) if !t.trim().is_empty() => { let tab = self.tab; self.reset(); self.tab = tab; self.selection_offer(&t, has_key) }
+                    Captured::Text(t) if !t.trim().is_empty() => { let tab = self.tab; self.reset(); self.tab = tab; self.selection_offer(&t, has_key, local) }
                     Captured::Text(_) | Captured::NoSelection => match self.word_options() {
                         Some(rows) if !rows.is_empty() => rows,
                         Some(_) => vec![row(rewrite::NO_SUGGESTIONS, RewriteRow::Notice)],
@@ -2674,11 +2677,11 @@ mod tests {
     }
     use crate::rewrite::{Captured, Failure, Job, Preset, Reply, ReqId, Run};
     /// The worker's answer to a capture, with an API key stored.
-    fn captured(id: ReqId, sel: Captured) -> Reply { Reply::Captured { id, sel, has_key: true } }
+    fn captured(id: ReqId, sel: Captured) -> Reply { Reply::Captured { id, sel, has_key: true, local: true } }
     /// Ctrl+Opt+R: swallowed, hands out a capture job.
     fn start(e: &mut Engine) -> ReqId {
         let o = e.on_key(Key::Hotkey(Hotkey::Rewrite)); assert!(o.swallow);
-        match o.actions.last() { Some(Action::Rewrite(Job::Capture(id))) => *id, a => panic!("expected a capture job, got {a:?}") }
+        match o.actions.last() { Some(Action::Rewrite(Job::Capture(id, _))) => *id, a => panic!("expected a capture job, got {a:?}") }
     }
     fn job_run(o: &Outcome) -> Run { match o.actions.last() { Some(Action::Rewrite(Job::Run(r))) => r.clone(), a => panic!("expected a run job, got {a:?}") } }
     /// Start, capture `text` and pick the first preset (after the local rows: the layout swap is always one).
@@ -2715,7 +2718,7 @@ mod tests {
         assert!(e.on_key(Key::Tab).swallow);
         e.tab_at = Some(t);
         let o = e.on_idle(t + e.opts.tab_hold);
-        let id = match o.iter().find_map(|a| match a { Action::Rewrite(Job::Capture(id)) => Some(*id), _ => None }) { Some(id) => id, None => panic!("the hold opens a capture: {o:?}") };
+        let id = match o.iter().find_map(|a| match a { Action::Rewrite(Job::Capture(id, _)) => Some(*id), _ => None }) { Some(id) => id, None => panic!("the hold opens a capture: {o:?}") };
         e.on_reply(captured(id, Captured::Text(sel.into())));
         assert!(e.bubble_visible(), "the rows are up while Tab is still held");
     }
@@ -2821,7 +2824,7 @@ mod tests {
     }
     fn pending_finish(e: &mut Engine, text: &str) -> Run {
         let id = start(e);
-        let actions = e.on_reply(Reply::Captured { id, sel: Captured::Text(text.into()), has_key: false });
+        let actions = e.on_reply(Reply::Captured { id, sel: Captured::Text(text.into()), has_key: false, local: true });
         assert!(!actions.iter().any(|a| matches!(a, Action::Rewrite(_))));
         assert_eq!(presets(e), [Preset::Finish]);
         let index = e.bubble.iter().position(|b| matches!(b.kind, BubbleKind::Rewrite(RewriteRow::Preset(Preset::Finish, _)))).unwrap();
@@ -2860,12 +2863,29 @@ mod tests {
             e.reset();
         }
     }
+    #[test] fn a_preset_shows_only_when_what_it_runs_on_is_set_up() {
+        let Some(mut e) = engine() else { return };
+        let offer = |e: &mut Engine, has_key: bool, local: bool| {
+            let id = start(e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key, local });
+            let p = presets(e); e.on_key(Key::Esc); p
+        };
+        assert_eq!(offer(&mut e, false, false), [], "no key and no local model: no AI rows at all, only the local ones");
+        assert_eq!(offer(&mut e, true, false), [Preset::Fix, Preset::Translate], "Finish sentence locally needs Ollama with the model");
+        assert_eq!(offer(&mut e, false, true), [Preset::Finish]);
+        assert_eq!(offer(&mut e, true, true), Preset::ALL);
+        // the capture asks the worker to look for the configured local model, and for nothing while AI rewriting is off
+        let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
+        assert!(matches!(o.actions.last(), Some(Action::Rewrite(Job::Capture(_, tag))) if *tag == e.rewrite.local_model));
+        e.on_key(Key::Esc); e.rewrite.enabled = false;
+        let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
+        assert!(matches!(o.actions.last(), Some(Action::Rewrite(Job::Capture(_, tag))) if tag.is_empty()));
+    }
     #[test] fn disabled_ai_never_offers_finish_with_or_without_a_key() {
         let Some(mut e) = engine() else { return };
         e.rewrite.enabled = false;
         for has_key in [false, true] {
             let id = start(&mut e);
-            e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key });
+            e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key, local: has_key });
             assert!(presets(&e).is_empty());
             assert!(matches!(e.bubble.as_slice(), [BubbleItem { kind: BubbleKind::Rewrite(RewriteRow::Swap(..)), .. }]), "only the layout swap");
             e.reset();
@@ -2903,7 +2923,7 @@ mod tests {
         let mut log = vec![];
         feed(&mut e, &mut log, "is ths");
         log.push((None, e.on_key(Key::Tab)));
-        let a = tick_after(&mut e, TAB_HOLD); let id = match a.iter().find_map(|a| if let Action::Rewrite(Job::Capture(id)) = a { Some(*id) } else { None }) { Some(id) => id, None => panic!("{a:?}") };
+        let a = tick_after(&mut e, TAB_HOLD); let id = match a.iter().find_map(|a| if let Action::Rewrite(Job::Capture(id, _)) = a { Some(*id) } else { None }) { Some(id) => id, None => panic!("{a:?}") };
         assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "the hold types no Tab: {a:?}");
         log.push((None, Outcome { swallow: false, actions: a.clone() }));
         log.push((None, Outcome { swallow: false, actions: e.on_reply(captured(id, Captured::NoSelection)) }));
@@ -3052,11 +3072,11 @@ mod tests {
             selection_options(&mut e, text, &[label.as_str()]);
             e.on_key(Key::Esc);
         }
-        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: false });
+        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: false, local: true });
         assert_eq!(presets(&e), [Preset::Finish]);
         assert_eq!(e.bubble.len(), 2);
         e.on_key(Key::Esc);
-        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false });
+        let id = start(&mut e); e.on_reply(Reply::Captured { id, sel: Captured::Text("is ths".into()), has_key: false, local: true });
         assert_eq!(presets(&e), [Preset::Finish]);
         assert_eq!(e.bubble.len(), 3);
         assert!(matches!(&e.bubble[0].kind, BubbleKind::Rewrite(RewriteRow::Fixed(Reason::Typo, text)) if text == "is this"));
@@ -3137,7 +3157,7 @@ mod tests {
         e.opts.live = false; e.speller = Some(Box::new(FakeSpeller));
         typ(&mut e, "ths "); assert_eq!(labels(&e), ["this", "the"]);
         let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
-        assert!(matches!(o.actions.as_slice(), [Action::HideBubble, Action::Rewrite(Job::Capture(_))]), "{:?}", o.actions);
+        assert!(matches!(o.actions.as_slice(), [Action::HideBubble, Action::Rewrite(Job::Capture(..))]), "{:?}", o.actions);
     }
     // ---------- word completion ----------
     fn completers(e: &mut Engine, mode: CompleteMode) {
@@ -3182,7 +3202,7 @@ mod tests {
     /// The outcome types a Tab and changes nothing else on screen.
     fn types_only_a_tab(o: &Outcome) -> bool { o.swallow && o.actions.iter().filter(|a| matches!(a, Action::Replace { .. })).eq([&TYPE_TAB]) }
     fn hold_tab(e: &mut Engine) -> Outcome { let o = e.on_key(Key::Tab); e.tab_at = e.tab_at.map(|t| t - TAB_CHORD_MIN); o }
-    fn captures(o: &Outcome) -> bool { o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))) }
+    fn captures(o: &Outcome) -> bool { o.actions.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))) }
     const TYPE_TAB: Action = Action::Replace { delete: 0, insert: String::new(), then: Some(Boundary::Tab) };
     #[test] fn tab_after_a_word_is_held_and_typed_on_release() {
         let Some(mut e) = engine() else { return };
@@ -3215,14 +3235,14 @@ mod tests {
         // nothing typed: the selection case. Every Tab is held
         assert_eq!(e.on_key(Key::Tab), SWALLOWED);
         assert!(!tick_after(&mut e, TAB_HOLD - Duration::from_millis(1)).iter().any(|a| matches!(a, Action::Rewrite(_))), "not yet");
-        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))), "{a:?}");
+        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))), "{a:?}");
         assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "the hold types no Tab: {a:?}");
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat after the rewrite types nothing");
         assert_eq!(e.on_key(Key::TabUp), SWALLOWED, "the release types no Tab");
         // over the bubble, instead of applying a row on release
         e.reset(); e.opts.live = true; typ(&mut e, "l;ylfu"); assert!(e.bubble_visible());
         e.on_key(Key::Tab);
-        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        let a = tick_after(&mut e, TAB_HOLD); assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))));
         assert!(!a.iter().any(|a| matches!(a, Action::Replace { .. })), "no row applied");
     }
     fn holds(a: &[Action]) -> Vec<&Action> { a.iter().filter(|a| matches!(a, Action::Hold(_))).collect() }
@@ -3238,7 +3258,7 @@ mod tests {
         assert_eq!(e.on_key(Key::Tab), SWALLOWED, "auto-repeat keeps it");
         let a = tick_after(&mut e, TAB_HOLD);
         assert_eq!(a.first(), Some(&Action::Hold(None)), "gone as the rewrite starts: {a:?}");
-        assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        assert!(a.iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))));
         assert!(holds(&e.on_key(Key::TabUp).actions).is_empty(), "already gone");
     }
     #[test] fn the_hold_indicator_goes_on_release_or_another_key() {
@@ -3277,7 +3297,7 @@ mod tests {
         let a = tick_after(&mut e, TAB_CHORD_MIN);
         assert_eq!(holds(&a), [&Action::Hold(Some(Hold { from: t + TAB_CHORD_MIN, full: t + Duration::from_millis(1000) }))], "fills towards the setting");
         assert!(!tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(_))), "not at the default");
-        assert!(tick_after(&mut e, Duration::from_millis(1000)).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        assert!(tick_after(&mut e, Duration::from_millis(1000)).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))));
     }
     #[test] fn the_quickest_hold_still_lets_a_tap_through() {
         // a tap is under the indicator's start, and the quickest hold is past it
@@ -3292,7 +3312,7 @@ mod tests {
         assert!(types_only_a_tab(&e.on_key(Key::TabUp)));
         // AI rewrite off: the hold still opens the ⌃⌥R rows (spelling fixes)
         e.rewrite.enabled = false; e.on_key(Key::Tab);
-        assert!(tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(_)))));
+        assert!(tick_after(&mut e, TAB_HOLD).iter().any(|a| matches!(a, Action::Rewrite(Job::Capture(..)))));
     }
     #[test] fn tab_rolled_into_r_types_both() {
         let Some(mut e) = engine() else { return };
