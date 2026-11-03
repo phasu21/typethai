@@ -1,7 +1,8 @@
-> **Tab from 0.5.23.** A Tab tap over the bubble now highlights and Space applies (Settings → Word suggestions → Tab
-> key: *Highlight, then Space*, the default). Where an older section below says "Tab applies / replaces / inserts", run it
-> either with **Tab key: Accept right away**, or with the default read it as "tap Tab, then press Space" (Enter where a
-> space must not be typed). See "Tab cycles, Space confirms" and "Esc closes the bubble".
+> **Tab from 0.5.24.** While a word is being typed, Space applies the highlighted option and a Tab tap moves to the
+> next (Settings → Word suggestions → Tab key: *Space applies, Tab moves*, the default). Where an older section below
+> says "Tab applies / replaces / inserts", run it with **Tab key: Accept right away**, or with the default read it as
+> "press Space" mid-word, and "tap Tab, then press Space" elsewhere (Enter where a space must not be typed). See "Space
+> applies, Tab moves", "Tab cycles, Space confirms" and "Esc closes the bubble".
 
 
 ## v9 bubble / anchoring (untested by agent)
@@ -27,8 +28,36 @@
 - [ ] Light mode looks right (only dark mode was captured).
 - [ ] Placement is correct near the bottom of the screen with the real size (not captured).
 
-## Tab cycles, Space confirms (default from 0.5.23; engine tests and `--simulate` only, not run live by the agent)
-Key map with Settings → Word suggestions → **Tab key: Highlight, then Space** (default, prefs.json `"tab_cycles": true`):
+## Space applies, Tab moves (default from 0.5.24; engine tests only, not run live by the agent)
+Key map with Settings → Word suggestions → **Tab key: Space applies, Tab moves** (default, prefs.json `"tab_key":
+"space_applies"`): mid-word, with an option that finishes or fixes the word highlighted (its key hint `␣`), Space = apply
+it and type the space · Tab tap = move the highlight to the next option (first tap: option 2), wrapping · Shift+Tab =
+previous (after a Tab tap) · Space / Enter / ↑ after a tap = apply the highlight · Esc = close the bubble, the next Space is
+a space · hold Tab + 1..3 = apply that option · hold Tab = the ⌃⌥R options, never applies.
+Space is a plain space when: no bubble; after Esc; the word typed is already a whole word (`help` with helpful up); the
+option is the word as typed; next-word options (after `ok ` and a pause, or a Thai run ending on a word with the next
+word offered); the ⌃⌥R options (select text, hold Tab, let go, Space types over the selection).
+- [ ] Type `hel` and pause: help / hello / helmet, the first with `␣` on it (strip and rows). Press Space: `help `, one
+  space, the bubble gone; the next Space is a space.
+- [ ] Type `hel`, pause, tap Tab: hello is highlighted (no tab typed, text unchanged); tap again: helmet; again: help
+  (wraps). Shift+Tab goes back. Press Space: that option, then one space. Enter or ↑ instead: no space or newline.
+- [ ] Type `hel`, pause, Esc: the bubble goes; Space types `hel `.
+- [ ] Type `help` (whole word) while helpful is offered: Space types `help `; Tab, Space gives `helpful `.
+- [ ] Wrong layout: type `l;ylfu` (live สวัสดี up): Space gives `สวัสดี ` with one space and the input source changes to
+  Thai; ⌃⌥Z restores `l;ylfu `.
+- [ ] Thai: type `ภาษ` on the Thai layout, pause: ภาษา highlighted with `␣`; Space gives `ภาษา `.
+- [ ] Next word: type `ok `, pause: the next words show with `Tab` (not `␣`) on the first; Space types a space. Tab
+  highlights the first, Space inserts it with no extra space.
+- [ ] Select text, hold Tab, let go: the options show `Tab`; Space types over the selection. Tap Tab (option 1), Space
+  pastes it.
+- [ ] Typing a letter, ↓ after a tap, a click elsewhere or switching apps: nothing applied, the bubble follows or goes.
+- [ ] Settings → Word suggestions → Tab key lists Space applies, Tab moves / Highlight, then Space / Accept right away;
+  the page description changes with each. Quit and relaunch: kept. A prefs.json from 0.5.23 (`"tab_cycles": true`)
+  opens on Space applies, Tab moves; `"tab_cycles": false` opens on Accept right away.
+- [ ] Windows (Notepad, a browser): the same checks.
+
+## Tab cycles, Space confirms (default in 0.5.23, now Tab key: Highlight, then Space; engine tests and `--simulate` only, not run live by the agent)
+Key map with Settings → Word suggestions → **Tab key: Highlight, then Space** (prefs.json `"tab_key": "highlight"`):
 Tab tap = highlight (first tap: the highlighted option, usually 1; each further tap: the next, wrapping) · Shift+Tab =
 previous (only after a Tab tap) · Space / Enter / ↑ = apply the highlight · ←/→ = move it · ↓, any other key, a click
 elsewhere, switching apps = drop it, no change · Esc = close the bubble, no change · hold Tab + 1..3 = apply that option ·
@@ -51,7 +80,7 @@ hold Tab = the ⌃⌥R options, never applies · click = apply that option.
   the ⌃⌥R options and applies nothing.
 - [ ] Settings → Word suggestions → Tab key: **Accept right away**: a Tab tap applies the highlighted option as in
   0.5.22, Space is a space (or, with Accept with: Tab or Space, applies a live conversion as before). The page's
-  description changes with it. Quit and relaunch: the choice is kept; a prefs.json from 0.5.22 opens as Highlight, then Space.
+  description changes with it. Quit and relaunch: the choice is kept; a prefs.json from 0.5.22 opens as Space applies, Tab moves.
 - [ ] Guess: Tab Tab with no bubble shows the guess; tap Tab and press Space to apply it.
 - [ ] Windows (Notepad, a browser): the same checks; Shift+Tab with no bubble still moves focus backwards.
 
@@ -68,7 +97,7 @@ hold Tab = the ⌃⌥R options, never applies · click = apply that option.
 - [ ] Hold Tab and press 1: option 1 is applied (with Tab key: Accept right away, the same as tapping Tab).
 - [ ] Hold Tab past the key-repeat delay, then release: the highlighted row is applied once and no tabs are typed.
 - [ ] With a 1-row bubble, hold Tab and press 3: nothing happens and the bubble stays; releasing Tab does nothing.
-- [ ] Tab key: Accept right away — roll Tab straight into Space or the next letter (press it before Tab is up): the row is applied first, then the key, in that order. After a Thai row the letter comes out as Thai. (Default Highlight, then Space: see the section above.)
+- [ ] Tab key: Accept right away — roll Tab straight into Space or the next letter (press it before Tab is up): the row is applied first, then the key, in that order. After a Thai row the letter comes out as Thai. (Default Space applies, Tab moves, and Highlight, then Space: see the sections above.)
 - [ ] With no bubble, hold Tab and press 2: a tab and then 2 are typed, as before.
 - [ ] Windows (Notepad): the same checks.
 
@@ -83,7 +112,7 @@ hold Tab = the ⌃⌥R options, never applies · click = apply that option.
 - [ ] Windows (Notepad): the same checks.
 
 ## v10 bubble keys / input source / live bubble (not run live by the agent)
-- [ ] With a bubble visible: a Tab tap highlights (default) or, with Tab key: Accept right away, applies the highlighted row when released; either way the app does NOT receive the Tab.
+- [ ] With a bubble visible: a Tab tap moves or sets the highlight (default) or, with Tab key: Accept right away, applies the highlighted row when released; either way the app does NOT receive the Tab.
 - [ ] With no bubble: Tab works normally (indent, focus change), and Shift+Up/Down still select text.
 - [ ] Shift+Up/Down move the highlight (wrapping) and the app receives nothing. Esc closes the bubble and isn't passed to the app; with no bubble, Esc reaches the app.
 - [ ] ⌃⌥1–3 still apply rows 1–3.
@@ -194,7 +223,7 @@ hold Tab = the ⌃⌥R options, never applies · click = apply that option.
 - [ ] Forget learned words: the predicted rows stop being offered (the model was cleared with `words.json`), and typing a line again re-learns it.
 - [ ] While typing (not only after a pause) the predicted row can appear one keystroke after the one that asked for it — it must never move under your fingers: keep typing into a predicted word and the rest of it stays visible until what you type diverges from it.
 - [ ] `--simulate` (no model needed for the row itself, but the model file is): `printf '<EN>ship the zqorbit\n<EN>ship the zqorbit\n<EN>ship the zqor<Idle><Idle>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` prints a `[bubble: >zqorbit | …]` line.
-- [ ] Rank log: `printf '<EN>l;ylfu <Tab>\n<EN>l;y <C-1>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` (with `{"pick_with_ctrl":true,"tab_cycles":false}` in `prefs.json` beside it), then `typethai-desktop --rank-report --state /tmp/tt-smoke/personal.json`: `/tmp/tt-smoke/rank.jsonl` holds one line per word the bubble offered, each with the rows that were on it and the row picked (`"pick":{"i":0,"how":"tab"}` and `"how":"digit"`), and the report says how often the first row was picked, with the reflex keys split out. Nothing is logged with **Learn from my typing** off, and **Forget learned words** deletes `rank.jsonl`.
+- [ ] Rank log: `printf '<EN>l;ylfu <Tab>\n<EN>l;y <C-1>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` (with `{"pick_with_ctrl":true,"tab_key":"accept"}` in `prefs.json` beside it), then `typethai-desktop --rank-report --state /tmp/tt-smoke/personal.json`: `/tmp/tt-smoke/rank.jsonl` holds one line per word the bubble offered, each with the rows that were on it and the row picked (`"pick":{"i":0,"how":"tab"}` and `"how":"digit"`), and the report says how often the first row was picked, with the reflex keys split out. Nothing is logged with **Learn from my typing** off, and **Forget learned words** deletes `rank.jsonl`.
 
 ## Horizontal bubble (agent-verified with --demo-bubble --screenshot on the Mac, dark and light; not run live)
 - [x] `--demo-bubble --items "ภาษา|ภาษี|ภาษาอังกฤษ" --screenshot x.png`: one strip of three buttons, an outlined `Tab` keycap on the first and filled `2` / `3` on the others; the self-check lines say OK and the panel matches the layout.
