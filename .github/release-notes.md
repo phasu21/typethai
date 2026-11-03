@@ -1,5 +1,17 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.24**
+- **Space uses the suggestion, Tab moves to the next.** While you type a word, the first suggestion is highlighted and
+  Space uses it, then types the space; no Tab tap needed. Tap Tab to move to the next suggestion (the first tap goes
+  straight to the second one), Shift+Tab to go back, then Space to use it. Space is still just a space when there are
+  no suggestions, after Esc, when the word you typed is already a whole word, over next-word suggestions after a
+  finished word, and over the rewrite options for selected text. There, tap Tab to highlight one first. The highlighted
+  suggestion shows ␣ when Space will use it.
+- **Your Tab key setting moved to the new default.** If Settings → Word suggestions → **Tab key** was on 0.5.23's
+  *Highlight, then Space*, it is now *Space applies, Tab moves*. Both earlier choices are still there:
+  *Highlight, then Space* (Space only after a Tab tap) and *Accept right away* (a Tab tap uses the suggestion).
+  *Accept right away* stays as it was.
+
 **New in 0.5.23**
 - **Tab moves through the suggestions, Space picks one.** With suggestions showing, tap Tab to highlight one (the
   first tap highlights the first suggestion), tap again for the next, and Shift+Tab to go back. Press Space to use the
