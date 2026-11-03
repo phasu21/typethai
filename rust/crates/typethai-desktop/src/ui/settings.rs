@@ -89,6 +89,8 @@ pub fn demo_local(name: &str) -> Option<LocalDemo> {
 enum KeyState { Checking, Missing, Saved, Failed(String) }
 const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "Off"), (CompleteMode::Pause, "After a pause"), (CompleteMode::Typing, "While typing")];
 const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "Tab"), (AcceptKeys::TabOrSpace, "Tab or Space")];
+/// "Tab key": `tab_cycles` on (a tap highlights, Space applies) or off (a tap applies).
+const TAB_KEY: [(bool, &str); 2] = [(true, "Highlight, then Space"), (false, "Accept right away")];
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "Horizontal"), (BubbleLayout::Vertical, "Vertical")];
 /// "Pick with": (pick_arrows, pick_ctrl). Both off (only from a hand-edited prefs.json) shows no choice.
 const PICK: [((bool, bool), &str); 3] = [((true, false), "Arrow keys"), ((false, true), "Ctrl+1–3"), ((true, true), "Arrow keys and Ctrl+1–3")];
@@ -588,6 +590,11 @@ impl SettingsView {
             SettingField::dropdown(options,
                 move |cx| ACCEPT.iter().find(|(a, _)| *a == read.read(cx).snap.accept).map_or("", |(_, l)| l).into(),
                 move |label, cx| if let Some((a, _)) = ACCEPT.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_accept(*a, cx)) }) };
+        let tab_key = { let (read, write) = (view.clone(), view.clone());
+            let options = TAB_KEY.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+            SettingField::dropdown(options,
+                move |cx| TAB_KEY.iter().find(|(c, _)| *c == read.read(cx).snap.tab_cycles).map_or("", |(_, l)| l).into(),
+                move |label, cx| if let Some(&(c, _)) = TAB_KEY.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_tab_cycles(c, cx)) }) };
         let layout = { let (read, write) = (view.clone(), view.clone());
             let options = BUBBLE.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
             SettingField::dropdown(options,
@@ -618,12 +625,14 @@ impl SettingsView {
         let forget = custom_field(view, |v, view, _, _| Button::new("forget-words").label(if v.confirm_forget { "Click again to forget" } else { "Forget" }).danger()
             .on_click(click(view, |v, _, cx| v.ask_forget(cx))).into_any_element());
         let learned = match self.snap.words_learned { 0 => "No words learned yet.".to_string(), 1 => "1 word learned.".to_string(), n => format!("{n} words learned.") };
-        page("Word suggestions", IconName::CaseSensitive, "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another. Space can also accept a word typed in the wrong layout.".into(),
+        page("Word suggestions", IconName::CaseSensitive, if self.snap.tab_cycles { "The bubble can finish the word you are typing, in Thai or English. Tap Tab to highlight a suggestion, tap again for the next one (Shift+Tab goes back), then press Space to use it; Esc closes the bubble. Hold Tab and press 1–3 to pick one directly." }
+            else { "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another; Esc closes the bubble. Space can also accept a word typed in the wrong layout." }.into(),
             keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "next", "next word", "predict", "prediction", "model", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column", "input", "language", "source", "keyboard", "flag", "badge", "caret", "preview", "idle", "stop", "once", "never", "off", "ไทย"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 (self.snap.completion != CompleteMode::Off).then(|| SettingItem::new("Suggest the next word", next).description("Pause after a word (after a space in English) and the bubble offers the word that usually follows it: built-in word pairs, and your own model's guess with them.")),
                 Some(SettingItem::new("Bubble layout", layout).description("Horizontal puts the suggestions side by side. Long suggestions and AI rewrite results are always stacked.")),
+                Some(SettingItem::new("Tab key", tab_key).description("Highlight, then Space: each Tab tap highlights the next suggestion and Space (or Enter) uses it; without a Tab tap Space is just a space. Accept right away: a Tab tap uses the highlighted suggestion, as in earlier versions.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
                 Some(SettingItem::new("Show the input language", badge).description("A flag shows by the caret: when the keyboard switches between Thai and English, and while a text field is focused with nothing typed in it yet.")),
                 self.snap.input_badge.then(|| SettingItem::new("Show it again after", badge_delay).description("How long a pause in typing brings the flag back while the same text field still has focus. Off: it shows once when focus lands in the field, and a pause never brings it back.")),
@@ -678,6 +687,12 @@ impl SettingsView {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.accept = accept;
         bridge::push_settings(SettingsCmd::SetAccept(accept));
+        cx.notify();
+    }
+    fn set_tab_cycles(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.tab_cycles = on;
+        bridge::push_settings(SettingsCmd::SetTabCycles(on));
         cx.notify();
     }
     fn set_bubble(&mut self, bubble: BubbleLayout, cx: &mut Context<Self>) {
@@ -819,7 +834,7 @@ impl SettingsView {
             }
         }
         page("AI rewrite", IconName::Bot,
-            format!("Hold Tab, or press {hotkey}, on a selection or the word before the caret: local fixes first, then the AI rows."),
+            format!("Hold Tab, or press {hotkey}, on a selection or the word before the caret: local fixes first, then the AI rows. {}", if self.snap.tab_cycles { "Let go, tap Tab to highlight an option, then press Space or Enter to use it." } else { "Let go, then tap Tab or press Enter to use the highlighted option." }),
             keywords(&["ai rewrite", "rewrite", "api key", "openrouter", "model", "base url", "translate", "typo", "hotkey", "prompt", "instructions", "selection", "selected", "hold", "tab", "layout", "spelling", "word", "finish sentence", "local", "cloud", "gemma", "ollama", "setup", "download", "typhoon", "4b", hotkey], std::iter::empty()),
             rows)
     }

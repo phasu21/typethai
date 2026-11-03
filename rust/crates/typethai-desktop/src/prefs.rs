@@ -26,6 +26,8 @@ pub enum SettingsCmd {
     /// Contextual word prediction from the personal word n-gram (`Options::predict`).
     SetPredict(bool),
     SetAccept(AcceptKeys),
+    /// A Tab tap highlights the options and Space applies (`Options::tab_cycles`), or Tab applies.
+    SetTabCycles(bool),
     SetPickCtrl(bool),
     /// Arrow keys pick from the bubble (`Options::pick_arrows`).
     SetPickArrows(bool),
@@ -43,7 +45,7 @@ pub enum SettingsCmd {
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_) | SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetTabCycles(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_) | SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_))
     }
 }
 
@@ -59,6 +61,8 @@ pub struct SettingsSnap {
     /// Contextual word prediction from the personal word n-gram.
     pub predict: bool,
     pub accept: AcceptKeys,
+    /// A Tab tap highlights the options and Space applies; off: a Tab tap applies.
+    pub tab_cycles: bool,
     pub pick_ctrl: bool,
     pub pick_arrows: bool,
     pub input_badge: bool,
@@ -89,9 +93,9 @@ fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').conta
 /// What prefs.json holds. `offer_last`: the words whose conversion was rated down (`Engine::offer_last`).
 /// `off_apps`: apps typeThai is turned fully off in, keyed by `app_key(id)`, value the display name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool, pub off_apps: BTreeMap<String, String> }
+pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub tab_cycles: bool, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool, pub off_apps: BTreeMap<String, String> }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true, off_apps: BTreeMap::new() } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, tab_cycles: true, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true, off_apps: BTreeMap::new() } }
 }
 /// The key an app id matches on: trimmed and ASCII-lowercased, so `com.apple.Terminal` and `COM.APPLE.TERMINAL` are one
 /// app. An empty id is never a match and is never stored.
@@ -117,7 +121,7 @@ impl Prefs {
         let completion = COMPLETION.iter().find(|(m, _)| *m == self.completion).map_or("pause", |(_, s)| s);
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
         let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates, "off_apps": self.off_apps.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name })).collect::<Vec<_>>() }).to_string()
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "tab_cycles": self.tab_cycles, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates, "off_apps": self.off_apps.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name })).collect::<Vec<_>>() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -142,6 +146,8 @@ fn parse(text: &str) -> Option<Prefs> {
     let predict = v.get("predict").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let a = v.get("accept_with").and_then(|a| a.as_str());
     let accept = ACCEPT.iter().find(|(_, s)| Some(*s) == a).map_or(AcceptKeys::default(), |(k, _)| *k);
+    // on unless turned off: a file from before the setting gets the new Tab too
+    let tab_cycles = v.get("tab_cycles").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let pick_ctrl = v.get("pick_with_ctrl").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let pick_arrows = v.get("pick_with_arrows").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let input_badge = v.get("input_badge").and_then(serde_json::Value::as_bool).unwrap_or(true);
@@ -159,7 +165,7 @@ fn parse(text: &str) -> Option<Prefs> {
         if key.is_empty() { return None }
         Some((key, e.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string()))
     }).collect());
-    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates, off_apps })
+    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, tab_cycles, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates, off_apps })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -287,6 +293,21 @@ mod tests {
         assert_eq!(Prefs::load(&path).accept, AcceptKeys::Tab, "file from before the setting");
         std::fs::write(&path, r#"{"never":[],"accept_with":"enter"}"#).unwrap();
         assert_eq!(Prefs::load(&path).accept, AcceptKeys::Tab, "a value Settings never offers");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn tab_cycles_round_trips_and_an_old_file_turns_it_on() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-tc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("prefs.json");
+        assert!(Prefs::default().tab_cycles, "on by default");
+        let off = Prefs { tab_cycles: false, ..Prefs::default() };
+        off.save(&path);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["tab_cycles"], false);
+        assert_eq!(Prefs::load(&path), off);
+        std::fs::write(&path, r#"{"never":["ok"],"accept_with":"tab"}"#).unwrap();
+        assert!(Prefs::load(&path).tab_cycles, "file from before the setting");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]

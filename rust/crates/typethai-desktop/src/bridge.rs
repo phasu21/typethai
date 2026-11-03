@@ -1,6 +1,6 @@
 //! Messages and shared state between the key-capture thread (CGEventTap / low-level hooks, owns the Engine) and the
 //! gpui UI thread (bubble window + tray).
-use crate::engine::{BubbleItem, InputLang, Reason};
+use crate::engine::{BubbleItem, InputLang, Rail, Reason};
 use crate::placement::{Anchor, Rect};
 use crate::prefs::{SettingsCmd, SettingsSnap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +10,9 @@ use std::sync::Mutex;
 pub enum UiMsg {
     /// Highlight this row (Shift+Up/Down, or Left/Right with the arrow keys in the bubble).
     Select(usize),
-    /// The arrow keys moved into / out of the bubble: the highlighted option's keycap says Enter while they are in it.
-    Focus(bool),
+    /// The keys moved into / out of the bubble: the highlighted option's keycap says Enter while the arrow keys are in
+    /// it, Space while a Tab tap is.
+    Focus(Rail),
     /// `layout`: what the bubble asks for; `layout` falls back to rows when a strip does not fit.
     Show { items: Vec<Opt>, layout: BubbleLayout, anchor: Anchor },
     /// The caret moved while the bubble is shown: re-place it (same size; skipped if the rect doesn't change).

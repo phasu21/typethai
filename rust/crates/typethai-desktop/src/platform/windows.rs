@@ -371,7 +371,7 @@ unsafe fn translate(vk: u32) -> Option<Key> {
     if ctrl || alt || win { return Some(Key::Nav) }
     Some(match v {
         VK_BACK => Key::Backspace, VK_SPACE => Key::Boundary(Boundary::Space), VK_RETURN => Key::Boundary(Boundary::Enter),
-        VK_TAB => if shift { Key::Nav } else { Key::Tab }, // Shift+Tab (reverse focus) stays plain navigation
+        VK_TAB => if shift { Key::TabBack } else { Key::Tab }, // Shift+Tab: back through the options a Tab tap is in, else reverse focus
         VK_ESCAPE => Key::Esc,
         VK_UP if shift => Key::SelectPrev, VK_DOWN if shift => Key::SelectNext,
         VK_UP => Key::Arrow(Arrow::Up), VK_DOWN => Key::Arrow(Arrow::Down),
@@ -461,7 +461,7 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
     if st.app.engine.app_off() { return false }
     // these may move focus inside the window: a closed gate re-checks, and so does the preview's policy (a look armed by
     // a key never pins the preview: the caret under it is not laid out yet, and Enter/Ctrl+C are typing)
-    if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
+    if matches!(key, Key::Tab | Key::TabBack | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
     // Thai layout / password field / not a text field: bypass the engine, except hotkeys and the bubble controls while the bubble is up
     st.app.engine.set_thai_active(layout_is_thai(fg)); // Thai layout -> reverse detector (English typed on Kedmanee)
     if !matches!(key, Key::Hotkey(_)) && !st.app.engine.is_bubble_key(&key) {

@@ -421,7 +421,7 @@ fn translate(code: u16, flags: u64) -> Option<Key> {
     if ctrl || alt || cmd { return Some(Key::Nav) }
     Some(match code {
         0x33 => Key::Backspace, 0x31 => Key::Boundary(Boundary::Space), 0x24 | 0x4C => Key::Boundary(Boundary::Enter),
-        0x30 => if shift { Key::Nav } else { Key::Tab }, // Shift+Tab (reverse focus) stays plain navigation
+        0x30 => if shift { Key::TabBack } else { Key::Tab }, // Shift+Tab: back through the options a Tab tap is in, else reverse focus
         0x35 => Key::Esc,
         0x7E if shift => Key::SelectPrev, 0x7D if shift => Key::SelectNext,
         0x7E => Key::Arrow(Arrow::Up), 0x7D => Key::Arrow(Arrow::Down), 0x7B if !shift => Key::Arrow(Arrow::Left), 0x7C if !shift => Key::Arrow(Arrow::Right),
@@ -465,7 +465,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
             if st.app.engine.app_off() { return false }
             // these may move focus inside the app: a closed gate re-checks, and so does the preview's policy (a look
             // armed by a key never pins the preview: the caret under it is not laid out yet, and Enter/⌘C are typing)
-            if matches!(key, Key::Tab | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
+            if matches!(key, Key::Tab | Key::TabBack | Key::Esc | Key::Nav | Key::PickRow(_) | Key::Boundary(Boundary::Enter)) { st.gate.touch(Instant::now()); arm_focus_look(st, true); }
             // Thai input active / secure field: the engine is bypassed (keys already produce Thai, nothing to convert),
             // except hotkeys and the bubble controls (Tab / Shift+Up/Down / Esc) while the bubble is up, and Space when it
             // applies a live row (`is_bubble_key`).
