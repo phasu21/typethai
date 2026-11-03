@@ -88,6 +88,14 @@
 - [ ] A clipboard manager (Maccy, Raycast, Paste) does not record the pasted result.
 - [ ] Windows Notepad and Edge: select text, Ctrl+Alt+R, Tab, Tab replaces it; the menu bar is not activated by the Alt release; Win+V history has no entry for the result; the previous clipboard comes back.
 
+## Finish sentence locally switch (agent-verified with --demo-settings and engine tests; not run live)
+- [ ] Settings → AI rewrite → Local: a "Finish sentence locally" switch above the model, off on a new install and after
+  updating from a version without it (prefs.json `"rewrite"` → `"local_finish": false`).
+- [ ] Off: select text and hold Tab: no "Finish sentence locally" row, even with Ollama running and the model downloaded.
+  Fix typos / Translate still show when a key is saved.
+- [ ] On, Ollama running with the model: the row shows. Quit Ollama (or pick a model not downloaded): it goes again.
+- [ ] Quit and relaunch: the switch keeps its state; Save on the Cloud tab does not turn it off.
+
 ## Select text, then hold Tab to rewrite (engine tests and `--demo-bubble` only; not run live by the agent)
 - [ ] Always the layout swap: select `l;ylfu` and hold Tab: สวัสดี is offered first. Select `สวัสดี`: `l;ylfu`. Select
   gibberish such as `asdfjkl;` or `qwpzxv`, or Thai no dictionary knows: the whole selection re-typed on the other

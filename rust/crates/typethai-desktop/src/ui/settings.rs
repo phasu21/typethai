@@ -353,10 +353,15 @@ impl SettingsView {
         bridge::push_settings(SettingsCmd::SetRewrite(rewrite::Config { enabled, ..self.snap.rewrite.clone() }));
         cx.notify();
     }
+    fn set_local_finish(&mut self, on: bool, cx: &mut Context<Self>) {
+        bridge::push_settings(SettingsCmd::SetRewrite(rewrite::Config { local_finish: on, ..self.snap.rewrite.clone() }));
+        cx.notify();
+    }
     fn save_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let instructions = self.instructions.read(cx).value();
+        let local_finish = self.snap.rewrite.local_finish;
         match rewrite::Config::new(self.snap.rewrite.enabled, &self.base_url, &self.model, &instructions)
-            .and_then(|c| c.with_local_model(&self.local_model))
+            .and_then(|c| c.with_local_model(&self.local_model)).map(|c| rewrite::Config { local_finish, ..c })
         {
             Ok(c) => { self.rewrite_error = None; self.fill_rewrite(&c, window, cx); bridge::push_settings(SettingsCmd::SetRewrite(c)); }
             Err(e) => self.rewrite_error = Some(e),
@@ -743,9 +748,18 @@ impl SettingsView {
             let switch = Switch::new("rewrite-enabled").checked(v.snap.rewrite.enabled).xsmall()
                 .on_click({ let view = view.clone(); move |on, _, cx| view.update(cx, |v, cx| v.set_rewrite_enabled(*on, cx)) });
             help_row("offer-help", "Offer AI rewrite", None, vec![
-                "Finish sentence locally runs Ollama on this computer: no key, and only the selected text is sent to it.".into(),
+                "Finish sentence locally (switched on in the Local tab) runs Ollama on this computer: no key, and only the selected text is sent to it.".into(),
                 "Fix typos and Translate TH↔EN use the key and server below; the selected text goes there instead.".into(),
                 "A preview is always shown first — generated facts can be wrong.".into(),
+            ], paint, switch.into_any_element())
+        });
+        let local_finish = element(view, |v, view, _, paint| {
+            let switch = Switch::new("local-finish").checked(v.snap.rewrite.local_finish).xsmall()
+                .on_click({ let view = view.clone(); move |on, _, cx| view.update(cx, |v, cx| v.set_local_finish(*on, cx)) });
+            help_row("local-finish-help", "Finish sentence locally", None, vec![
+                "Offers Finish sentence locally among the AI rows when you hold Tab on a selection.".into(),
+                "It shows only while Ollama is running with the model below downloaded.".into(),
+                "Off: never offered, even with Ollama ready. Fix typos and Translate are not affected.".into(),
             ], paint, switch.into_any_element())
         });
         let local_pick = element(view, |v, view, options, paint| {
@@ -792,6 +806,7 @@ impl SettingsView {
         rows.push(tabs);
         match self.rewrite_tab {
             RewriteTab::Local => {
+                rows.push(local_finish);
                 rows.push(local_pick);
                 rows.push(local_setup);
             }

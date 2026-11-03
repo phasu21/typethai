@@ -1757,7 +1757,8 @@ impl Engine {
         if self.capturing.is_some() { return Outcome { swallow: true, actions: vec![] } }
         let mut a = vec![]; self.show(vec![], &mut a); self.tab = TabChord::Up;
         let id = self.mint(); self.capturing = Some(id);
-        let tag = if self.rewrite.enabled { self.rewrite.local_model.clone() } else { String::new() };
+        // Finish sentence locally is looked for only when it is switched on
+        let tag = if self.rewrite.enabled && self.rewrite.local_finish { self.rewrite.local_model.clone() } else { String::new() };
         a.push(Action::Rewrite(Job::Capture(id, tag)));
         Outcome { swallow: true, actions: a }
     }
@@ -2873,10 +2874,22 @@ mod tests {
         assert_eq!(offer(&mut e, true, false), [Preset::Fix, Preset::Translate], "Finish sentence locally needs Ollama with the model");
         assert_eq!(offer(&mut e, false, true), [Preset::Finish]);
         assert_eq!(offer(&mut e, true, true), Preset::ALL);
-        // the capture asks the worker to look for the configured local model, and for nothing while AI rewriting is off
-        let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
-        assert!(matches!(o.actions.last(), Some(Action::Rewrite(Job::Capture(_, tag))) if *tag == e.rewrite.local_model));
-        e.on_key(Key::Esc); e.rewrite.enabled = false;
+    }
+    #[test] fn finish_sentence_locally_has_its_own_switch() {
+        let Some(mut e) = engine() else { return };
+        let looks_for = |e: &mut Engine| { let o = e.on_key(Key::Hotkey(Hotkey::Rewrite)); e.on_key(Key::Esc);
+            match o.actions.last() { Some(Action::Rewrite(Job::Capture(_, tag))) => tag.clone(), a => panic!("{a:?}") } };
+        // off (the default): the worker does not even look for the model, so a ready Ollama never brings the row up
+        assert!(!e.rewrite.local_finish);
+        assert_eq!(looks_for(&mut e), "", "switched off: nothing to look for");
+        // on: the configured model is looked for, and the row follows whether it is ready
+        e.apply_settings(SettingsCmd::SetRewrite(rewrite::Config { local_finish: true, ..e.rewrite.clone() }));
+        assert_eq!(looks_for(&mut e), e.rewrite.local_model);
+        let offer = |e: &mut Engine, local: bool| { let id = start(e); e.on_reply(Reply::Captured { id, sel: Captured::Text("hello world".into()), has_key: true, local }); let p = presets(e); e.on_key(Key::Esc); p };
+        assert_eq!(offer(&mut e, true), Preset::ALL, "on and ready");
+        assert_eq!(offer(&mut e, false), [Preset::Fix, Preset::Translate], "on but Ollama or the model missing");
+        // AI rewriting off: nothing looked for, whatever the switch says
+        e.rewrite.enabled = false;
         let o = e.on_key(Key::Hotkey(Hotkey::Rewrite));
         assert!(matches!(o.actions.last(), Some(Action::Rewrite(Job::Capture(_, tag))) if tag.is_empty()));
     }
