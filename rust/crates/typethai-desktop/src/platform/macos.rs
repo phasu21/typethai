@@ -64,6 +64,8 @@ const kAXValueCFRangeType: u32 = 4;
 
 struct State { app: App, worker: rewrite::Worker, last_pid: i64, tap_port: *const c_void, follow: follow::Follow, last_src: &'static str,
     gate: field::Gate, ax: Sender<Sender<Field>>, field_rx: Option<Receiver<Field>>,
+    /// The bubble's focus watch (`field::Watch`) and its look in flight.
+    watch: field::Watch, watch_rx: Option<Receiver<Field>>,
     /// When the next look at focus is due, and whether a keystroke armed it (a click, an app switch or a key may have
     /// moved focus, and the handler that saw the trigger cannot wait for AX).
     badge_due: Option<(std::time::Instant, bool)>,
@@ -440,7 +442,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                     else if let (CGEventType::LeftMouseDown, Some(k)) = (ty, hit.key()) { let o = st.app.engine.on_key(k); run_actions(st, o.actions); st.app.maybe_save(); }
                     true
                 }
-                None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); arm_focus_look(st, false); arm_caret_follow(st); let a = st.app.engine.reset(); run_actions(st, a); false }
+                None => { *LAST_CLICK.lock().unwrap() = Some((p.x, p.y)); st.gate.touch(Instant::now()); seen_input(st); arm_focus_look(st, false); arm_caret_follow(st); let a = st.app.engine.reset(); run_actions(st, a); false }
             }
         }
         // Shift is a modifier: pressing or releasing it alone is a flags change, never a KeyDown/KeyUp. The bubble shows
@@ -448,7 +450,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
         CGEventType::FlagsChanged => { bridge::SHIFT_HELD.store(e.get_flags().bits() & 0x20000 != 0, Ordering::SeqCst); false }
         CGEventType::KeyDown | CGEventType::KeyUp => {
             // every keystroke, whatever becomes of it: typing takes the input-language preview down
-            if matches!(ty, CGEventType::KeyDown) { let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
+            if matches!(ty, CGEventType::KeyDown) { seen_input(st); let a = st.app.engine.on_keystroke(Instant::now()); run_actions(st, a); }
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
             if typing_in_our_window(st, pid) { return false }
             let code = e.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
@@ -458,11 +460,7 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 Key::TabUp
             } else { let Some(key) = translate(code, e.get_flags().bits()) else { return false }; key };
             let pid = e.get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID as CGEventField);
-            if pid != st.last_pid { st.last_pid = pid; let (id, name) = app_of(pid); st.app.engine.delete_unit = DeleteUnit::of_app(&id); st.gate.reset(); st.field_rx = None; arm_focus_look(st, false); arm_caret_follow(st);
-                // the tray's app item follows keys to another app, and turning it off there takes anything on screen down
-                let mut a = if id.is_empty() { vec![] } else { st.app.set_front_app(&id, if name.is_empty() { &id } else { &name }) };
-                // the new app's caret is somewhere else, and the pill may be up over the old one
-                a.extend(st.app.engine.reset()); run_actions(st, a); }
+            if pid != st.last_pid { let (id, name) = app_of(pid); front_changed(st, pid, &id, &name); arm_focus_look(st, false); }
             // typeThai is off in this app: every key reaches it untouched, before any AX work
             if st.app.engine.app_off() { return false }
             // these may move focus inside the app: a closed gate re-checks, and so does the preview's policy (a look
@@ -505,6 +503,31 @@ fn key_targets_us(target_pid: i64) -> bool {
     if target_pid > 0 { return false }
     frontmost().is_some_and(|(pid, _, _)| pid as i64 == us)
 }
+/// Keys (or the workspace) moved to another app: its delete unit, a fresh gate, and nothing left on screen from the
+/// last one. The tray's app item follows, and turning typeThai off there takes anything on screen down.
+fn front_changed(st: &mut State, pid: i64, id: &str, name: &str) {
+    st.last_pid = pid; st.app.engine.delete_unit = DeleteUnit::of_app(id); st.gate.reset(); st.field_rx = None; st.watch_rx = None; arm_caret_follow(st);
+    let mut a = if id.is_empty() { vec![] } else { st.app.set_front_app(id, if name.is_empty() { id } else { name }) };
+    // the new app's caret is somewhere else, and the pill may be up over the old one
+    a.extend(st.app.engine.reset()); run_actions(st, a);
+}
+/// A key or a click: the bubble's focus watch waits again, and a look it has in flight is stale.
+fn seen_input(st: &mut State) { st.watch.input(Instant::now()); st.watch_rx = None; }
+/// The bubble is up and the user has been quiet (`field::Watch`): look at focus off the tap thread, and take the bubble
+/// down once focus is no longer in a text field (an unknown one keeps it, by the gate's rule).
+fn watch_bubble(st: &mut State, now: Instant) {
+    if let Some(rx) = st.watch_rx.take() {
+        match rx.try_recv() {
+            Ok(f) => { st.watch.answered(now); if !field::Gate::told(f).open(false, || false) { let a = st.app.engine.on_focus(false); run_actions(st, a); } }
+            Err(std::sync::mpsc::TryRecvError::Empty) => { st.watch_rx = Some(rx); return }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => st.watch.answered(now),
+        }
+    }
+    if st.watch.due(now, st.app.engine.bubble_visible()) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if st.ax.send(tx).is_ok() { st.watch_rx = Some(rx) } else { st.watch.answered(now) }
+    }
+}
 fn typing_in_our_window(st: &mut State, target_pid: i64) -> bool {
     if !key_targets_us(target_pid) { return false }
     let us = std::process::id() as i64;
@@ -527,9 +550,12 @@ fn arm_focus_look(st: &mut State, key: bool) { st.badge_due = Some((Instant::now
 /// and keeps it up while nothing has been typed in that field; elsewhere, or in a password field, it goes. The verdict
 /// is the gate's own rule (macOS has no caret flag: the focused element decides, and an unknown one opens).
 fn focus_look(st: &mut State, key: bool) {
-    // a click or Cmd+Tab may have brought another app forward: the tray names it, and its off state may differ
+    // a click, Cmd+Tab or the workspace may have brought another app forward: the tray names it, its off state may
+    // differ, and nothing of the last app's stays up
     if let Some((pid, bundle, name)) = frontmost() {
-        if !bundle.is_empty() && pid as i64 != std::process::id() as i64 && pid as i64 != st.last_pid { let a = st.app.set_front_app(&bundle, if name.is_empty() { &bundle } else { &name }); run_actions(st, a); }
+        // our own Settings window: no caret of ours to sit over, and no AX look at ourselves from this thread
+        if pid as i64 == std::process::id() as i64 { let a = st.app.engine.on_focus(false); run_actions(st, a); return }
+        if pid as i64 != st.last_pid { front_changed(st, pid as i64, &bundle, &name); }
     }
     let (secure, f) = unsafe { focus_check() };
     let text = !secure && field::Gate::told(f).open(false, || false);
@@ -580,7 +606,16 @@ extern "C" fn timer_cb(_t: CFRunLoopTimerRef, _i: *mut c_void) {
         }
         let idle = st.app.engine.on_idle(now); run_actions(st, idle);
         if st.gate.refresh_due(now, false) { field_refresh(st); }
+        // another app came to the front without a key or a click the tap saw (a gesture, an app activating itself):
+        // the bubble goes now, and the look after it settles decides the preview
+        if bridge::take(&bridge::FRONT_CHANGED) {
+            if let Some((pid, bundle, name)) = frontmost().filter(|(pid, _, _)| *pid as i64 != st.last_pid) {
+                if pid as i64 == std::process::id() as i64 { st.last_pid = pid as i64; let a = st.app.engine.on_focus(false); run_actions(st, a); } else { front_changed(st, pid as i64, &bundle, &name); }
+                arm_focus_look(st, false);
+            }
+        }
         if let Some((_, key)) = st.badge_due.filter(|(t, _)| now >= *t) { st.badge_due = None; focus_look(st, key); }
+        watch_bubble(st, now);
         if bridge::REQ_BADGE.lock().unwrap().take().is_some() { offer_badge(st, false); }
         // the caret under a bubble or preview that is up follows the app's own: the first read after a key is often
         // still the pre-keystroke one, and an app that scrolls (a terminal) moves it while the pill shows
@@ -634,7 +669,7 @@ fn repair_permission_once(state: &std::path::Path, id: &str, version: &str) {
 
 fn capture_thread(app: App, tx: Sender<UiMsg>) {
     TX.with(|t| *t.borrow_mut() = Some(tx.clone()));
-    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: std::ptr::null(), tap: None, tap_try: None, follow: follow::Follow::default(), last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
+    ST.with(|s| *s.borrow_mut() = Some(State { app, worker: rewrite::Worker::spawn(|| MacHost), last_pid: -1, tap_port: std::ptr::null(), tap: None, tap_try: None, follow: follow::Follow::default(), last_src: "", gate: field::Gate::default(), ax: ax_worker(), field_rx: None, watch: field::Watch::default(), watch_rx: None, badge_due: Some((std::time::Instant::now(), false)) }));
     let armed = with(|st| arm_tap(st)).unwrap_or(false);
     if !armed {
         eprintln!("typeThai: no event tap yet; running without it and trying again once Accessibility is granted");
@@ -664,6 +699,17 @@ pub fn watch_wake() {
     let center = NSWorkspace::sharedWorkspace().notificationCenter();
     let block = block2::RcBlock::new(|_: NonNull<NSNotification>| crate::update::check_on_wake());
     let _ = unsafe { center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceDidWakeNotification), None, None, &block) };
+}
+
+/// Another app came to the front (`bridge::FRONT_CHANGED`, picked up by the capture thread's timer). Delivered on the
+/// main thread, which owns the shared workspace; observed for as long as the process runs, so the token is not kept.
+pub fn watch_front_app() {
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceDidActivateApplicationNotification};
+    use objc2_foundation::NSNotification;
+    use std::ptr::NonNull;
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let block = block2::RcBlock::new(|_: NonNull<NSNotification>| bridge::FRONT_CHANGED.store(true, Ordering::SeqCst));
+    let _ = unsafe { center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceDidActivateApplicationNotification), None, None, &block) };
 }
 
 pub fn run(app: App) {

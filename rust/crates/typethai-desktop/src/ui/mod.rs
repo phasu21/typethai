@@ -591,6 +591,7 @@ pub fn run(rx: Receiver<UiMsg>) {
     app().run(move |cx| {
         setup(cx);
         super::platform::watch_wake();
+        super::platform::watch_front_app();
         let mut ui = open_bubble(cx);
         let mut badge = BadgeWin::open(cx);
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
