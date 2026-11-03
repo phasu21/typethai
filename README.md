@@ -298,6 +298,9 @@ Releases: pushing a `v*` tag runs `.github/workflows/release.yml`, which needs t
 `UPDATE_SIGNING_KEY` (the ed25519 private key, PEM, whose public half is `PUBLIC_KEY` in
 `rust/crates/typethai-desktop/src/update.rs`). Losing either key means installed copies stop accepting updates (the
 update key) or ask for Accessibility again (the certificate), so keep a backup outside GitHub.
+Running release.yml by hand (Actions > release > Run workflow) is a dry run: it builds, signs and packages
+`v0.0.0-dryrun` as workflow artifacts and publishes nothing. `cache-warm.yml` keeps the release build caches warm from
+main.
 
 Run from a checkout on macOS: `scripts/typethai.sh` builds the release binary, stops any running typeThai (including
 the installed app) and starts it in the background (`stop`, `status`, `log`, `fg` also work). Link it onto your PATH to

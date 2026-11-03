@@ -1,0 +1,33 @@
+# Build the release targets on main so a tag's release restores a warm cache (a tag's own cache is never restored by
+# the next tag). The shared-keys, toolchain targets and environment match release.yml's build jobs; change both
+# together. Weekly too: a new stable Rust changes the cache key, and GitHub drops caches unused for 7 days.
+name: cache-warm
+on:
+  push:
+    branches: [main]
+    paths: ["rust/Cargo.lock", "rust/**/Cargo.toml", ".github/workflows/cache-warm.yml"]
+  schedule: [{ cron: "17 3 * * 1" }]
+  workflow_dispatch:
+concurrency: { group: cache-warm, cancel-in-progress: true }
+jobs:
+  macos:
+    runs-on: macos-14
+    strategy: { matrix: { target: [aarch64-apple-darwin, x86_64-apple-darwin] } }
+    env: { MACOSX_DEPLOYMENT_TARGET: "12.0" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust, shared-key: "release-${{ matrix.target }}" }
+      - working-directory: rust
+        run: cargo build --release -p typethai-desktop --target ${{ matrix.target }}
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust, shared-key: release-windows }
+      - working-directory: rust
+        run: cargo build --release -p typethai-desktop
