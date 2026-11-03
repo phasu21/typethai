@@ -1,5 +1,19 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.23**
+- **Tab moves through the suggestions, Space picks one.** With suggestions showing, tap Tab to highlight one (the
+  first tap highlights the first suggestion), tap again for the next, and Shift+Tab to go back. Press Space to use the
+  highlighted one: when it finishes the word you are typing, the space comes after it. Enter or ↑ also use it. Until
+  you tap Tab, Space is just a space, and typing anything else drops the highlight without changing your text. Holding
+  Tab works as before: Tab + 1–3 picks directly, and holding Tab on selected text opens the rewrite options, where Tab
+  taps choose and Space or Enter replaces the selection. Prefer the old way? Settings → Word suggestions → **Tab key**:
+  *Accept right away*.
+
+**Fixed in 0.5.23**
+- **Esc closes the suggestions.** Esc now hides the suggestions, whether or not one is highlighted, without changing
+  your text and without also closing the app's dialog. They stay away until you type again; before, a pause could
+  bring them straight back.
+
 **Fixed in 0.5.22**
 - **The suggestions go when you leave the text field.** They used to stay on screen until your next key after you
   switched apps with a gesture, an app or a notification took focus, a window closed, or Enter sent a message and moved
