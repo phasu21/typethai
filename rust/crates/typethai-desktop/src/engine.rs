@@ -458,6 +458,9 @@ pub struct Engine {
     /// answer it gave (`key`, its confidence, the whole word), and the word last shown with its confidence, which stays
     /// while the word is typed through: a ghost must not move under the user's fingers.
     pred_ask: Option<(u64, String, bool)>, pred_answer: Option<(u64, f64, String)>, pred_shown: Option<(String, bool, String, f64)>,
+    /// An answer for the word being typed came in and no rows have taken it yet: a poll that does not rebuild the rows
+    /// (the next-word rows' own) can take it, and the next idle tick shows it then.
+    pred_unshown: bool,
     /// The next-word query asked for this line state (its key), and its answer: the key, confidence, word.
     pred_next_ask: Option<u64>, pred_next_answer: Option<(u64, f64, String)>,
     /// The finished line has been given to the predictor (a line is learned once).
@@ -474,7 +477,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -1053,7 +1056,7 @@ impl Engine {
         if self.paused || self.off { return acts }
         // the model's answer lands a tick or two after the state that asked for it: the rows that state shows take it
         // in, without the pause's spell checker call
-        let answered = self.poll_prediction();
+        let answered = self.poll_prediction() | std::mem::take(&mut self.pred_unshown);
         if answered && !self.word.is_empty() && self.opts.complete != CompleteMode::Off
             && (self.opts.complete == CompleteMode::Typing || self.last_key.is_none())
         {
@@ -1236,6 +1239,7 @@ impl Engine {
             // Latin words come back lowercased; the row is what the keys typed, case included
             let word = if thai { typed } else { typethai_core::completer::recase(&typed, &tail) };
             self.pred_answer = Some((key, confidence, word));
+            self.pred_unshown = true;
             answered = true;
         }
         answered
@@ -1266,6 +1270,7 @@ impl Engine {
         let key = query_key(&line, head, tail, thai);
         if let Some((answer, confidence, word)) = self.pred_answer.clone() {
             if answer == key {
+                self.pred_unshown = false;
                 if ask.gated() && confidence < self.opts.complete_conf { return None }
                 self.pred_shown = Some((line, thai, word.clone(), confidence));
                 return Some((word.clone(), format!("{head}{word}"), confidence))
@@ -1279,7 +1284,7 @@ impl Engine {
         if self.pred_ask.as_ref().is_none_or(|(asked, ..)| *asked != key) {
             let before = typethai_core::predict::engine_text(&format!("{line}{head}"), &self.det.th_dict);
             self.pred_ask = Some((key, tail.to_string(), thai));
-            self.pred_answer = None;
+            self.pred_answer = None; self.pred_unshown = false;
             if let Some(p) = &self.predict { p.ask(key, before, tail.to_string()) }
         }
         None

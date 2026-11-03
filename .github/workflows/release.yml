@@ -3,6 +3,11 @@
 # ed25519 signature (`<asset>.sig`) made with UPDATE_SIGNING_KEY.
 # Secrets: MACOS_SIGN_P12 (base64 .p12), MACOS_SIGN_P12_PASSWORD, UPDATE_SIGNING_KEY (ed25519 private key, PEM).
 # The model is not in git: it is a pinned asset of the `model-v4` release (sha256 checked).
+# Run by hand (workflow_dispatch) it is a dry run: everything is built, signed and packaged as v0.0.0-dryrun and kept
+# as workflow artifacts; nothing is published.
+# Speed: tests run beside the builds (only publishing waits for them), the two Mac architectures build on two runners,
+# and the build caches come from main (cache-warm.yml saves them under the same shared-key; a tag's own cache could
+# never be restored by the next tag, so tags do not save one).
 name: release
 on:
   push: { tags: ["v*"] }
@@ -12,6 +17,7 @@ env:
   MODEL_TAG: model-v4
   MODEL_SHA256: 0f1fda0572839d6ba557b989e0fcb0f0f23bf2ce8c3f8c06281a8df0bb991250
   GH_TOKEN: ${{ github.token }}
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dryrun' }}
 jobs:
   # scripts/release-local.sh publishes a finished release (signed updater packages included) and only then creates the
   # tag: the builds below are skipped for it.
@@ -21,18 +27,21 @@ jobs:
     steps:
       - id: c
         run: |
-          n=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name | select(endswith(".sig"))] | length' 2>/dev/null || echo 0)
+          n=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name | select(endswith(".sig"))] | length' 2>/dev/null || echo 0)
           if [ "${n:-0}" -ge 2 ]; then echo "built=true" >> "$GITHUB_OUTPUT"; echo "release already built locally: skipping"; else echo "built=false" >> "$GITHUB_OUTPUT"; fi
   test:
     needs: check
     if: needs.check.outputs.built != 'true'
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: rust } }
+    # tests do not need the shipped binary's optimisation: no LTO and parallel codegen link much faster (same as ci.yml,
+    # so the cache main saves for ci.yml's test job is the one restored here)
+    env: { CARGO_PROFILE_RELEASE_LTO: "off", CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: rust }
+        with: { workspaces: rust, save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: cargo test --release -p typethai-core -p typethai-desktop
       - name: simulate with the release model
         run: |
@@ -40,29 +49,49 @@ jobs:
           echo "$MODEL_SHA256  /tmp/m/typethai.ttm" | sha256sum -c
           out=$(printf 'l;ylfu <Tab>\n' | cargo run -q --release -p typethai-desktop -- --simulate --model /tmp/m/typethai.ttm | tail -1)
           echo "$out"; test "$out" = "สวัสดี "
-  macos:
-    needs: test
+  # One runner per architecture; the universal app is put together and signed in `macos` below. The cache and the
+  # environment match cache-warm.yml's, or main's cache would not be restored (or would rebuild everything).
+  macos-build:
+    needs: check
+    if: needs.check.outputs.built != 'true'
     runs-on: macos-14
+    strategy: { matrix: { target: [aarch64-apple-darwin, x86_64-apple-darwin] } }
+    env: { MACOSX_DEPLOYMENT_TARGET: "12.0" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+        with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: rust }
+        with: { workspaces: rust, shared-key: "release-${{ matrix.target }}", save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - name: build
+        working-directory: rust
+        run: cargo build --release -p typethai-desktop --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "macos-bin-${{ matrix.target }}", path: "rust/target/${{ matrix.target }}/release/typethai-desktop", retention-days: 1 }
+  macos:
+    needs: macos-build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: "macos-bin-*", path: bins }
+      - name: binaries
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            mkdir -p "rust/target/$t/release"; install -m 755 "bins/macos-bin-$t/typethai-desktop" "rust/target/$t/release/typethai-desktop"
+          done
       - name: model
         run: |
           gh release download "$MODEL_TAG" -R "$GITHUB_REPOSITORY" -p typethai.ttm -D model
           echo "$MODEL_SHA256  model/typethai.ttm" | shasum -a 256 -c
-      - name: build + sign + package
+      - name: sign + package
         env:
-          MACOSX_DEPLOYMENT_TARGET: "12.0"
           P12_B64: ${{ secrets.MACOS_SIGN_P12 }}
           MACOS_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
         run: |
           test -n "$P12_B64" || { echo "::error::secret MACOS_SIGN_P12 is not set"; exit 1; }
           export MACOS_SIGN_P12="$RUNNER_TEMP/sign.p12"; echo "$P12_B64" | base64 --decode > "$MACOS_SIGN_P12"
-          (cd rust && for t in aarch64-apple-darwin x86_64-apple-darwin; do cargo build --release -p typethai-desktop --target $t; done)
-          scripts/package-macos.sh "${GITHUB_REF_NAME}" model/typethai.ttm dist
+          scripts/package-macos.sh "$TAG" model/typethai.ttm dist
           rm -f "$MACOS_SIGN_P12"
       - name: smoke test (from the DMG)
         run: |
@@ -80,13 +109,14 @@ jobs:
             dist/*.dmg
             dist/*.zip
   windows:
-    needs: test
+    needs: check
+    if: needs.check.outputs.built != 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: rust }
+        with: { workspaces: rust, shared-key: release-windows, save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - name: build
         working-directory: rust
         run: cargo build --release -p typethai-desktop
@@ -95,7 +125,7 @@ jobs:
         run: |
           gh release download $env:MODEL_TAG -R $env:GITHUB_REPOSITORY -p typethai.ttm -D model
           if ((Get-FileHash model/typethai.ttm -Algorithm SHA256).Hash.ToLower() -ne $env:MODEL_SHA256) { throw "model sha256 mismatch" }
-          $d = "dist/typeThai-$env:GITHUB_REF_NAME-windows-x86_64"; New-Item -ItemType Directory -Force $d | Out-Null
+          $d = "dist/typeThai-$env:TAG-windows-x86_64"; New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item rust/target/release/typethai-desktop.exe, model/typethai.ttm, LICENSE, DATA_LICENSES.md, README.md $d
           Compress-Archive -Path $d -DestinationPath "$d.zip"
       - name: installer
@@ -103,7 +133,7 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; if ($LASTEXITCODE) { throw "innosetup install failed" } }
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:TAG
           & $iscc "/DAppVersion=$($tag.TrimStart('v'))" "/DTag=$tag" "/DSrc=$PWD\dist\typeThai-$tag-windows-x86_64" "/O$PWD\dist" packaging\typethai.iss
           if ($LASTEXITCODE) { throw "iscc failed" }
       - uses: actions/upload-artifact@v4
@@ -113,8 +143,8 @@ jobs:
             dist/*.zip
             dist/*-setup.exe
   release:
-    needs: [macos, windows]
-    if: always() && needs.macos.result == 'success'
+    needs: [test, macos, windows]
+    if: always() && github.ref_type == 'tag' && needs.test.result == 'success' && needs.macos.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,7 +166,7 @@ jobs:
           rm -f "$key"
       - name: publish
         run: |
-          tag="${GITHUB_REF_NAME}"; pre=""; case "$tag" in *-*) pre="--prerelease";; esac
+          tag="$TAG"; pre=""; case "$tag" in *-*) pre="--prerelease";; esac
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" $pre --title "typeThai $tag" --notes-file .github/release-notes.md
           gh release download "$MODEL_TAG" -p typethai.ttm -D artifacts/model
           shopt -s nullglob
