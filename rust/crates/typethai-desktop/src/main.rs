@@ -20,7 +20,7 @@ fn main() {
         // !th, !en or !typo is offered for that reason), --vertical (ask for rows, not a strip), --light,
         // --backdrop light|dark (a window of text behind the bubble), --hold P (Tab held over it, P of the way to the rows),
         // --shift (Shift held: the thumbs on the options offered in Thai), --update (the rail carries its download chip)
-        let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = false; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None; let mut update = false;
+        let mut hold: Option<f32> = None; let mut pts = vec![]; let mut secs = 3.0; let mut shot: Option<String> = None; let mut items: Vec<Vec<bridge::Opt>> = vec![]; let mut select = 0usize; let mut focused = engine::Rail::Out; let mut layout = bridge::BubbleLayout::Horizontal; let mut light = false; let mut backdrop = None; let mut update = false;
         let mut it = args[i + 1..].iter();
         while let Some(a) = it.next() {
             if a == "--secs" { secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(3.0); continue }
@@ -30,7 +30,8 @@ fn main() {
             if a == "--items" { items.extend(it.next().map(|s| s.split('|').map(demo_opt).collect())); continue }
             if a == "--backdrop" { backdrop = match it.next().map(String::as_str) { Some("light") => Some(true), Some("dark") => Some(false), b => { eprintln!("--backdrop: expected light or dark, got {b:?}"); std::process::exit(2) } }; continue }
             if a == "--vertical" { layout = bridge::BubbleLayout::Vertical; continue }
-            if a == "--focused" { focused = true; continue }
+            if a == "--focused" { focused = engine::Rail::Arrows; continue }
+            if a == "--focused-tab" { focused = engine::Rail::Tab; continue }
             if a == "--light" { light = true; continue }
             if a == "--shift" { bridge::SHIFT_HELD.store(true, std::sync::atomic::Ordering::SeqCst); continue }
             if a == "--update" { update = true; continue }

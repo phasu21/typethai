@@ -53,14 +53,14 @@ pub fn run(mut app: App) {
                 println!("  [selected: {sel:?}]");
                 i += sel.chars().count() + "<SEL:>".len(); selection = Some(sel); continue
             }
-            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>",
+            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Tab>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>",
                 "<Rate+1>", "<Rate+2>", "<Rate+3>", "<Rate+4>", "<Rate-1>", "<Rate-2>", "<Rate-3>", "<Rate-4>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
                 i += t.chars().count() - 1;
                 if t == "<TH>" || t == "<EN>" { app.engine.set_thai_active(t == "<TH>"); println!("  [input source: {}]", if t == "<TH>" { "Thai" } else { "ABC" }); i += 1; continue }
                 if t == "<Focus>" || t == "<Blur>" { for a in app.engine.on_focus(t == "<Focus>") { println!("  {t} -> {a:?}") } i += 1; continue }
-                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
+                match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<S-Tab>" => (Some(Key::TabBack), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
                     "<C-1>" | "<C-2>" | "<C-3>" => (Some(Key::PickRow(t.as_bytes()[3] as usize - b'1' as usize)), None),
                     _ if t.starts_with("<Rate") => (Some(Key::Hotkey(Hotkey::Rate(t.as_bytes()[6] as usize - b'1' as usize, t.as_bytes()[5] == b'+'))), None),
                     _ => (Some(Key::Esc), None) }

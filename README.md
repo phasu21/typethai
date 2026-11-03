@@ -4,8 +4,8 @@
 and typeThai offers `สวัสดี`. It also works the other way: `ร กนืะ าืนไ` typed on the Thai layout becomes `i dont know`.
 
 typeThai runs in the menu bar (macOS) or the system tray (Windows). When it recognises a word typed on the wrong layout,
-it shows a small suggestion bubble at your text caret. Press **Tab** to apply the suggestion. It never changes your text
-unless you press a key.
+it shows a small suggestion bubble at your text caret. Tap **Tab** to highlight a suggestion (tap again for the next
+one) and press **Space** to apply it. It never changes your text unless you press a key.
 
 > **Status: v0.1.0-beta.** The macOS builds work on the author's machine. **Windows builds are untested beta.**
 > Please report issues.
@@ -15,8 +15,9 @@ unless you press a key.
 - **Both directions.** English keys meant as Thai (Kedmanee), and English typed while the Thai layout is active.
   Multi-word phrases work too (`i dont know`).
 - **You decide when to convert.** Space, Enter and punctuation always pass through unchanged. The bubble offers the
-  conversion for the word you are typing or the one you just finished. **Tab** applies it, and **⌃⌥Z** undoes it.
-- **Keyboard-driven bubble.** **Shift+↑ / Shift+↓** choose an option, **Esc** or **Enter** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
+  conversion for the word you are typing or the one you just finished. **Tab** then **Space** applies it, and **⌃⌥Z**
+  undoes it.
+- **Keyboard-driven bubble.** **Tab** taps (and **Shift+Tab**) or **Shift+↑ / Shift+↓** choose an option, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
 - **Mid-word suggestions.** The bubble appears while you are still typing, from the third character, once the word
   is clearly Thai. You do not have to press Space first. Two-key words are offered after Space.
@@ -142,32 +143,37 @@ which opens the release page.
 
 Each bubble option shows the keys that apply it. In the horizontal strip the highlighted option is drawn a little larger
 and the others dimmed, and each button wears its key on its top-left
-corner: `Tab` on the highlighted option (`↵` once the arrow keys are in the strip) and the others their number (hold Tab
+corner: `Tab` on the highlighted option (`␣` once a Tab tap is in the strip, `↵` once the arrow keys are) and the others their number (hold Tab
 and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
 on the others. Options are numbered from the left in the strip and from the top in rows.
 
 | Key | Action |
 |---|---|
-| **Tab** (bubble visible) | Apply the highlighted option when Tab is released |
+| **Tab** (bubble visible) | Highlight the first option; each further tap highlights the next, wrapping around. Nothing is applied yet (Settings → Word suggestions → **Tab key**: *Highlight, then Space*, the default; prefs.json `"tab_cycles"`). With *Accept right away* a Tab tap applies the highlighted option, as before |
+| **Shift+Tab** (after a Tab tap) | Highlight the previous option, wrapping around. Without a Tab tap first, Shift+Tab reaches the app as usual |
+| **Space** (after a Tab tap) | Apply the highlighted option. When it finishes the word you are typing, the space is typed after it; after a finished word (it already has its space), a next word or the ⌃⌥R options, nothing is added. Without a Tab tap, Space is always a normal space |
+| **Enter** or **↑** (after a Tab tap) | Apply the highlighted option, with nothing typed after it |
+| **← / →** (after a Tab tap) | Move the highlight too. **↓**, typing any other key, a click elsewhere or switching apps drops the highlight and changes nothing |
 | **Hold Tab + 1 / 2 / 3** | Apply option 1 / 2 / 3 (the digit is not typed) |
 | **Click** an option | Apply that option |
 | **Space** (Accept with: Tab or Space) | Apply the highlighted mid-word conversion (`l;ylfu` → สวัสดี), then type the space. Over a completion or any other row, Space is a normal space |
 | **Shift+↑ / Shift+↓** | Move the highlight (in the strip too; Shift+←/→ still select text in the app) |
 | **Hold Shift**, click 👍 / 👎 on an option offered in Thai | Rate that conversion of the word you typed. Its key hint turns into the two thumbs while Shift is held. 👎 moves it behind every other option, now and each time that word is offered again (`ok ` → lets \| done \| cool \| นา, Tab takes lets); it is still offered, first when it is the only option. 👍 puts it back in front. Kept in `prefs.json` as `"offer_last"` |
 | **↑**, then **← / →**, then **↑** or **Enter** (Pick with: Arrow keys) | ↑ moves into the bubble, ←/→ pick, ↑ again or Enter applies; ↓, Esc or typing leaves. On by default; until ↑ the arrow keys move the cursor |
-| **Esc** | Dismiss the bubble |
+| **Esc** | Dismiss the bubble, with or without a highlight, and change nothing. Esc is not passed to the app while the bubble is up (so it does not also close a dialog); with no bubble it reaches the app. The bubble stays away until you type again: a pause does not bring it back for the same word |
 | **⌃⌥1 / ⌃⌥2 / ⌃⌥3** | Apply row 1 / 2 / 3 (Ctrl+Alt on Windows) |
 | **Ctrl+1 / 2 / 3** (Pick with: Ctrl+1–3) | Apply row 1 / 2 / 3. Off by default; with no bubble up the keys reach the app |
 | **⌃⌥Z** | Undo the last conversion |
 | **⌃⌥X** | Force-convert the current or last word |
 | **⌃⌥G** | Guess-convert: flip layout and apply the top typo suggestion in one step |
 | **⌃⌥P** | Pause / resume (also in the tray menu) |
-| **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN* / *Finish sentence locally*; Tab replaces the selection. With nothing selected: options for the word before the caret |
-| **Hold Tab** (200 ms; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour) |
+| **⌃⌥R** | Options for the selected text: other layout, typos fixed, then AI *Fix typos* / *Translate TH↔EN* / *Finish sentence locally*; tap Tab to highlight one (again for the next), then Space or Enter replaces the selection. Space without a Tab tap types over the selection as usual. With nothing selected: options for the word before the caret |
+| **Hold Tab** (200 ms; Settings → AI rewrite → Hold Tab for: 200 ms to 1 s) | The ⌃⌥R options, for the selected text or the word before the caret. A quick tap is a normal Tab, sent when you release it; holding Tab no longer repeats it. Past a tap, a filling bar shows the hold (a small Rewrite pill over the caret, or the bubble's Tab key filling in the accent colour). Holding never applies anything: let go, then Tab taps choose and Space or Enter confirms |
 | **Tab+R** | Hold Tab and press R: the ⌃⌥R options, without waiting. Typing on from Tab quickly types the Tab as usual |
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
-there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is and whether Space also
+there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is, what a Tab tap does
+(**Tab key**: *Highlight, then Space* by default, or *Accept right away*; prefs.json `"tab_cycles"`), whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
 default, or Vertical; prefs.json `"bubble_layout"`), which keys pick a row
 (**Pick with**: Arrow keys by default, Ctrl+1–3, or both; prefs.json `"pick_with_arrows"` and `"pick_with_ctrl"`), whether the input language shows over the
@@ -192,8 +198,9 @@ click elsewhere or switching apps cancels a rewrite at any step. Without a key, 
 rows and *Finish sentence locally*; with **Offer AI rewrite** off, only the layout and spelling rows. Long
 selections (over 300 characters) get only the AI actions, and the local completion accepts up to 512 characters.
 
-When no bubble is shown, Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
-in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey.
+When no bubble is shown, Tab, Shift+Tab, Shift+arrows and Esc behave normally. Press **Tab** twice in a row (without typing
+in between) to run the guess-convert on the current or last word instead of using the `⌃⌥G` hotkey; then tap Tab and
+press Space to apply the guess (with *Accept right away*, a third Tab applies it).
 
 ### Command-line flags (`typethai-desktop` / `typeThai.app/Contents/MacOS/typethai-desktop`)
 
@@ -205,11 +212,11 @@ in between) to run the guess-convert on the current or last word instead of usin
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
 | `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<S-Tab>` is Shift+Tab; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
 | `--rank-report [FILE]` | Print what the bubble offered and which row was picked, over the log of this machine (`rank.jsonl` beside the state file, or FILE) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
-| `--demo-bubble [--items "a\|b" ...] [--select N] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--screenshot` prints a layout self-check |
+| `--demo-bubble [--items "a\|b" ...] [--select N] [--focused \| --focused-tab] [--vertical] [--light] [--screenshot PNG]` | Show the bubble with sample options (no key capture). Repeated `--items` update it in place; `--focused` / `--focused-tab` show the keycap the arrow keys / a Tab tap give the highlighted option (`↵` / `␣`); `--screenshot` prints a layout self-check |
 | `--demo-badge [x,y ...] [--en] [--pin] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the input-language badge at a fake caret, Thai first, then taking turns (no key capture); `--pin` shows it as the focus preview, which stays up |
 | `--demo-hold [x,y ...] [--progress P] [--light] [--backdrop light\|dark] [--screenshot PNG]` | Show the hold-Tab indicator at a fake caret, filling as a real hold does (or stopped at P); `--demo-bubble --hold P` shows it on the bubble's Tab key |
 | `--settings [--settings-page N]` | Open the Settings window at launch (0 Word suggestions … 3 AI rewrite), for when the menu-bar icon is hidden |
