@@ -1,5 +1,25 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.22**
+- **The suggestions go when you leave the text field.** They used to stay on screen until your next key after you
+  switched apps with a gesture, an app or a notification took focus, a window closed, or Enter sent a message and moved
+  focus away, so typeThai looked frozen. They now go as soon as focus leaves the field, on macOS and Windows.
+- **Holding Tab over selected text no longer applies an option by itself.** Keeping Tab down past the key-repeat delay
+  could paste the first option, or start an AI rewrite, the moment you let go. Holding Tab now only opens the options;
+  nothing changes until you confirm with a fresh Tab, Enter, ↑ into the options and ↑ again, or a click. Esc or leaving
+  the field cancels.
+
+**New in 0.5.22**
+- **The other keyboard layout is always offered for selected text.** Select text and hold Tab: the selection re-typed
+  on the other layout (`l;ylfu` ⇄ สวัสดี) is always one of the options, even for words typeThai does not know or
+  mashed keys. A conversion typeThai is sure of still comes first, and a spelling fix comes before the swap.
+- **The rewrite options use the suggestion strip.** Holding Tab on a selection now shows its options as the same row of
+  buttons as word suggestions, picked the same way (Tab, ↑ then ←/→, a click). Long text is shortened on its button;
+  Tab still pastes all of it. With Settings → Word suggestions → Bubble layout on rows, they stack as before.
+- **A switch for *Finish sentence locally*.** Settings → AI rewrite → Local → *Finish sentence locally*, off unless
+  you turn it on. When on, the option shows only while Ollama is running with the model downloaded; *Fix typos* and
+  *Translate TH↔EN* show only with an API key saved.
+
 **Fixed in 0.5.21**
 - **Windows: fast typing no longer stutters.** Typing quickly, words the spell checker does not know above all (`aswd
   aswd`), made typing hitch and typeThai use more and more CPU: every Space and every short pause waited for the
