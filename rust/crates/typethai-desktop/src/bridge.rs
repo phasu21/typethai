@@ -13,6 +13,9 @@ pub enum UiMsg {
     /// The keys moved into / out of the bubble: the highlighted option's keycap says Enter while the arrow keys are in
     /// it, Space while a Tab tap is.
     Focus(Rail),
+    /// Space applies the highlighted option with the keys outside the bubble (`TabKey::SpaceApplies`): its keycap says
+    /// Space instead of Tab.
+    SpaceKey(bool),
     /// `layout`: what the bubble asks for; `layout` falls back to rows when a strip does not fit.
     Show { items: Vec<Opt>, layout: BubbleLayout, anchor: Anchor },
     /// The caret moved while the bubble is shown: re-place it (same size; skipped if the rect doesn't change).

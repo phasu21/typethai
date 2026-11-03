@@ -284,6 +284,7 @@ unsafe fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::SwitchInput(l) => switch_input(GetForegroundWindow(), l),
         Action::Select(i) => { let _ = st.tx.send(UiMsg::Select(i)); }
         Action::Focus(f) => { let _ = st.tx.send(UiMsg::Focus(f)); }
+        Action::SpaceKey(on) => { let _ = st.tx.send(UiMsg::SpaceKey(on)); }
         Action::ShowBubble(items) => { let an = anchor(st); let _ = st.tx.send(UiMsg::show(items, st.app.engine.opts.bubble, an)); arm_caret_follow(st); }
         Action::HideBubble => { bridge::set_geom(None); let _ = st.tx.send(UiMsg::Hide); }
         Action::Rewrite(job) => st.worker.submit(job),

@@ -143,15 +143,16 @@ which opens the release page.
 
 Each bubble option shows the keys that apply it. In the horizontal strip the highlighted option is drawn a little larger
 and the others dimmed, and each button wears its key on its top-left
-corner: `Tab` on the highlighted option (`␣` once a Tab tap is in the strip, `↵` once the arrow keys are) and the others their number (hold Tab
+corner: `␣` on the highlighted option while Space applies it (`Tab` when it does not, `↵` once the arrow keys are in the strip) and the others their number (hold Tab
 and press it). Stacked rows show `Tab` on the highlighted row and `Tab` `2` and `Tab` `3`
 on the others. Options are numbered from the left in the strip and from the top in rows.
 
 | Key | Action |
 |---|---|
-| **Tab** (bubble visible) | Highlight the first option; each further tap highlights the next, wrapping around. Nothing is applied yet (Settings → Word suggestions → **Tab key**: *Highlight, then Space*, the default; prefs.json `"tab_cycles"`). With *Accept right away* a Tab tap applies the highlighted option, as before |
+| **Space** (while you type a word, `␣` on the highlighted option) | Apply the highlighted option, usually option 1, and type the space after it. Only when the option finishes or fixes the word you are typing: a completion, a typo fix, the word typed in the wrong layout. Space is a normal space when no bubble is up, after Esc, when the word you typed is already a whole word (`help` with *helpful* up), when the option is the word as typed, over next-word options (after a finished word) and over the ⌃⌥R options (Settings → Word suggestions → **Tab key**: *Space applies, Tab moves*, the default; prefs.json `"tab_key": "space_applies"`) |
+| **Tab** (bubble visible) | Move the highlight to the next option, wrapping around; nothing is applied. Where Space was about to apply option 1, the first tap goes straight to option 2; elsewhere (next words, the ⌃⌥R options) it highlights option 1. With *Highlight, then Space* (`"highlight"`, the 0.5.23 default) the first tap always highlights option 1 and Space never applies without a tap. With *Accept right away* (`"accept"`) a Tab tap applies the highlighted option, as before 0.5.23 |
 | **Shift+Tab** (after a Tab tap) | Highlight the previous option, wrapping around. Without a Tab tap first, Shift+Tab reaches the app as usual |
-| **Space** (after a Tab tap) | Apply the highlighted option. When it finishes the word you are typing, the space is typed after it; after a finished word (it already has its space), a next word or the ⌃⌥R options, nothing is added. Without a Tab tap, Space is always a normal space |
+| **Space** (after a Tab tap) | Apply the highlighted option, whatever it is. When it finishes the word you are typing, the space is typed after it; after a finished word (it already has its space), a next word or the ⌃⌥R options, nothing is added |
 | **Enter** or **↑** (after a Tab tap) | Apply the highlighted option, with nothing typed after it |
 | **← / →** (after a Tab tap) | Move the highlight too. **↓**, typing any other key, a click elsewhere or switching apps drops the highlight and changes nothing |
 | **Hold Tab + 1 / 2 / 3** | Apply option 1 / 2 / 3 (the digit is not typed) |
@@ -173,7 +174,8 @@ on the others. Options are numbered from the left in the strip and from the top 
 
 The menu-bar icon also has **Settings…** (or launch with `--settings` when the icon is hidden behind the notch). From
 there you can choose when word suggestions show (Off, After a pause, While typing), how long the pause is, what a Tab tap does
-(**Tab key**: *Highlight, then Space* by default, or *Accept right away*; prefs.json `"tab_cycles"`), whether Space also
+(**Tab key**: *Space applies, Tab moves* by default, *Highlight, then Space*, or *Accept right away*; prefs.json `"tab_key"`.
+A prefs.json from 0.5.23 with `"tab_cycles": true`, its default, opens on the new default; `false` opens on *Accept right away*), whether Space also
 accepts a word typed in the wrong layout (**Accept with**: Tab, or Tab or Space), the **Bubble layout** (Horizontal by
 default, or Vertical; prefs.json `"bubble_layout"`), which keys pick a row
 (**Pick with**: Arrow keys by default, Ctrl+1–3, or both; prefs.json `"pick_with_arrows"` and `"pick_with_ctrl"`), whether the input language shows over the

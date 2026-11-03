@@ -356,6 +356,7 @@ fn run_actions(st: &mut State, acts: Vec<Action>) {
         Action::SwitchInput(l) => *bridge::REQ_SWITCH_INPUT.lock().unwrap() = Some(l),
         Action::Select(i) => send(UiMsg::Select(i)),
         Action::Focus(f) => send(UiMsg::Focus(f)),
+        Action::SpaceKey(on) => send(UiMsg::SpaceKey(on)),
         Action::ShowBubble(items) => {
             send(UiMsg::show(items, st.app.engine.opts.bubble, unsafe { anchor() }));
             // the tap sees the key before the app moves its caret
