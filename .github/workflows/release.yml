@@ -47,7 +47,7 @@ jobs:
         run: |
           gh release download "$MODEL_TAG" -R "$GITHUB_REPOSITORY" -p typethai.ttm -D /tmp/m
           echo "$MODEL_SHA256  /tmp/m/typethai.ttm" | sha256sum -c
-          out=$(printf 'l;ylfu <Tab>\n' | cargo run -q --release -p typethai-desktop -- --simulate --model /tmp/m/typethai.ttm | tail -1)
+          out=$(printf 'l;ylfu \n' | cargo run -q --release -p typethai-desktop -- --simulate --model /tmp/m/typethai.ttm | tail -1)
           echo "$out"; test "$out" = "สวัสดี "
   # One runner per architecture; the universal app is put together and signed in `macos` below. The cache and the
   # environment match cache-warm.yml's, or main's cache would not be restored (or would rebuild everything).
@@ -99,7 +99,7 @@ jobs:
           bin="$mnt/typeThai.app/Contents/MacOS/typethai-desktop"
           test "$(lipo -archs "$bin")" = "x86_64 arm64"; test -L "$mnt/Applications"
           codesign --verify --deep --strict "$mnt/typeThai.app"
-          out=$(printf 'l;ylfu <Tab>\n' | "$bin" --simulate | tail -1)
+          out=$(printf 'l;ylfu \n' | "$bin" --simulate | tail -1)
           hdiutil detach "$mnt"
           echo "$out"; test "$out" = "สวัสดี "
       - uses: actions/upload-artifact@v4
