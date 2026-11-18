@@ -446,13 +446,27 @@ pub fn recase(w: &str, prefix: &str) -> String {
     if prefix.len() >= 2 && !prefix.chars().any(|c| c.is_ascii_lowercase()) { return w.to_ascii_uppercase() }
     w[..1].to_ascii_uppercase() + &w[1..]
 }
+/// The shortest tail the out-of-dictionary fallback of `thai_tail` reads: one or two keys extend nearly anything.
+pub const OOV_TAIL_MIN: usize = 3;
+/// The fallback reads only a run that looks like Thai: its mean log probability per char under the Thai char trigrams
+/// is at least this. On the LATTE spike's partial-word cases (docs/research/latte-wordseg-spike.md, section 3), 99.6-99.8%
+/// of real runs with an out-of-dictionary head pass, against 8-10% of English words and key mash typed on the Thai
+/// layout.
+pub const OOV_RUN_MIN_LOGP: f64 = -4.0;
 /// Thai text has no spaces: the char index where the last (incomplete) word of `run` starts. Longest tail first
 /// (at most 16 chars, at least `min`) that the completer can extend and whose head is fully dictionary-covered; when
-/// none can, and `slips` is given, the longest that it can extend read with one slip.
-pub fn thai_tail(run: &str, dict: &Dict, completer: &Completer, min: usize, slips: Option<&Slips>) -> Option<usize> {
+/// none can, and `slips` is given, the longest that it can extend read with one slip. When neither finds one, the head
+/// likely holds a word the dictionary lacks (a name, jargon, a typo): with `thai` given, the longest tail of at least
+/// `OOV_TAIL_MIN` chars that the completer extends, if the run reads as Thai (`OOV_RUN_MIN_LOGP`).
+pub fn thai_tail(run: &str, dict: &Dict, completer: &Completer, min: usize, slips: Option<&Slips>, thai: Option<&Ngram>) -> Option<usize> {
     let at: Vec<usize> = run.char_indices().map(|(b, _)| b).collect(); let n = at.len();
     let tails = || (min.max(1)..=n.min(16)).rev().map(|len| n - len);
     let head_ok = |i: usize| i == 0 || dict.coverage_min(&run[..at[i]], 1) == 1.0;
     tails().find(|&i| completer.extends(&run[at[i]..]) && head_ok(i))
         .or_else(|| { let s = slips?; tails().find(|&i| completer.extends_slipped(&run[at[i]..], s) && head_ok(i)) })
+        .or_else(|| {
+            let ng = thai?;
+            if ng.mean_log_prob(run) < OOV_RUN_MIN_LOGP { return None }
+            tails().find(|&i| i > 0 && n - i >= OOV_TAIL_MIN && completer.extends(&run[at[i]..]))
+        })
 }

@@ -21,6 +21,13 @@ pub fn watch_wake() {
     #[cfg(target_os = "macos")] { macos::watch_wake() }
 }
 
+/// Watch for another app coming to the front however it got there (a trackpad gesture, an app activating itself), so
+/// the bubble is not left up over the app the user has gone from until the next key. Windows reads the window in front
+/// on its timer instead.
+pub fn watch_front_app() {
+    #[cfg(target_os = "macos")] { macos::watch_front_app() }
+}
+
 pub fn run(app: crate::app::App) {
     #[cfg(windows)] { windows::run(app) }
     #[cfg(target_os = "macos")] { macos::run(app) }

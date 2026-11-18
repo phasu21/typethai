@@ -1,5 +1,51 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.24**
+- **Space uses the suggestion, Tab moves to the next.** While you type a word, the first suggestion is highlighted and
+  Space uses it, then types the space; no Tab tap needed. Tap Tab to move to the next suggestion (the first tap goes
+  straight to the second one), Shift+Tab to go back, then Space to use it. Space is still just a space when there are
+  no suggestions, after Esc, when the word you typed is already a whole word, over next-word suggestions after a
+  finished word, and over the rewrite options for selected text. There, tap Tab to highlight one first. The highlighted
+  suggestion shows ␣ when Space will use it.
+- **Your Tab key setting moved to the new default.** If Settings → Word suggestions → **Tab key** was on 0.5.23's
+  *Highlight, then Space*, it is now *Space applies, Tab moves*. Both earlier choices are still there:
+  *Highlight, then Space* (Space only after a Tab tap) and *Accept right away* (a Tab tap uses the suggestion).
+  *Accept right away* stays as it was.
+
+**New in 0.5.23**
+- **Tab moves through the suggestions, Space picks one.** With suggestions showing, tap Tab to highlight one (the
+  first tap highlights the first suggestion), tap again for the next, and Shift+Tab to go back. Press Space to use the
+  highlighted one: when it finishes the word you are typing, the space comes after it. Enter or ↑ also use it. Until
+  you tap Tab, Space is just a space, and typing anything else drops the highlight without changing your text. Holding
+  Tab works as before: Tab + 1–3 picks directly, and holding Tab on selected text opens the rewrite options, where Tab
+  taps choose and Space or Enter replaces the selection. Prefer the old way? Settings → Word suggestions → **Tab key**:
+  *Accept right away*.
+
+**Fixed in 0.5.23**
+- **Esc closes the suggestions.** Esc now hides the suggestions, whether or not one is highlighted, without changing
+  your text and without also closing the app's dialog. They stay away until you type again; before, a pause could
+  bring them straight back.
+
+**Fixed in 0.5.22**
+- **The suggestions go when you leave the text field.** They used to stay on screen until your next key after you
+  switched apps with a gesture, an app or a notification took focus, a window closed, or Enter sent a message and moved
+  focus away, so typeThai looked frozen. They now go as soon as focus leaves the field, on macOS and Windows.
+- **Holding Tab over selected text no longer applies an option by itself.** Keeping Tab down past the key-repeat delay
+  could paste the first option, or start an AI rewrite, the moment you let go. Holding Tab now only opens the options;
+  nothing changes until you confirm with a fresh Tab, Enter, ↑ into the options and ↑ again, or a click. Esc or leaving
+  the field cancels.
+
+**New in 0.5.22**
+- **The other keyboard layout is always offered for selected text.** Select text and hold Tab: the selection re-typed
+  on the other layout (`l;ylfu` ⇄ สวัสดี) is always one of the options, even for words typeThai does not know or
+  mashed keys. A conversion typeThai is sure of still comes first, and a spelling fix comes before the swap.
+- **The rewrite options use the suggestion strip.** Holding Tab on a selection now shows its options as the same row of
+  buttons as word suggestions, picked the same way (Tab, ↑ then ←/→, a click). Long text is shortened on its button;
+  Tab still pastes all of it. With Settings → Word suggestions → Bubble layout on rows, they stack as before.
+- **A switch for *Finish sentence locally*.** Settings → AI rewrite → Local → *Finish sentence locally*, off unless
+  you turn it on. When on, the option shows only while Ollama is running with the model downloaded; *Fix typos* and
+  *Translate TH↔EN* show only with an API key saved.
+
 **Fixed in 0.5.21**
 - **Windows: fast typing no longer stutters.** Typing quickly, words the spell checker does not know above all (`aswd
   aswd`), made typing hitch and typeThai use more and more CPU: every Space and every short pause waited for the

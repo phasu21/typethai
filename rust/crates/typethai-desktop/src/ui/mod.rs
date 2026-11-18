@@ -9,7 +9,7 @@
 //! The input-language badge is a second such window, shown for a moment over the caret when the input source changes
 //! (`badge`). On macOS it ignores the mouse; on Windows the mouse hook swallows a click on it and takes it down.
 use crate::badge::{self, Cmd};
-use crate::engine::{Hold, InputLang};
+use crate::engine::{Hold, InputLang, Rail};
 use crate::bridge::{self, BubbleLayout, Geom, Layout, Opt, UiMsg, FONT_PX, PAD, ROW_H, ROW_PX};
 use crate::engine::Reason;
 use crate::update;
@@ -31,8 +31,12 @@ pub struct BubbleView {
     pub items: Vec<Opt>, pub layout: Layout,
     /// Highlighted row (Tab applies it); 0 on every new bubble.
     pub selected: usize,
-    /// The arrow keys are in the bubble: Enter applies the highlighted option too, and its keycap says so.
-    pub focused: bool,
+    /// The keys are in the bubble: with the arrow keys Enter applies the highlighted option too, after a Tab tap Space
+    /// does, and its keycap says so.
+    pub focused: Rail,
+    /// Space applies the highlighted option with the keys outside the bubble (`TabKey::SpaceApplies`): its keycap says
+    /// Space while `focused` is `Rail::Out`.
+    pub space: bool,
     /// Tab held over the bubble: the accent sweeps across the highlighted option's Tab key as it fills.
     pub hold: Option<Hold>,
     /// The panel's bounds as actually laid out by gpui in the last frame (logical px, window-relative).
@@ -64,8 +68,8 @@ impl Render for BubbleView {
         // unwraps None and the app aborts (seen at launch, in `did_finish_launching`).
         if self.marker { return div().size_full().bg(rgb(0xff2d2d)).into_any_element() }
         let t = cx.theme(); let l = &self.layout; let selected = self.selected;
-        // the strip's pill is too small for "Enter"
-        let (apply_key, apply_pill) = if self.focused { ("Enter", "↵") } else { ("Tab", "Tab") };
+        // the strip's pill is too small for "Enter"; "Space" is too wide for either keycap
+        let (apply_key, apply_pill) = match self.focused { Rail::Arrows => ("Enter", "↵"), Rail::Tab => ("␣", "␣"), Rail::Out if self.space => ("␣", "␣"), Rail::Out => ("Tab", "Tab") };
         let hold = self.hold.map(|h| h.progress(Instant::now()));
         let shift = bridge::SHIFT_HELD.load(std::sync::atomic::Ordering::SeqCst) || window.modifiers().shift;
         let dark = t.is_dark();
@@ -280,7 +284,7 @@ impl Ui {
             // rows only know their height once laid out: the same layout as the bubble on screen (typing on, rows
             // refreshed in place) keeps its real size, so the window is not resized to the guess and back
             let size = if visible && l == view.read(cx).layout { real } else { (l.w, l.h) };
-            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.focused = false; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
+            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.focused = Rail::Out; v.space = false; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
             Some(size)
         }).ok().flatten()?;
         self.anchor = Some(anchor); self.size = (0.0, 0.0);
@@ -380,7 +384,7 @@ fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut A
 }
 fn open_bubble(cx: &mut App) -> Ui {
     let tip = TooltipWin::open(cx);
-    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical, false), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false, update: false, tip: Some(tip) }));
+    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: Rail::Out, space: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical, false), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false, update: false, tip: Some(tip) }));
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![], shift: false }
 }
 
@@ -591,6 +595,7 @@ pub fn run(rx: Receiver<UiMsg>) {
     app().run(move |cx| {
         setup(cx);
         super::platform::watch_wake();
+        super::platform::watch_front_app();
         let mut ui = open_bubble(cx);
         let mut badge = BadgeWin::open(cx);
         let tray = super::platform::tray::Tray::new().map_err(|e| eprintln!("tray: {e}")).ok();
@@ -619,6 +624,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                         UiMsg::Select(i) => { ui.view.update(cx, |v, cx| { v.selected = i; cx.notify(); });
                             if let Some(mut g) = bridge::geom() { g.solid = ui.laid_solid(cx); g.thumbs = ui.laid_thumbs(cx); bridge::set_geom(Some(g)) } }
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
+                        UiMsg::SpaceKey(on) => ui.view.update(cx, |v, cx| { v.space = on; cx.notify(); }),
                         UiMsg::Paused(p) => { if p { badge.clicked(cx) } if let Some(t) = &tray { t.set_paused(p) } },
                         UiMsg::Stopped => stop = true,
                         UiMsg::Settings(snap) => { if !snap.input_badge { badge.unpin(cx) } settings::apply_snapshot(&mut settings_win, snap, cx) },
@@ -720,7 +726,7 @@ pub fn demo_items() -> Vec<Opt> {
 /// while typing. With `shot`, shows once (first point or main-monitor centre), lets it lay out and paint,
 /// prints native vs. laid-out geometry and a per-option self-check, captures the bubble's own window to `shot` (PNG), and quits.
 /// `backdrop` (Some(true): light) opens a window of sample text behind the first point, to see the bubble over an app.
-pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: bool, hold: Option<f32>, wanted: BubbleLayout, light: bool, backdrop: Option<bool>, update: bool) {
+pub fn demo(points: Vec<(f64, f64)>, secs: f64, shot: Option<String>, sets: Vec<Vec<Opt>>, select: usize, focused: Rail, hold: Option<f32>, wanted: BubbleLayout, light: bool, backdrop: Option<bool>, update: bool) {
     let sets = if sets.is_empty() { vec![demo_items()] } else { sets };
     app().run(move |cx| {
         setup(cx);
@@ -932,7 +938,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         complete_idle: std::time::Duration::from_millis(crate::engine::COMPLETE_IDLE_DEFAULT_MS), tab_hold: crate::engine::TAB_HOLD,
         learn_words: true,
         predict: true,
-        accept: crate::engine::AcceptKeys::default(), pick_ctrl: false, pick_arrows: true, input_badge: true,
+        accept: crate::engine::AcceptKeys::default(), tab_key: crate::engine::TabKey::default(), pick_ctrl: false, pick_arrows: true, input_badge: true,
         badge_idle: Some(std::time::Duration::from_millis(crate::engine::BADGE_IDLE_DEFAULT_MS)),
         next_word: true, bubble: bridge::BubbleLayout::default(),
         words_learned: 1250,

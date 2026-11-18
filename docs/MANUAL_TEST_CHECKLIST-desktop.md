@@ -1,3 +1,9 @@
+> **Tab from 0.5.24.** While a word is being typed, Space applies the highlighted option and a Tab tap moves to the
+> next (Settings → Word suggestions → Tab key: *Space applies, Tab moves*, the default). Where an older section below
+> says "Tab applies / replaces / inserts", run it with **Tab key: Accept right away**, or with the default read it as
+> "press Space" mid-word, and "tap Tab, then press Space" elsewhere (Enter where a space must not be typed). See "Space
+> applies, Tab moves", "Tab cycles, Space confirms" and "Esc closes the bubble".
+
 
 ## v9 bubble / anchoring (untested by agent)
 - [ ] `./typethai-desktop --demo-bubble --secs 4`: Thai renders correctly (vowels and tone marks), and the bubble follows light/dark mode.
@@ -22,12 +28,76 @@
 - [ ] Light mode looks right (only dark mode was captured).
 - [ ] Placement is correct near the bottom of the screen with the real size (not captured).
 
+## Space applies, Tab moves (default from 0.5.24; engine tests only, not run live by the agent)
+Key map with Settings → Word suggestions → **Tab key: Space applies, Tab moves** (default, prefs.json `"tab_key":
+"space_applies"`): mid-word, with an option that finishes or fixes the word highlighted (its key hint `␣`), Space = apply
+it and type the space · Tab tap = move the highlight to the next option (first tap: option 2), wrapping · Shift+Tab =
+previous (after a Tab tap) · Space / Enter / ↑ after a tap = apply the highlight · Esc = close the bubble, the next Space is
+a space · hold Tab + 1..3 = apply that option · hold Tab = the ⌃⌥R options, never applies.
+Space is a plain space when: no bubble; after Esc; the word typed is already a whole word (`help` with helpful up); the
+option is the word as typed; next-word options (after `ok ` and a pause, or a Thai run ending on a word with the next
+word offered); the ⌃⌥R options (select text, hold Tab, let go, Space types over the selection).
+- [ ] Type `hel` and pause: help / hello / helmet, the first with `␣` on it (strip and rows). Press Space: `help `, one
+  space, the bubble gone; the next Space is a space.
+- [ ] Type `hel`, pause, tap Tab: hello is highlighted (no tab typed, text unchanged); tap again: helmet; again: help
+  (wraps). Shift+Tab goes back. Press Space: that option, then one space. Enter or ↑ instead: no space or newline.
+- [ ] Type `hel`, pause, Esc: the bubble goes; Space types `hel `.
+- [ ] Type `help` (whole word) while helpful is offered: Space types `help `; Tab, Space gives `helpful `.
+- [ ] Wrong layout: type `l;ylfu` (live สวัสดี up): Space gives `สวัสดี ` with one space and the input source changes to
+  Thai; ⌃⌥Z restores `l;ylfu `.
+- [ ] Thai: type `ภาษ` on the Thai layout, pause: ภาษา highlighted with `␣`; Space gives `ภาษา `.
+- [ ] Next word: type `ok `, pause: the next words show with `Tab` (not `␣`) on the first; Space types a space. Tab
+  highlights the first, Space inserts it with no extra space.
+- [ ] Select text, hold Tab, let go: the options show `Tab`; Space types over the selection. Tap Tab (option 1), Space
+  pastes it.
+- [ ] Typing a letter, ↓ after a tap, a click elsewhere or switching apps: nothing applied, the bubble follows or goes.
+- [ ] Settings → Word suggestions → Tab key lists Space applies, Tab moves / Highlight, then Space / Accept right away;
+  the page description changes with each. Quit and relaunch: kept. A prefs.json from 0.5.23 (`"tab_cycles": true`)
+  opens on Space applies, Tab moves; `"tab_cycles": false` opens on Accept right away.
+- [ ] Windows (Notepad, a browser): the same checks.
+
+## Tab cycles, Space confirms (default in 0.5.23, now Tab key: Highlight, then Space; engine tests and `--simulate` only, not run live by the agent)
+Key map with Settings → Word suggestions → **Tab key: Highlight, then Space** (prefs.json `"tab_key": "highlight"`):
+Tab tap = highlight (first tap: the highlighted option, usually 1; each further tap: the next, wrapping) · Shift+Tab =
+previous (only after a Tab tap) · Space / Enter / ↑ = apply the highlight · ←/→ = move it · ↓, any other key, a click
+elsewhere, switching apps = drop it, no change · Esc = close the bubble, no change · hold Tab + 1..3 = apply that option ·
+hold Tab = the ⌃⌥R options, never applies · click = apply that option.
+- [ ] Type `hel` and pause: help / hello / helmet. Tap Tab: nothing changes in the text, no tab is typed, and the first
+  option's key hint turns into `␣` (strip and rows). Tap Tab twice more: the highlight moves to hello, then helmet; a
+  fourth tap wraps to help. Shift+Tab goes back (help → helmet → hello).
+- [ ] With hello highlighted press Space: the text is `hello ` (one space), the bubble is gone, the next Space is a space.
+- [ ] Without tapping Tab first, Space over the same bubble is just a space: `hel ` and nothing applied. Shift+Tab with
+  no Tab tap reaches the app (reverse focus in a form).
+- [ ] After a Tab tap, Enter applies with no newline and no space; ↑ applies too; ← / → move the highlight.
+- [ ] After a Tab tap, typing a letter drops the highlight and types the letter (`help` stays `help` + letter, nothing
+  applied); ↓ drops the highlight and keeps the bubble; clicking elsewhere or switching apps hides it with no change.
+- [ ] Wrong layout: type `l;ylfu`, tap Tab, Space: `สวัสดี ` with one space, the input source changes to Thai, ⌃⌥Z
+  restores `l;ylfu `. After `l;ylfu ` (space already typed) tap Tab and Space: `สวัสดี ` still with one space.
+- [ ] Next word: type `ok ` and pause; tap Tab, Space: the next word is inserted, no extra space added.
+- [ ] Roll Tab straight into Space (Space down before Tab is up): the first option is applied, then the space. Roll Tab
+  into a letter: nothing applied, the letter is typed.
+- [ ] Hold Tab + 2 still applies option 2 at once (also after a Tab tap); holding Tab with a word bubble up still opens
+  the ⌃⌥R options and applies nothing.
+- [ ] Settings → Word suggestions → Tab key: **Accept right away**: a Tab tap applies the highlighted option as in
+  0.5.22, Space is a space (or, with Accept with: Tab or Space, applies a live conversion as before). The page's
+  description changes with it. Quit and relaunch: the choice is kept; a prefs.json from 0.5.22 opens as Space applies, Tab moves.
+- [ ] Guess: Tab Tab with no bubble shows the guess; tap Tab and press Space to apply it.
+- [ ] Windows (Notepad, a browser): the same checks; Shift+Tab with no bubble still moves focus backwards.
+
+## Esc closes the bubble (0.5.23; engine tests only, not run live by the agent)
+- [ ] With a word bubble up (nothing highlighted) press Esc: the bubble goes, the text is unchanged, and the app does
+  NOT get the Esc (a dialog or a search field stays open). Press Esc again: now the app gets it.
+- [ ] Same after a Tab tap (an option highlighted), and on the ⌃⌥R options (select text, hold Tab, let go, Esc).
+- [ ] After Esc, wait a few seconds without typing: the bubble does not come back for the same word (also on the Thai
+  layout with English typed, e.g. `าืนไ` → know). Type the next letter: suggestions may show again.
+- [ ] Windows: the same checks.
+
 ## Tab+digit (not run live by the agent; engine tests and --simulate only)
 - [ ] With 3 rows up, hold Tab and press 2: row 2 is applied, and the app receives neither the Tab nor the 2.
-- [ ] Hold Tab and press 1: same result as tapping Tab.
+- [ ] Hold Tab and press 1: option 1 is applied (with Tab key: Accept right away, the same as tapping Tab).
 - [ ] Hold Tab past the key-repeat delay, then release: the highlighted row is applied once and no tabs are typed.
 - [ ] With a 1-row bubble, hold Tab and press 3: nothing happens and the bubble stays; releasing Tab does nothing.
-- [ ] Roll Tab straight into Space or the next letter (press it before Tab is up): the row is applied first, then the key, in that order. After a Thai row the letter comes out as Thai.
+- [ ] Tab key: Accept right away — roll Tab straight into Space or the next letter (press it before Tab is up): the row is applied first, then the key, in that order. After a Thai row the letter comes out as Thai. (Default Space applies, Tab moves, and Highlight, then Space: see the sections above.)
 - [ ] With no bubble, hold Tab and press 2: a tab and then 2 are typed, as before.
 - [ ] Windows (Notepad): the same checks.
 
@@ -42,7 +112,7 @@
 - [ ] Windows (Notepad): the same checks.
 
 ## v10 bubble keys / input source / live bubble (not run live by the agent)
-- [ ] With a bubble visible: Tab applies the highlighted row when released, and the app does NOT receive the Tab.
+- [ ] With a bubble visible: a Tab tap moves or sets the highlight (default) or, with Tab key: Accept right away, applies the highlighted row when released; either way the app does NOT receive the Tab.
 - [ ] With no bubble: Tab works normally (indent, focus change), and Shift+Up/Down still select text.
 - [ ] Shift+Up/Down move the highlight (wrapping) and the app receives nothing. Esc closes the bubble and isn't passed to the app; with no bubble, Esc reaches the app.
 - [ ] ⌃⌥1–3 still apply rows 1–3.
@@ -78,7 +148,7 @@
 - [ ] Settings → AI rewrite: Save key with an OpenRouter key shows "Key saved in the Keychain"; reopening Settings still shows it; Save key with an empty field shows "No key saved yet".
 - [ ] Base URL `http://example.com/v1` + Save shows the inline error and saves nothing; `http://localhost:11434/v1` is accepted. Turn off: ⌃⌥R reaches the app untouched.
 - [ ] No key: ⌃⌥R on a selection shows "Add an API key in Settings". Nothing selected: "No selected text found".
-- [ ] TextEdit: select `helo wrld`, ⌃⌥R shows "Fix typos" / "Translate TH↔EN"; Tab shows "Rewriting…", then the result; Tab replaces the selection. ⌘V afterwards pastes what was on the clipboard before.
+- [ ] TextEdit: select `helo wrld`, ⌃⌥R shows the spelling fix and the layout swap, then "Fix typos" / "Translate TH↔EN"; highlight "Fix typos" (Shift+Down, or Up then →) and Tab shows "Rewriting…", then the result; Tab replaces the selection. ⌘V afterwards pastes what was on the clipboard before.
 - [ ] Translate: a Thai sentence becomes English and back; no ครับ/ค่ะ is added to a casual sentence.
 - [ ] Instructions `Answer in UPPERCASE.` + Save: Fix typos and Translate both return uppercase text; reopening Settings still shows the instructions; clearing them + Save goes back to normal output.
 - [ ] Chrome (a textarea and a contenteditable such as Gmail compose), and Slack or VS Code: the rows appear and Tab replaces the selection. VS Code with nothing selected says "No selected text found" and the clipboard is unchanged (no whole-line copy).
@@ -87,6 +157,37 @@
 - [ ] Cancel: Esc, typing a key, a click elsewhere, or switching apps at the preset rows, while "Rewriting…", and at the result: the bubble closes, the text is unchanged, and a late result never appears.
 - [ ] A clipboard manager (Maccy, Raycast, Paste) does not record the pasted result.
 - [ ] Windows Notepad and Edge: select text, Ctrl+Alt+R, Tab, Tab replaces it; the menu bar is not activated by the Alt release; Win+V history has no entry for the result; the previous clipboard comes back.
+
+## Finish sentence locally switch (agent-verified with --demo-settings and engine tests; not run live)
+- [ ] Settings → AI rewrite → Local: a "Finish sentence locally" switch above the model, off on a new install and after
+  updating from a version without it (prefs.json `"rewrite"` → `"local_finish": false`).
+- [ ] Off: select text and hold Tab: no "Finish sentence locally" row, even with Ollama running and the model downloaded.
+  Fix typos / Translate still show when a key is saved.
+- [ ] On, Ollama running with the model: the row shows. Quit Ollama (or pick a model not downloaded): it goes again.
+- [ ] Quit and relaunch: the switch keeps its state; Save on the Cloud tab does not turn it off.
+
+## Select text, then hold Tab to rewrite (engine tests and `--demo-bubble` only; not run live by the agent)
+- [ ] Always the layout swap: select `l;ylfu` and hold Tab: สวัสดี is offered first. Select `สวัสดี`: `l;ylfu`. Select
+  gibberish such as `asdfjkl;` or `qwpzxv`, or Thai no dictionary knows: the whole selection re-typed on the other
+  layout is still offered, with the flag of the language it becomes. Select `l;ylfu world`: สวัสดี world first, then
+  every word swapped. Select `helo wrld` (with the spell checker): the fix first, then the swap, then the AI rows.
+  Select only numbers (`1234`): no swap row.
+- [ ] The rail: with Settings → bubble layout on the strip (the default), the rewrite options show as the same
+  horizontal rail as word suggestions, at the caret / selection, with Tab on the highlighted button and 2, 3 on the
+  next ones. A long selection's buttons end in "…" and Tab still pastes the whole text. With the setting on rows, they
+  stack as before.
+- [ ] Arrow keys on the rail: Up goes into it, ← / → move the highlight, Enter or Up again applies; Shift+Down/Up also
+  move it, and Down leaves it.
+- [ ] Holding Tab only opens the rows: select text and keep Tab down well past the key-repeat delay (2–3 s): the rows
+  open once and stay; nothing is pasted, nothing flickers or reopens, and no tab is typed. Let Tab go: still nothing
+  applied.
+- [ ] Confirm: after letting go, Enter applies the highlighted row; so do Up-into-the-rail then Up, Ctrl+1..3 (when on)
+  and a click on a button. A fresh Tab tap highlights (the hint turns into `␣`), further taps move along, Shift+Tab
+  goes back, and Space or Enter pastes; Space without a Tab tap types over the selection (rows go, nothing pasted).
+  With Tab key: Accept right away, a fresh Tab tap applies the highlighted row as before.
+- [ ] Cancel: Esc (also while Tab is still down), typing, a click elsewhere or switching apps: the rows go and the text
+  is unchanged.
+- [ ] Windows (Notepad, Edge): the same checks.
 
 ## Local sentence completion (⌃⌥R → *Finish sentence locally*; exercised in `--simulate` only, see `docs/research/llm-sentence-completion-in-app.md`)
 - [ ] With no API key saved and **Offer AI rewrite** on, ⌃⌥R on a selection shows *Finish sentence locally* (and no *Fix typos* / *Translate TH↔EN*); with **Offer AI rewrite** off it is gone too.
@@ -122,7 +223,7 @@
 - [ ] Forget learned words: the predicted rows stop being offered (the model was cleared with `words.json`), and typing a line again re-learns it.
 - [ ] While typing (not only after a pause) the predicted row can appear one keystroke after the one that asked for it — it must never move under your fingers: keep typing into a predicted word and the rest of it stays visible until what you type diverges from it.
 - [ ] `--simulate` (no model needed for the row itself, but the model file is): `printf '<EN>ship the zqorbit\n<EN>ship the zqorbit\n<EN>ship the zqor<Idle><Idle>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` prints a `[bubble: >zqorbit | …]` line.
-- [ ] Rank log: `printf '<EN>l;ylfu <Tab>\n<EN>l;y <C-1>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` (with `{"pick_with_ctrl":true}` in `prefs.json` beside it), then `typethai-desktop --rank-report --state /tmp/tt-smoke/personal.json`: `/tmp/tt-smoke/rank.jsonl` holds one line per word the bubble offered, each with the rows that were on it and the row picked (`"pick":{"i":0,"how":"tab"}` and `"how":"digit"`), and the report says how often the first row was picked, with the reflex keys split out. Nothing is logged with **Learn from my typing** off, and **Forget learned words** deletes `rank.jsonl`.
+- [ ] Rank log: `printf '<EN>l;ylfu <Tab>\n<EN>l;y <C-1>\n' | typethai-desktop --simulate --state /tmp/tt-smoke/personal.json` (with `{"pick_with_ctrl":true,"tab_key":"accept"}` in `prefs.json` beside it), then `typethai-desktop --rank-report --state /tmp/tt-smoke/personal.json`: `/tmp/tt-smoke/rank.jsonl` holds one line per word the bubble offered, each with the rows that were on it and the row picked (`"pick":{"i":0,"how":"tab"}` and `"how":"digit"`), and the report says how often the first row was picked, with the reflex keys split out. Nothing is logged with **Learn from my typing** off, and **Forget learned words** deletes `rank.jsonl`.
 
 ## Horizontal bubble (agent-verified with --demo-bubble --screenshot on the Mac, dark and light; not run live)
 - [x] `--demo-bubble --items "ภาษา|ภาษี|ภาษาอังกฤษ" --screenshot x.png`: one strip of three buttons, an outlined `Tab` keycap on the first and filled `2` / `3` on the others; the self-check lines say OK and the panel matches the layout.
@@ -148,6 +249,19 @@
 - [ ] Installed app, fresh machine: the record is cleared once per version (`permission-repair` beside `prefs.json`), the prompt appears, and granting it starts correction without relaunching.
 - [ ] Permission revoked while running: the tap keeps working for that session (macOS does not kill it), and the next launch repairs and re-prompts once.
 - [ ] Tray reads `Accessibility: on` once granted, with the tooltip no longer saying the permission is needed.
+
+## The bubble goes when focus leaves the field (agent-verified with --simulate; the live look at focus is not run)
+- [x] `--simulate`: `<Focus>hel<Idle><Blur>` prints `ShowBubble(...)` after the pause and `HideBubble` on `<Blur>`.
+- [ ] Type `hel` in TextEdit and wait for the rows. Then three-finger swipe to another Space or app, or let another app
+  come forward by itself (a notification you click, a dialog): the bubble goes at once, not on the next key.
+- [ ] Type `hel` in a chat box (Messages, Slack), wait for the rows, then press Enter so the app sends and moves focus
+  off the box: the bubble goes within ~40 ms.
+- [ ] Type `hel`, wait for the rows, then close the window with the mouse on its red button, or let the app move focus
+  away on its own: the bubble goes within about a second.
+- [ ] Open Settings from the tray while the bubble is up: the bubble goes.
+- [ ] Normal typing is unchanged: the rows still come after the pause, Tab / the arrows / a click on a row still apply
+  them, and a bubble left up in a field you are still in stays (no flicker every second).
+- [ ] Windows (Notepad, a browser): the same, including Alt+Tab and a toast taking focus.
 
 ## Input-language preview on focus (agent-verified with --demo-badge --pin; the live look at focus is not run)
 - [x] `--demo-badge --pin --secs 2` keeps the pill up for the whole 2 s (`still up … true`), where `--demo-badge --secs 2` hides it after `SHOW_FOR` (1.2 s).

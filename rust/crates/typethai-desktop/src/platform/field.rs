@@ -38,6 +38,31 @@ impl Gate {
     }
 }
 
+/// While the bubble is up with no key or click since (a key or a click says where focus is), how long before focus is
+/// looked at off-thread: an app can move focus on its own (a window closes, a sheet opens, a send button takes it), and
+/// the bubble must not be left over a field the user has gone from.
+pub const WATCH: Duration = Duration::from_millis(750);
+
+/// The bubble's focus watch: one off-thread look per `WATCH` of quiet while it is up, none while it is down or the
+/// user is typing (each key restarts the wait, and drops a look in flight: its answer predates the key).
+#[derive(Default)]
+pub struct Watch { since: Option<Instant>, inflight: bool }
+impl Watch {
+    /// A key or a click: focus is where the user just was.
+    pub fn input(&mut self, now: Instant) { self.since = Some(now); self.inflight = false; }
+    /// Timer: send a look now? (marks it in flight). `up`: the bubble is showing.
+    pub fn due(&mut self, now: Instant, up: bool) -> bool {
+        if !up { *self = Watch::default(); return false }
+        if self.inflight { return false }
+        let since = *self.since.get_or_insert(now);
+        self.inflight = now.duration_since(since) >= WATCH; self.inflight
+    }
+    /// The look answered (or was lost): the next one is `WATCH` from now.
+    pub fn answered(&mut self, now: Instant) { self.since = Some(now); self.inflight = false; }
+    /// A look is in flight and its answer still counts.
+    pub fn waiting(&self) -> bool { self.inflight }
+}
+
 /// UIA ControlType ids (UIA_*ControlTypeId).
 pub const UIA_EDIT: i32 = 50004; pub const UIA_DOCUMENT: i32 = 50030; pub const UIA_COMBOBOX: i32 = 50003;
 /// UIA focused element: Edit / Document unless read-only, editable ComboBox, else TextPattern (terminals) or a
@@ -137,6 +162,29 @@ mod tests {
     #[test] fn reset_forgets() {
         let t = Instant::now(); let mut g = closed(t); g.touch(t); assert!(g.refresh_due(ms(t, 50), false));
         g.reset(); assert!(g.must_ask(false, true)); assert!(!g.refresh_due(ms(t, 100), false));
+    }
+
+    #[test] fn watch_looks_after_a_quiet_spell_with_the_bubble_up() {
+        let t = Instant::now(); let mut w = Watch::default();
+        assert!(!w.due(t, true), "the wait starts when the bubble is first seen up");
+        assert!(!w.due(t + WATCH / 2, true));
+        assert!(w.due(t + WATCH, true)); assert!(w.waiting());
+        assert!(!w.due(t + WATCH * 3, true), "one look in flight at a time");
+        w.answered(t + WATCH * 3); assert!(!w.waiting());
+        assert!(!w.due(t + WATCH * 3, true)); assert!(w.due(t + WATCH * 4, true), "and again a quiet spell later");
+    }
+    #[test] fn watch_waits_while_typing_and_drops_a_stale_look() {
+        let t = Instant::now(); let mut w = Watch::default();
+        w.input(t); assert!(w.due(t + WATCH, true));
+        w.input(t + WATCH); assert!(!w.waiting(), "a key: the answer in flight predates it");
+        for i in 1..20 { w.input(ms(t, 100 * i)); assert!(!w.due(ms(t, 100 * i + 50), true), "typing proves focus"); }
+    }
+    #[test] fn watch_sleeps_while_the_bubble_is_down() {
+        let t = Instant::now(); let mut w = Watch::default();
+        w.input(t); assert!(!w.due(t + WATCH * 10, false));
+        assert!(!w.due(t + WATCH * 10, true), "the bubble just came up: wait from here");
+        assert!(w.due(t + WATCH * 11, true));
+        assert!(!w.due(t + WATCH * 12, false) && !w.waiting(), "down: the look in flight no longer counts");
     }
 
     #[test] fn uia_rules() {

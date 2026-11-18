@@ -30,16 +30,44 @@ fn mine(m: &WordMemory) -> Context<'_> { Context { memory: Some(m), ..Context::d
 #[test] fn thai_tail_finds_the_incomplete_word() {
     let dict = Dict::new(["ฉัน", "ชอบ", "ภาษา", "ภาษี"].map(String::from));
     let c = Completer::new([("ภาษา".to_string(), 10.0), ("ภาษี".to_string(), 5.0)]);
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, None), Some(6));
-    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1, None), Some(6));
-    assert_eq!(thai_tail("ภาษ", &dict, &c, 1, None), Some(0));
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4, None), None);
-    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, None), None);
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, None, None), Some(6));
+    assert_eq!(thai_tail("ฉันชอบภา", &dict, &c, 1, None, None), Some(6));
+    assert_eq!(thai_tail("ภาษ", &dict, &c, 1, None, None), Some(0));
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 4, None, None), None);
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, None, None), None);
     let s = Slips::default();
-    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, Some(&s)), Some(6), "a key typed twice");
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &dict, &c, 1, Some(&s), None), Some(6), "a key typed twice");
     assert_eq!(c.complete("บภาษ", 2, slipping()).words, ["ภาษา", "ภาษี"]);
-    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, Some(&s)), Some(6), "keys typed right are read as typed");
+    assert_eq!(thai_tail("ฉันชอบภาษ", &dict, &c, 1, Some(&s), None), Some(6), "keys typed right are read as typed");
     assert_eq!(words(&c, &"ฉันชอบภาษ".chars().skip(6).collect::<String>(), 3), ["ภาษา", "ภาษี"]);
+}
+#[test] fn thai_tail_falls_back_past_a_head_the_dictionary_lacks() {
+    let Some(m) = model() else { return };
+    let (dict, c, ng) = (Dict::new(m.thai_words.iter().cloned()), m.thai_completer(), Some(&m.thai));
+    let tail = |run: &str, ng| thai_tail(run, &dict, &c, 1, None, ng).map(|i| run.chars().skip(i).collect::<String>());
+    // a name, jargon, a typo: no tail had a dictionary-covered head, so no row was offered at all
+    for (run, want) in [("ปุ๊กกี้ไปโรงเรี", "โรงเรี"), ("สตาร์ทอัพของเขาได้รับเงินลงท", "ลงท"), ("ขอบคุนมากสำหรั", "สำหรั")] {
+        assert_eq!(tail(run, None), None, "{run}: the dictionary-only head check finds nothing");
+        assert_eq!(tail(run, ng).as_deref(), Some(want), "{run}");
+        assert!(c.extends(want));
+    }
+    // a head the dictionary covers keeps its tail
+    assert_eq!(tail("สมชายไปโรงพยา", ng), tail("สมชายไปโรงพยา", None));
+    assert_eq!(tail("สมชายไปโรงพยา", ng).as_deref(), Some("โรงพยา"));
+    // English and key mash typed on the Thai layout do not read as Thai: still no tail
+    for keys in ["asdfghjk", "hello", "qwerty", "password", "zxcvbn"] {
+        let run = typethai_core::keymap::en_to_th(keys);
+        assert_eq!(tail(&run, ng), None, "{keys} -> {run}");
+    }
+    assert_eq!(tail("ฟหกดฟหกด", ng), None);
+    // the fallback reads 3 chars or more: one or two extend nearly anything
+    assert_eq!(tail("ปุ๊กกี้โรง", ng).as_deref(), Some("โรง"));
+    assert_eq!(tail("ปุ๊กกี้โร", ng), None);
+    // a slip read with a covered head still wins over the fallback
+    let s = Slips::default();
+    let (d2, c2) = (Dict::new(["ฉัน", "ชอบ", "ภาษา", "ภาษี"].map(String::from)), Completer::new([("ภาษา".to_string(), 10.0), ("ภาษี".to_string(), 5.0)]));
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &d2, &c2, 1, Some(&s), ng), Some(6));
+    assert_eq!(thai_tail("ฉันชอบบภาษ", &d2, &c2, 1, None, ng), Some(7), "the doubled key stays in the head");
 }
 #[test] fn thai_completer_ranks_by_corpus_freq() {
     let Some(m) = model() else { return };

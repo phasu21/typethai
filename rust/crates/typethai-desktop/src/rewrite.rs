@@ -28,6 +28,9 @@ pub const NO_KEY: &str = "Add an API key in Settings";
 pub const REWRITING: &str = "Rewriting…";
 /// Longest result label on the bubble; Tab still pastes the whole text.
 pub const PREVIEW_CHARS: usize = 600;
+/// The same for a rewrite row on the rail: about what fits a rail button (`bridge::STRIP_LABEL_MAX`) before the
+/// strip would have to stack.
+pub const RAIL_PREVIEW_CHARS: usize = 24;
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemma-4-26b-a4b-it";
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -44,20 +47,23 @@ const BAD_LOCAL_MODEL: &str = "The local model must be one Ollama tag, with no s
 /// Non-secret settings (prefs.json "rewrite"), normalized on construction. `instructions` is the user's own text,
 /// added to cloud preset prompts. `local_model` and `enabled` apply to local completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config { pub enabled: bool, pub base_url: String, pub model: String, pub instructions: String, pub local_model: String }
-impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into(), instructions: String::new(), local_model: DEFAULT_LOCAL_MODEL.into() } } }
+/// `local_finish`: *Finish sentence locally* is offered (when the local model is ready, `local_setup::Step::Ready`).
+/// Off until the user turns it on in Settings → AI rewrite → Local, including for a prefs.json written before the
+/// switch existed: having Ollama on the machine for something else is not asking typeThai to use it.
+pub struct Config { pub enabled: bool, pub base_url: String, pub model: String, pub instructions: String, pub local_model: String, pub local_finish: bool }
+impl Default for Config { fn default() -> Self { Config { enabled: true, base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into(), instructions: String::new(), local_model: DEFAULT_LOCAL_MODEL.into(), local_finish: false } } }
 impl Config {
     /// Settings fields: empty values take the defaults; a URL that would send the key in clear is refused.
     pub fn new(enabled: bool, base_url: &str, model: &str, instructions: &str) -> Result<Config, String> {
-        Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model), instructions: instructions.trim().into(), local_model: DEFAULT_LOCAL_MODEL.into() })
+        Ok(Config { enabled, base_url: base_url_of(base_url)?, model: model_of(model), instructions: instructions.trim().into(), local_model: DEFAULT_LOCAL_MODEL.into(), local_finish: false })
     }
     /// prefs.json: missing or invalid fields fall back to the defaults.
     pub fn from_json(v: Option<&Value>) -> Config {
         let Some(v) = v else { return Config::default() };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
-        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")), instructions: s("instructions").trim().into(), local_model: local_model_of(s("local_model")).unwrap_or_else(|_| DEFAULT_LOCAL_MODEL.into()) }
+        Config { enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true), base_url: base_url_of(s("base_url")).unwrap_or_else(|_| DEFAULT_BASE_URL.into()), model: model_of(s("model")), instructions: s("instructions").trim().into(), local_model: local_model_of(s("local_model")).unwrap_or_else(|_| DEFAULT_LOCAL_MODEL.into()), local_finish: v.get("local_finish").and_then(Value::as_bool).unwrap_or(false) }
     }
-    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model, "instructions": self.instructions, "local_model": self.local_model }) }
+    pub fn to_json(&self) -> Value { json!({ "enabled": self.enabled, "base_url": self.base_url, "model": self.model, "instructions": self.instructions, "local_model": self.local_model, "local_finish": self.local_finish }) }
     /// The same config with another Ollama tag, refused when it is not a single tag.
     pub fn with_local_model(&self, tag: &str) -> Result<Config, String> {
         Ok(Config { local_model: local_model_of(tag)?, ..self.clone() })
@@ -90,8 +96,9 @@ fn scheme_host(url: &str) -> Option<(&str, &str)> {
 /// Work the engine hands out through `Action::Rewrite`. No variant can hold the API key.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Job {
-    /// Read the focused field's selection. Answers `Reply::Captured`.
-    Capture(ReqId),
+    /// Read the focused field's selection. Answers `Reply::Captured`. The tag is the local completion model to look
+    /// for (empty: AI rewriting is off, nothing to look for).
+    Capture(ReqId, String),
     /// Call the endpoint. Answers `Reply::Rewritten`.
     Run(Run),
     /// Replace the selection with this text through the clipboard. No answer.
@@ -110,8 +117,10 @@ pub enum Captured {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
-    /// `has_key`: an API key is stored (read only when text was captured).
-    Captured { id: ReqId, sel: Captured, has_key: bool },
+    /// `has_key`: an API key is stored, so the cloud presets can run. `local`: Ollama is up with the local model
+    /// downloaded, so *Finish sentence locally* can (`local_setup::Step::Ready`). Both are read only when text was
+    /// captured.
+    Captured { id: ReqId, sel: Captured, has_key: bool, local: bool },
     Rewritten(ReqId, Result<String, Failure>),
 }
 
@@ -274,7 +283,13 @@ impl Worker {
     pub fn spawn<H: Host>(make: impl FnOnce() -> H + Send + 'static) -> Worker {
         let (tx, rx) = mpsc::channel(); let (desk, jobs) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("typethai-desk".into()).spawn(move || { let mut h = make(); for job in jobs { match job {
-            Job::Capture(id) => { let sel = capture(&mut h); let has_key = matches!(sel, Captured::Text(_)) && secret::load().is_some(); let _ = tx.send(Reply::Captured { id, sel, has_key }); }
+            Job::Capture(id, tag) => {
+                let sel = capture(&mut h); let text = matches!(sel, Captured::Text(_));
+                let has_key = text && secret::load().is_some();
+                // the same check as the Settings row; refused at once when nothing listens on Ollama's port
+                let local = text && !tag.is_empty() && crate::local_setup::check(&tag) == crate::local_setup::Step::Ready;
+                let _ = tx.send(Reply::Captured { id, sel, has_key, local });
+            }
             Job::Paste(text) => paste(&mut h, &text),
             Job::Run(r) => { let tx = tx.clone(); std::thread::spawn(move || { let res = execute(&r); let _ = tx.send(Reply::Rewritten(r.req, res)); }); }
         } } }).expect("desk thread");
@@ -317,7 +332,7 @@ mod tests {
         assert_eq!(endpoint(&Config::default()), "https://openrouter.ai/api/v1/chat/completions");
     }
     #[test] fn config_new_trims_defaults_and_refuses_clear_text_urls() {
-        let default = Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into() };
+        let default = Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "google/gemma-4-26b-a4b-it".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into(), local_finish: false };
         assert_eq!(Config::new(false, "  ", "  ", "  "), Ok(default));
         assert_eq!(Config::new(true, "http://127.0.0.1:8080/", " llama ", "").map(|c| (c.base_url, c.model)), Ok(("http://127.0.0.1:8080".into(), "llama".into())));
         assert_eq!(Config::new(true, "HTTP://[::1]:1234/v1", "", "").map(|c| c.base_url), Ok("HTTP://[::1]:1234/v1".into()));
@@ -331,7 +346,12 @@ mod tests {
         assert_eq!(Config::from_json(Some(&c.to_json())), c);
         assert_eq!(Config::from_json(None), Config::default());
         let v = json!({ "enabled": false, "base_url": "http://example.com", "model": "m/y" });
-        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into() });
+        assert_eq!(Config::from_json(Some(&v)), Config { enabled: false, base_url: "https://openrouter.ai/api/v1".into(), model: "m/y".into(), instructions: "".into(), local_model: DEFAULT_LOCAL_MODEL.into(), local_finish: false });
+        // Finish sentence locally: off unless turned on, also for a prefs.json from before the switch, and kept
+        assert!(!Config::default().local_finish && !Config::from_json(Some(&json!({ "enabled": true, "local_model": "gemma4:latest" }))).local_finish);
+        let on = Config { local_finish: true, ..Config::default() };
+        assert_eq!(Config::from_json(Some(&on.to_json())), on);
+        assert!(on.with_local_model(LOCAL_MODELS[1].0).unwrap().local_finish, "picking another model keeps the switch");
     }
     #[test] fn the_local_model_is_one_tag_and_falls_back_to_the_default() {
         let c = Config::default();
