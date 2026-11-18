@@ -1,5 +1,14 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.25**
+- **Better Thai completions.** The built-in Thai word data (model v5) now also counts word pairs from Thai text split
+  into words by OpenThai2.0-LATTE-WordSeg-Lite, a word segmenter used only when the data is built; nothing of it ships
+  in the app. On held-out Thai text the word you meant is in the top 3 more often (69% to 74% while you type a word)
+  and the next word after a pause is found more often too. The data and the tool are credited in DATA_LICENSES.md.
+- **Suggestions after names and typos.** Thai completion used to give up when the text before the word you are typing
+  was not in the dictionary: after a name, jargon or a typo (ปุ๊กกี้ไปโรงเรี, ขอบคุนมากสำหรั) no completion was offered
+  at all. It now completes the end of the run when that reads as Thai.
+
 **New in 0.5.24**
 - **Space uses the suggestion, Tab moves to the next.** While you type a word, the first suggestion is highlighted and
   Space uses it, then types the space; no Tab tap needed. Tap Tab to move to the next suggestion (the first tap goes
