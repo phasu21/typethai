@@ -1378,7 +1378,7 @@ impl Engine {
         let (head, reading, tail, found) = if thai {
             let Some(comp) = &self.thai_comp else { return (vec![], None) };
             let run = en_to_th(&self.word);
-            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= min) else { return (vec![], None) };
+            let Some(at) = thai_tail(&run, &self.det.th_dict, comp, 1, self.opts.slips.as_ref(), Some(&self.det.thai)).filter(|&at| run.chars().count() - at >= min) else { return (vec![], None) };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             // the word before the tail in the run, else the one the line shows before the run
             let d = &self.det.th_dict;
@@ -4099,6 +4099,22 @@ mod tests {
         // a run that does not end on a dictionary word offers no next word, nor does the setting turned off
         e.reset(); typ_th(&mut e, "แซ่"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
         e.reset(); e.opts.next_word = false; typ_th(&mut e, "แซ่บ"); idle(&mut e, 600); assert!(!labels(&e).contains(&"มาก".to_string()));
+    }
+    #[test] fn a_thai_run_after_a_word_the_dictionary_lacks_is_still_completed() {
+        let (Some(mut m), Some(mut e)) = (model(), engine()) else { return };
+        e.load_completers(&mut m); e.opts.complete = CompleteMode::Pause; e.opts.live = false;
+        // a name the dictionary lacks, then the word being typed: its row keeps the name in front of it
+        typ_th(&mut e, "ปุ๊กกี้ไปโรงเรี"); idle(&mut e, 600);
+        assert_eq!(labels(&e).first().map(String::as_str), Some("โรงเรียน"), "{:?}", labels(&e));
+        assert_eq!(e.bubble[0].kind, BubbleKind::Complete { typed: keys("ปุ๊กกี้ไปโรงเรี"), insert: "ปุ๊กกี้ไปโรงเรียน".into() });
+        // a typo in the head
+        e.reset(); typ_th(&mut e, "ขอบคุนมากสำหรั"); idle(&mut e, 600);
+        assert_eq!(labels(&e).first().map(String::as_str), Some("สำหรับ"), "{:?}", labels(&e));
+        // English typed on the Thai layout offers no Thai completion, as before
+        for w in ["qwerty", "asdfghjk", "zxcvbn"] {
+            e.reset(); e.set_thai_active(true); typ(&mut e, w); idle(&mut e, 600);
+            assert!(!e.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Complete { .. })), "{w}: {:?}", e.bubble);
+        }
     }
     /// Gibberish typed fast (`aswd aswd ...`, no Enter) with the app's sources on, every key followed by a typing pause:
     /// per-key and per-pause cost in 25-word windows, to see whether it grows. `PREDICT=1` starts the predictor too.
