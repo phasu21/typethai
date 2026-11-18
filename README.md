@@ -286,7 +286,7 @@ cd rust
 TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
-gh release download model-v4 -R phasu21/typethai -p typethai.ttm -D target/release
+gh release download model-v5 -R phasu21/typethai -p typethai.ttm -D target/release
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
@@ -320,7 +320,8 @@ script prints the `.ttm` size and held-out top-3 completion hit rates per level.
 ```sh
 scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DATA/SHA256SUMS
 python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
-PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v4 ships 3:all (its Thai pairs; English as in model-v3)
+scripts/bigrams/latte/setup.sh "$LATTE"                # optional: build-time LATTE word segmentation for Thai pairs
+LATTE="$LATTE" PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v5 ships 3:all with LATTE (its Thai pairs; English as in model-v4)
 ```
 
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The

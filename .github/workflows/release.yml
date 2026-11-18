@@ -2,7 +2,7 @@
 # typeThai certificate, a Windows installer and zip, each with the model. Every package the updater installs gets an
 # ed25519 signature (`<asset>.sig`) made with UPDATE_SIGNING_KEY.
 # Secrets: MACOS_SIGN_P12 (base64 .p12), MACOS_SIGN_P12_PASSWORD, UPDATE_SIGNING_KEY (ed25519 private key, PEM).
-# The model is not in git: it is a pinned asset of the `model-v4` release (sha256 checked).
+# The model is not in git: it is a pinned asset of the `model-v5` release (sha256 checked).
 # Run by hand (workflow_dispatch) it is a dry run: everything is built, signed and packaged as v0.0.0-dryrun and kept
 # as workflow artifacts; nothing is published.
 # Speed: tests run beside the builds (only publishing waits for them), the two Mac architectures build on two runners,
@@ -14,8 +14,8 @@ on:
   workflow_dispatch:
 permissions: { contents: write }
 env:
-  MODEL_TAG: model-v4
-  MODEL_SHA256: 0f1fda0572839d6ba557b989e0fcb0f0f23bf2ce8c3f8c06281a8df0bb991250
+  MODEL_TAG: model-v5
+  MODEL_SHA256: 36bd1e54bc6dea1015da86ed7421a0e1e1a1811cc4a4e4136b83725b74fdc321
   GH_TOKEN: ${{ github.token }}
   TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dryrun' }}
 jobs:
