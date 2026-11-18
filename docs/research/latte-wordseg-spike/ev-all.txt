@@ -1,0 +1,14 @@
+dict A {"pairs_in_table":466754,"tally":{"in_vocab":1034778,"next_top1":163168,"next_top3":289869,"pairs":1251243,"prev_known":1239029,"ship_top1":694290,"ship_top3":849817,"targets":1059926,"uni_top3":697246}}
+dict G {"pairs_in_table":466754,"tally":{"in_vocab":62048,"next_top1":5154,"next_top3":10465,"pairs":75492,"prev_known":74889,"ship_top1":38401,"ship_top3":51001,"targets":62849,"uni_top3":48155}}
+short A {"pairs_in_table":343382,"tally":{"in_vocab":1034778,"next_top1":97362,"next_top3":187909,"pairs":1251243,"prev_known":1111220,"ship_top1":619418,"ship_top3":780348,"targets":1059926,"uni_top3":697246}}
+short G {"pairs_in_table":343382,"tally":{"in_vocab":62048,"next_top1":6983,"next_top3":13867,"pairs":75492,"prev_known":73652,"ship_top1":43880,"ship_top3":53231,"targets":62849,"uni_top3":48155}}
+short-hyb A {"pairs_in_table":416495,"tally":{"in_vocab":1034778,"next_top1":112650,"next_top3":211390,"pairs":1251243,"prev_known":1133643,"ship_top1":641778,"ship_top3":799260,"targets":1059926,"uni_top3":697246}}
+short-hyb G {"pairs_in_table":416495,"tally":{"in_vocab":62048,"next_top1":6913,"next_top3":13762,"pairs":75492,"prev_known":73884,"ship_top1":43828,"ship_top3":53258,"targets":62849,"uni_top3":48155}}
+union-short A {"pairs_in_table":550385,"tally":{"in_vocab":1034778,"next_top1":147718,"next_top3":271219,"pairs":1251243,"prev_known":1239704,"ship_top1":672519,"ship_top3":842206,"targets":1059926,"uni_top3":697246}}
+union-short G {"pairs_in_table":550385,"tally":{"in_vocab":62048,"next_top1":6924,"next_top3":13961,"pairs":75492,"prev_known":74995,"ship_top1":43808,"ship_top3":53414,"targets":62849,"uni_top3":48155}}
+long A {"pairs_in_table":338305,"tally":{"in_vocab":1034778,"next_top1":105232,"next_top3":198465,"pairs":1251243,"prev_known":1136398,"ship_top1":624687,"ship_top3":786844,"targets":1059926,"uni_top3":697246}}
+long G {"pairs_in_table":338305,"tally":{"in_vocab":62048,"next_top1":7088,"next_top3":13960,"pairs":75492,"prev_known":74366,"ship_top1":43231,"ship_top3":52905,"targets":62849,"uni_top3":48155}}
+long-hyb A {"pairs_in_table":429705,"tally":{"in_vocab":1034778,"next_top1":125883,"next_top3":232082,"pairs":1251243,"prev_known":1165929,"ship_top1":657120,"ship_top3":812538,"targets":1059926,"uni_top3":697246}}
+long-hyb G {"pairs_in_table":429705,"tally":{"in_vocab":62048,"next_top1":6962,"next_top3":13825,"pairs":75492,"prev_known":74575,"ship_top1":43262,"ship_top3":53017,"targets":62849,"uni_top3":48155}}
+union-long A {"pairs_in_table":524488,"tally":{"in_vocab":1034778,"next_top1":150576,"next_top3":275078,"pairs":1251243,"prev_known":1239592,"ship_top1":678691,"ship_top3":844479,"targets":1059926,"uni_top3":697246}}
+union-long G {"pairs_in_table":524488,"tally":{"in_vocab":62048,"next_top1":6827,"next_top3":13836,"pairs":75492,"prev_known":74967,"ship_top1":42999,"ship_top3":52940,"targets":62849,"uni_top3":48155}}

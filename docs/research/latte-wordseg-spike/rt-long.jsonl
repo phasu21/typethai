@@ -1,0 +1,6 @@
+{"pairs":"pairs/long.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":783,"next_top3":2191,"prev_eq_gold":24831,"ship_top1":14933,"ship_top3":21214}}
+{"pairs":"pairs/long.tsv","prev":"long","tally":{"cases":29204,"has_prev":27803,"next_top1":801,"next_top3":2287,"prev_eq_gold":26563,"ship_top1":15021,"ship_top3":20982}}
+{"pairs":"pairs/long-hyb.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":780,"next_top3":2140,"prev_eq_gold":24831,"ship_top1":14972,"ship_top3":21293}}
+{"pairs":"pairs/long-hyb.tsv","prev":"long","tally":{"cases":29204,"has_prev":27803,"next_top1":780,"next_top3":2224,"prev_eq_gold":26563,"ship_top1":15011,"ship_top3":21030}}
+{"pairs":"pairs/union-long.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":793,"next_top3":2128,"prev_eq_gold":24831,"ship_top1":15137,"ship_top3":21422}}
+{"pairs":"pairs/union-long.tsv","prev":"long","tally":{"cases":29204,"has_prev":27803,"next_top1":718,"next_top3":2027,"prev_eq_gold":26563,"ship_top1":14905,"ship_top3":21016}}

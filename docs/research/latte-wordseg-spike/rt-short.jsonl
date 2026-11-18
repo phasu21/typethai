@@ -1,0 +1,11 @@
+{"pairs":"pairs/dict.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":628,"next_top3":1418,"prev_eq_gold":24831,"ship_top1":13249,"ship_top3":20026}}
+{"pairs":"pairs/dict.tsv","prev":"short","tally":{"cases":29204,"has_prev":28225,"next_top1":502,"next_top3":1257,"prev_eq_gold":26486,"ship_top1":12986,"ship_top3":19748}}
+{"pairs":"pairs/dict.tsv","prev":"gold","tally":{"cases":29204,"has_prev":27880,"next_top1":508,"next_top3":1243,"prev_eq_gold":27880,"ship_top1":12848,"ship_top3":19527}}
+{"pairs":"pairs/short.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":804,"next_top3":2170,"prev_eq_gold":24831,"ship_top1":15030,"ship_top3":21263}}
+{"pairs":"pairs/short.tsv","prev":"short","tally":{"cases":29204,"has_prev":28225,"next_top1":847,"next_top3":2351,"prev_eq_gold":26486,"ship_top1":15477,"ship_top3":21404}}
+{"pairs":"pairs/short.tsv","prev":"gold","tally":{"cases":29204,"has_prev":27880,"next_top1":818,"next_top3":2283,"prev_eq_gold":27880,"ship_top1":15180,"ship_top3":21089}}
+{"pairs":"pairs/short-hyb.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":802,"next_top3":2155,"prev_eq_gold":24831,"ship_top1":15021,"ship_top3":21296}}
+{"pairs":"pairs/short-hyb.tsv","prev":"short","tally":{"cases":29204,"has_prev":28225,"next_top1":836,"next_top3":2325,"prev_eq_gold":26486,"ship_top1":15437,"ship_top3":21426}}
+{"pairs":"pairs/short-hyb.tsv","prev":"gold","tally":{"cases":29204,"has_prev":27880,"next_top1":813,"next_top3":2254,"prev_eq_gold":27880,"ship_top1":15138,"ship_top3":21108}}
+{"pairs":"pairs/union-short.tsv","prev":"dict","tally":{"cases":29204,"has_prev":28473,"next_top1":838,"next_top3":2226,"prev_eq_gold":24831,"ship_top1":15384,"ship_top3":21658}}
+{"pairs":"pairs/union-short.tsv","prev":"short","tally":{"cases":29204,"has_prev":28225,"next_top1":754,"next_top3":2148,"prev_eq_gold":26486,"ship_top1":15390,"ship_top3":21582}}
