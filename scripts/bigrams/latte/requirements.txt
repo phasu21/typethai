@@ -1,0 +1,6 @@
+# Runtime of the LATTE wheel (installed by setup.sh with --no-deps after these). Versions used for the shipped pairs.
+numpy==2.5.5
+onnxruntime==1.32.0
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.36.2
