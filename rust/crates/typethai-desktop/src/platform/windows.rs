@@ -477,6 +477,9 @@ unsafe fn handle_key(st: &mut State, vk: u32, up: bool) -> bool {
         else if st.gate.refresh_due(now, true) { field_refresh(st); }
         if st.secure || !st.gate.open(caret, || fullscreen(fg)) { let a = st.app.engine.reset(); run_actions(st, a); return false }
     }
+    // "Auto-convert when sure" (untested on Windows): only in a field UIA calls text or that shows a real caret, never in
+    // a password field; GPU terminals (`text_app`) are excluded by app as well
+    st.app.engine.auto_safe = !st.secure && (st.gate.text() || gi.is_some_and(|g| !g.hwndCaret.is_invalid()));
     let was_paused = st.app.engine.paused;
     let dbg = std::env::var_os("TYPETHAI_DEBUG").is_some();
     if dbg { eprintln!("key {key:?} buf={:?}", st.app.engine.buffer()); }

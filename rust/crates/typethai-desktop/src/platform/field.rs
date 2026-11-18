@@ -23,6 +23,9 @@ impl Gate {
     pub fn touch(&mut self, now: Instant) { self.touched = Some(now) }
     /// A classification arrived (`None`: the query was lost / timed out, keep the old verdict).
     pub fn answer(&mut self, f: Option<Field>, now: Instant) { self.inflight = false; if let Some(f) = f { self.field = Some(f); self.at = Some(now); self.touched = None; } }
+    /// Accessibility said the focused element is a text field (not just "unknown, but not fullscreen"): the bar for
+    /// changing text with no key pressed ("Auto-convert when sure").
+    pub fn text(&self) -> bool { self.field == Some(Field::Text) }
     /// Keys go to the engine: a caret (or a known text app) always opens; unknown opens unless fullscreen.
     pub fn open(&self, caret: bool, fullscreen: impl FnOnce() -> bool) -> bool { caret || match self.field { Some(Field::Text) => true, Some(Field::NotText) => false, _ => !fullscreen() } }
     /// Classify synchronously before this key? Unknown focus, or an open gate at each word start (shared with the

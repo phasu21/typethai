@@ -1,8 +1,8 @@
 //! typethai-desktop: system-wide wrong-layout (EN QWERTY -> Thai Kedmanee) auto-converter with a suggestion bubble.
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-mod app; mod backspace; mod bridge; mod candidate; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rank; mod rewrite; mod predict;
-mod badge; mod inputsrc; mod evallive; mod evaltypo; mod platform; mod update; mod whats_new;
+mod app; mod autoconvert; mod backspace; mod bridge; mod candidate; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rank; mod rewrite; mod predict;
+mod badge; mod inputsrc; mod evalauto; mod evallive; mod evaltypo; mod platform; mod update; mod whats_new;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
@@ -126,6 +126,7 @@ fn main() {
     bridge::REQ_OPEN_SETTINGS.store(cli.open_settings, std::sync::atomic::Ordering::SeqCst);
     bridge::SETTINGS_PAGE.store(cli.settings_page, std::sync::atomic::Ordering::SeqCst);
     if let Some(dir) = &cli.eval_typo { evaltypo::run(&cli, dir); return }
+    if cli.eval_auto { evalauto::run(&cli); return }
     if let Some(dir) = &cli.eval_live { if cli.eval_reverse { evallive::run_reverse(&cli, dir, &cli.eval_split) } else { evallive::run(&cli, dir, &cli.eval_split) } return }
     let prefs_path = prefs::prefs_beside(&cli.state);
     let first_run = !prefs_path.exists();

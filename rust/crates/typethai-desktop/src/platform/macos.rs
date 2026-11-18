@@ -485,6 +485,9 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
                 else if st.gate.refresh_due(now, true) { field_refresh(st); }
                 if secure || !st.gate.open(false, || false) { let a = st.app.engine.reset(); run_actions(st, a); return false }
             }
+            // "Auto-convert when sure" only where accessibility confirmed a text field (a password field never gets here:
+            // the secure check above bypasses the engine); an unknown element only gets the bubble
+            st.app.engine.auto_safe = st.gate.text() && !unsafe { IsSecureEventInputEnabled() };
             let was = st.app.engine.paused; let o = st.app.engine.on_key(key);
             if was != st.app.engine.paused { send(UiMsg::Paused(st.app.engine.paused)) }
             run_actions(st, o.actions); st.app.maybe_save();

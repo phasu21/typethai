@@ -12,6 +12,9 @@
 //! `<APP:id>`: keys now go to the app with that bundle id or exe name (e.g. `<APP:com.mitchellh.ghostty>`), and typeThai
 //! behaves there as `prefs.json`'s `off_apps` says (so a listed app types the keys unchanged and shows no bubble);
 //! a terminal deletes a grapheme per Backspace, here and in the engine's count.
+//! "Auto-convert when sure" (prefs.json `auto_convert`, or `--auto-convert`): the sim stands for a text field
+//! accessibility confirmed; `<FieldUnknown>` makes it a focused element nobody could classify (nothing converts on its
+//! own there) and `<FieldText>` a text field again.
 //! `^R` (Ctrl+Opt+R) reads the selection at once: the text of the last `<SEL:text>` (taken by that capture), else nothing
 //! selected. Local sentence completion calls Ollama; cloud rewrites and pastes are only printed.
 //! Settings come from `prefs.json` beside `--state`: `{"accept_with":"tab_or_space"}` there makes Space apply a live row,
@@ -37,6 +40,7 @@ pub fn apply(screen: &mut Vec<char>, acts: &[Action], swallowed: bool, typed: Op
     } }
 }
 pub fn run(mut app: App) {
+    app.engine.auto_safe = true;
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap(); let mut screen: Vec<char> = vec![]; let mut bubble: Vec<String> = vec![]; let ch: Vec<char> = line.chars().collect(); let mut i = 0;
         let mut selection: Option<String> = None;
@@ -52,6 +56,10 @@ pub fn run(mut app: App) {
             if let Some(sel) = rest.strip_prefix("<SEL:").and_then(|r| r.split_once('>')).map(|(s, _)| s.to_string()) {
                 println!("  [selected: {sel:?}]");
                 i += sel.chars().count() + "<SEL:>".len(); selection = Some(sel); continue
+            }
+            if let Some(t) = ["<FieldUnknown>", "<FieldText>"].into_iter().find(|t| rest.starts_with(t)) {
+                app.engine.auto_safe = t == "<FieldText>"; println!("  [field: {}]", if app.engine.auto_safe { "text" } else { "unknown" });
+                i += t.chars().count(); continue
             }
             let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Tab>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>",
                 "<Rate+1>", "<Rate+2>", "<Rate+3>", "<Rate+4>", "<Rate-1>", "<Rate-2>", "<Rate-3>", "<Rate-4>"].into_iter().find(|t| rest.starts_with(t));

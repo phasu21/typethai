@@ -1,0 +1,61 @@
+# English-layout text that must never be converted on its own ("Auto-convert when sure", --eval-auto).
+# One line = one typed line, words separated by spaces. Lines starting with # are comments.
+# short words
+a I is in it on to we me my no so up us am an as at be by do go he if of or ok hi yo ya oh eh um uh ha
+the and for you are not but can was had has his her its our out who why how all any few new now old one two
+# chat abbreviations and slang
+lol omg brb idk tbh imo btw lmao thx pls np gg wtf asap fyi ty ikr smh rofl irl afk nvm ttyl jk xd gtg dm
+ok sure yeah yep nope hmm haha hahaha wow cool nice yay ugh meh lmk wfh eta tmr
+# names, places, brands
+John Mary David Sarah Michael Somchai Somsak Nattapong Pim Ploy Bangkok Chiang Mai Phuket Pattaya Thailand
+Google Apple Microsoft Grab Lazada Shopee LINE Facebook Instagram TikTok Netflix Spotify Agoda Uber Airbnb
+iPhone iPad macOS Windows Android GitHub Slack Zoom Notion Figma Excel PowerPoint YouTube WhatsApp Telegram
+Tesla Toyota Honda Nike Adidas Starbucks KFC McDonalds Lotus Tops Makro BTS MRT CP AIS DTAC True
+# acronyms and mixed case
+OK USA UK EU NASA PDF CSV JSON HTML CSS API SQL CEO CTO HR QA PR VPN USB WiFi iOS UX UI AI ML GPU CPU RAM SSD
+# code
+const x = 1;
+let mut v = Vec::new();
+fn main() { println!("hi"); }
+git commit -m "fix typo"
+git push origin main
+npm install --save-dev typescript
+cargo build --release
+SELECT * FROM users WHERE id = 1;
+console.log(err)
+import os, sys
+def foo(bar):
+return None
+#include <stdio.h>
+ls -la ~/Downloads
+cd ../src && make
+sudo apt-get update
+kubectl get pods -n prod
+docker run -it ubuntu bash
+if (a && b) { return c; }
+x += 1; y -= 2;
+# web addresses, e-mail, paths, handles, numbers
+https://example.com/a/b?c=1
+http://localhost:3000
+www.google.com
+docs.rs
+example.org/path
+user@example.com
+@john #thai #travel
+/usr/local/bin ~/code ./run.sh C:\Users\me
+192.168.1.1 10:30 3.14 2026 100% $5 50k 1st 2nd
+# everyday English sentences
+I will send you the file tomorrow morning
+can we move the meeting to three pm
+thanks for your help, see you soon
+did you get my email about the invoice
+the build is broken again, let me check
+please review the pull request when you have time
+how much does it cost to ship to Bangkok
+I think we should go with the second option
+what time does the shop open on Sunday
+my flight was delayed by two hours
+let me know if anything changes
+happy birthday, have a great day
+sorry I missed your call
+the quick brown fox jumps over the lazy dog

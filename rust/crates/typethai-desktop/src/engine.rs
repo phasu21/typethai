@@ -5,6 +5,7 @@ use crate::backspace::{self, DeleteUnit};
 use crate::bridge::BubbleLayout;
 use crate::candidate::{src_of_kind, Candidate, Floors, Src};
 use crate::predict;
+pub use crate::autoconvert::{looks_like_address, AutoLevel, AutoRule, AutoScore};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::rank::{Ctx, How, RankLog, Row};
 use crate::rewrite::{self, Captured, Job, Preset, Reply, ReqId, Run};
@@ -243,7 +244,9 @@ struct Committed { typed: String, orig: String, converted: Option<String>, bound
     /// Extra boundaries typed after this word (more spaces / Enters) while it is still the last word.
     extra: String,
     /// Already given to the word memory (see `settle`).
-    learned: bool }
+    learned: bool,
+    /// Converted by "Auto-convert when sure" with no key pressed: an undo of it is remembered (`Engine::auto_undone`).
+    auto: bool }
 impl Committed {
     /// The word as it is on screen now.
     fn shown(&self) -> &str { self.converted.as_deref().unwrap_or(&self.orig) }
@@ -252,7 +255,10 @@ impl Committed {
 }
 
 pub struct Options {
-    pub auto_convert: bool, pub switch_input: bool, pub suggest_band: f64, pub typo_suggestions: bool, pub context_words: usize,
+    /// "Auto-convert when sure" (off by default): a finished word the engine is sure was typed on the wrong layout is
+    /// converted at its boundary with no key pressed, when the platform says the field is safe (`Engine::auto_safe`).
+    /// `auto_level` says how sure (`AutoLevel::rule`).
+    pub auto_convert: bool, pub auto_level: AutoLevel, pub switch_input: bool, pub suggest_band: f64, pub typo_suggestions: bool, pub context_words: usize,
     /// Live (mid-word) bubble: show when the current prefix's flip probability > `live_show` and the prefix has at
     /// least `live_min_len` keys. `live_show` matches the post-space suggestion band, and `live_stable` is 1, so the
     /// bubble appears on the keystroke that crosses the band. Space is not required. Two keys are too few: English
@@ -303,7 +309,7 @@ pub struct Options {
     /// How the bubble lays out word options; the engine only stores it for Settings and the platform layer.
     pub bubble: BubbleLayout,
 }
-impl Default for Options { fn default() -> Self { Options { auto_convert: false, switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
+impl Default for Options { fn default() -> Self { Options { auto_convert: false, auto_level: AutoLevel::default(), switch_input: true, suggest_band: 0.5, typo_suggestions: true, context_words: 8,
 live: true, live_show: LIVE_SHOW, live_min_len: 3, live_stable: 1, rev_auto: REV_AUTO, rev_live: REV_LIVE, rev_suggest: REV_SUGGEST, rev_prev: REV_PREV,
     complete: CompleteMode::default(), complete_conf: 0.4, complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), floors: Floors::default(), tab_hold: TAB_HOLD, learn_words: true, predict: true, accept: AcceptKeys::Tab, tab_key: TabKey::SpaceApplies, pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, slips: Some(Slips::default()), bubble: BubbleLayout::default() } } }
 /// Pause lengths Settings offers, shortest first (the capture timer ticks every 25 ms). The default is the shortest, so
@@ -442,6 +448,14 @@ pub struct Engine {
     /// English key tokens whose conversion the user rated down (`Hotkey::Rate`): still offered, after every other
     /// option (`ok ` → lets | done | cool | นา).
     pub offer_last: BTreeSet<String>,
+    /// Words whose automatic conversion was undone (`normalize_word` keys, prefs.json `auto_undone`): never converted
+    /// automatically again (the bubble still offers them).
+    pub auto_undone: BTreeSet<String>,
+    /// Set by the platform before each key: focus is in a text field accessibility confirmed, and not a password field.
+    /// False until told, so a host that cannot tell never converts on its own.
+    pub auto_safe: bool,
+    /// The app in front is a terminal or a code editor (`autoconvert::excluded_app`), set with the app.
+    pub auto_app_excluded: bool,
     /// `never` / `offer_last` changed outside Settings: the host saves prefs.json.
     pub prefs_dirty: bool,
     /// English spelling suggestions for words left as typed; None disables them.
@@ -498,7 +512,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), auto_undone: BTreeSet::new(), auto_safe: false, auto_app_excluded: false, prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -644,7 +658,18 @@ impl Engine {
     /// selection types as usual.
     fn space_applies(&self) -> bool {
         self.opts.tab_key == TabKey::SpaceApplies && self.rail == Rail::Out && !self.fixing && !self.rewriting() && !self.word.is_empty()
-            && self.bubble.get(self.sel.idx).is_some_and(|b| self.finishes_word(b))
+            && self.bubble.get(self.sel.idx).is_some_and(|b| self.finishes_word(b)) && !self.live_undone()
+    }
+    /// The highlighted row is the live conversion of a word whose automatic conversion the user undid: Space is a plain
+    /// space there (Tab still applies it), or Space would keep converting what was taken back.
+    fn live_undone(&self) -> bool {
+        matches!(self.bubble.get(self.sel.idx), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. }))
+            && normalize_word(&self.word).is_some_and(|k| self.auto_undone.contains(&k))
+    }
+    /// Space applies the highlighted live row of a word "Auto-convert when sure" would convert anyway: that is the
+    /// automatic conversion, so an undo of it is remembered like one made at the boundary.
+    fn space_is_auto(&self) -> bool {
+        matches!(self.bubble.get(self.sel.idx), Some(BubbleItem { kind: BubbleKind::Live { .. }, .. })) && self.auto_now(&self.word)
     }
     /// `b` is about the word being typed and changes it: a live conversion, a completion, a typo fix. Not a next word
     /// (after a Thai run: the run with a word added, labelled with the word alone), not a row that would leave the word
@@ -687,7 +712,7 @@ impl Engine {
     /// Space applies the highlighted row: with `AcceptKeys::TabOrSpace`, and only when that row is a live conversion.
     /// With `TabKey::SpaceApplies`, also any option that finishes the word being typed (`space_applies`).
     fn space_accepts(&self) -> bool {
-        self.space_applies() || self.opts.accept == AcceptKeys::TabOrSpace
+        !self.live_undone() && self.space_applies() || self.opts.accept == AcceptKeys::TabOrSpace && !self.live_undone()
             && matches!(self.bubble.get(self.sel.idx), Some(BubbleItem { kind: BubbleKind::Live { typed, prev, .. }, .. }) if self.live_current(typed, *prev))
     }
     /// A live row still matches the text on screen: the buffer it was offered for, and the `prev` words before it.
@@ -874,7 +899,14 @@ impl Engine {
             Key::LineDelete => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             Key::Nav | Key::PickRow(_) => { self.tab_pending = false; Outcome { swallow: false, actions: self.reset() } }
             // `AcceptKeys::TabOrSpace` over a live conversion, or `TabKey::SpaceApplies` over an option for the word
-            Key::Boundary(Boundary::Space) if self.space_accepts() => { self.pick = How::Space; self.accept_rolled(k) }
+            Key::Boundary(Boundary::Space) if self.space_accepts() => {
+                self.pick = How::Space;
+                let auto = self.space_is_auto(); let n = self.line.len();
+                let o = self.accept_rolled(k);
+                // the glued conversion the Space committed (a row that changed nothing commits none)
+                if auto && self.line.len() > n { if let Some(c) = self.line.last_mut() { c.auto = c.converted.is_some() } }
+                o
+            }
             Key::Arrow(a) => self.on_arrow(a),
             // Enter in the bubble applies the selection, like Tab
             // Space applies the option a Tab tap highlighted (`TabKey::cycles`)
@@ -1023,7 +1055,9 @@ impl Engine {
             SettingsCmd::AddNever(w) => self.insert_never(&w),
             SettingsCmd::RemoveNever(w) => self.remove_never(&w),
             SettingsCmd::Forget(w) => self.forget_learned(&w),
-            SettingsCmd::ResetLearning => { self.personal.reset(); self.rank.reset(); self.events_since_save += 1; true }
+            SettingsCmd::ResetLearning => { self.personal.reset(); self.rank.reset(); self.events_since_save += 1; if !self.auto_undone.is_empty() { self.auto_undone.clear(); self.prefs_dirty = true } true }
+            SettingsCmd::SetAutoConvert(on) => { let changed = self.opts.auto_convert != on; self.opts.auto_convert = on; changed }
+            SettingsCmd::SetAutoLevel(l) => { let changed = self.opts.auto_level != l; self.opts.auto_level = l; changed }
             SettingsCmd::SetCompletion(m) => { let changed = self.opts.complete != m; self.opts.complete = m; changed }
             SettingsCmd::SetCompleteIdle(d) => { let changed = self.opts.complete_idle != d; self.opts.complete_idle = d; changed }
             SettingsCmd::SetTabHold(d) => { let changed = self.opts.tab_hold != d; self.opts.tab_hold = d; changed }
@@ -1045,7 +1079,7 @@ impl Engine {
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, tab_key: self.opts.tab_key, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates, off_apps: vec![] }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, tab_key: self.opts.tab_key, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, auto_convert: self.opts.auto_convert, auto_level: self.opts.auto_level, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates, off_apps: vec![] }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
@@ -1063,7 +1097,9 @@ impl Engine {
         self.never.remove(&k)
     }
     fn forget_learned(&mut self, raw: &str) -> bool {
-        if !self.personal.forget(raw) { return false }
+        let undone = normalize_word(raw).is_some_and(|k| self.auto_undone.remove(&k));
+        if undone { self.prefs_dirty = true }
+        if !self.personal.forget(raw) { return undone }
         self.events_since_save += 1;
         true
     }
@@ -1602,12 +1638,12 @@ impl Engine {
         let mut converted = None;
         if self.blocked(&typed) {
             self.show(vec![], &mut acts);
-            self.line.push(Committed { orig: typed.clone(), typed, converted: None, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
+            self.line.push(Committed { orig: typed.clone(), typed, converted: None, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false, auto: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
         }
-        if self.opts.auto_convert && p > self.personal.base.threshold && d.valid {
-            // legacy (--auto-convert): replace at the boundary
+        if self.auto_now(&typed) {
+            // "Auto-convert when sure": replace at the boundary, the bubble offers the undo
             swallow = true; converted = Some(thai.clone());
             acts.push(self.replace(&typed, &thai, Some(b)));
             let mut items = vec![BubbleItem { label: typed.clone(), kind: BubbleKind::UndoConversion }];
@@ -1628,7 +1664,8 @@ impl Engine {
             let en = self.en_items(&self.text_before(self.line.len()), &typed, prev.as_deref());
             self.show(en, &mut acts); self.phrase = 0;
         }
-        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false });
+        let auto = converted.is_some();
+        self.line.push(Committed { orig: typed.clone(), typed, converted, boundary: Some(b), rev: false, with_prev: 0, extra: String::new(), learned: false, auto });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
     }
@@ -1639,36 +1676,61 @@ impl Engine {
         let target = self.rev_target(&typed);
         if self.rev_wanted(&typed) {
             self.show(vec![BubbleItem { label: target.clone(), kind: BubbleKind::ConvertPrev { k: 0 } }], &mut acts); self.phrase = 1;
-            self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false });
+            self.line.push(Committed { typed, orig: thai, converted: None, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false, auto: false });
             if b == Boundary::Enter { self.new_line(); }
             return Outcome { swallow: false, actions: acts };
         }
         let (p, ok) = self.rev_prob(&typed);
-        let mut with_prev = 0usize;
         let sure = ok && p > self.opts.rev_auto;
-        if sure || self.rev_suggestable(&typed) {
+        if self.auto_now(&typed) {
+            // "Auto-convert when sure": this word alone, as the keys were typed (no spelling guess, no earlier words)
+            swallow = true; converted = Some(typed.clone());
+            acts.push(self.replace(&thai, &typed, Some(b)));
+            self.show(vec![BubbleItem { label: thai.clone(), kind: BubbleKind::UndoConversion }], &mut acts);
+        } else if sure || self.rev_suggestable(&typed) {
             // right context: up to 3 preceding words left as Thai (e.g. "i" = ร) are re-scored now that
             // this word follows them, and offered together with it if they clear `rev_prev`
             let k = self.rev_prev_count(&typed);
-            if self.opts.auto_convert && sure {
-                // legacy (--auto-convert): flip at the boundary
-                swallow = true; converted = Some(target.clone()); with_prev = k;
-                let start = self.line.len() - k;
-                let (mut ins, mut was) = (String::new(), String::new());
-                for c in &self.line[start..] { ins += &c.typed; ins += &c.after(); was += &c.orig; was += &c.after(); }
-                for c in &mut self.line[start..] { c.converted = Some(c.typed.clone()); }
-                acts.push(self.replace(&format!("{was}{thai}"), &format!("{ins}{target}"), Some(b)));
-                self.show(vec![BubbleItem { label: format!("{was}{thai}"), kind: BubbleKind::UndoConversion }], &mut acts);
-            } else {
-                let start = self.line.len() - k;
-                let mut label = String::new(); for c in &self.line[start..] { label += &self.rev_target(&c.typed); label += &c.after(); }
-                label += &target;
-                self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
-            }
+            let start = self.line.len() - k;
+            let mut label = String::new(); for c in &self.line[start..] { label += &self.rev_target(&c.typed); label += &c.after(); }
+            label += &target;
+            self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
         } else { self.show(vec![], &mut acts); }
-        self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev, extra: String::new(), learned: false });
+        let auto = converted.is_some();
+        self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false, auto });
         if b == Boundary::Enter { self.new_line(); }
         Outcome { swallow, actions: acts }
+    }
+    /// The rule a finished word must clear to be converted with no key pressed, or None when automatic conversion is
+    /// off, the platform has not vouched for the field (`auto_safe`), or the word is one it must never touch: on the
+    /// don't-translate list, rated down, undone after an earlier automatic conversion, too short, or an address.
+    fn auto_rule(&self, typed: &str) -> Option<AutoRule> {
+        if !self.opts.auto_convert || !self.auto_safe || self.auto_app_excluded || self.off || self.paused { return None }
+        let r = self.opts.auto_level.rule();
+        if typed.chars().count() < r.min_keys || self.blocked(typed) || self.rated_down(typed) || looks_like_address(typed) { return None }
+        if normalize_word(typed).is_some_and(|k| self.auto_undone.contains(&k)) { return None }
+        Some(r)
+    }
+    /// What the automatic-conversion rule reads for `typed`, a word about to end, in the active direction (`AutoScore`).
+    /// Forward: the personal flip probability, whether the Thai reading is valid, whether it is a dictionary word.
+    /// Reverse: the reverse model's probability, whether the keys are convertible, whether they spell an English word
+    /// the completer knows whose Thai reading is not a Thai word.
+    pub(crate) fn auto_score(&self, typed: &str) -> AutoScore {
+        if self.thai_active {
+            let Some((p, d)) = self.rev_score(typed) else { return AutoScore::default() };
+            let core = typed.trim_end_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':'));
+            let known = !d.th_word && !core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic() || c == '\'') && (self.en_comp.as_ref().is_some_and(|c| c.has(core)) || self.det.en_words.contains(&core.to_ascii_lowercase()));
+            AutoScore { p, ok: d.convertible, known }
+        } else {
+            let (p, ds) = self.prob(typed);
+            let thai = en_to_th(typed);
+            let known = self.det.th_dict.has(&thai) || self.corrector.as_ref().is_some_and(|c| c.has(&thai));
+            AutoScore { p, ok: ds.last().is_some_and(|d| d.valid), known }
+        }
+    }
+    /// Convert `typed` at its boundary with no key pressed (`auto_rule`, then the scores).
+    fn auto_now(&self, typed: &str) -> bool {
+        self.auto_rule(typed).is_some_and(|r| r.admits(self.auto_score(typed), self.thai_active))
     }
     /// Enter: a new line starts. Only the last word is kept (so the bubble / Tab can still apply to it); contexts and
     /// the reverse lookback start after it.
@@ -1698,7 +1760,7 @@ impl Engine {
     /// Undo / Guess measure from it instead of from the word before it.
     fn commit_glued(&mut self, typed: String, converted: String, with_prev: usize) {
         let orig = self.screen_of(&typed);
-        self.line.push(Committed { orig, typed, converted: Some(converted), boundary: None, rev: self.thai_active, with_prev, extra: String::new(), learned: false });
+        self.line.push(Committed { orig, typed, converted: Some(converted), boundary: None, rev: self.thai_active, with_prev, extra: String::new(), learned: false, auto: false });
         self.word.clear(); self.live_streak = 0;
     }
     /// What Guess turns `typed` into: the English keys (reverse), else the Thai reading or its top typo correction.
@@ -1770,6 +1832,8 @@ impl Engine {
             Hotkey::Undo => {
                 let Some((shown, c)) = self.last_on_screen() else { return Outcome { swallow: true, actions: acts } };
                 let c = c.clone(); if c.converted.is_none() { return Outcome { swallow: true, actions: acts } }
+                // an automatic conversion the user took back: never again for this word (the bubble still offers it)
+                if c.auto { if let Some(k) = normalize_word(&c.typed) { if self.auto_undone.insert(k) { self.prefs_dirty = true } } }
                 if c.with_prev > 0 && self.line.len() > c.with_prev {
                     let start = self.line.len() - 1 - c.with_prev;
                     let (mut old, mut ins) = (String::new(), String::new());
@@ -1782,7 +1846,7 @@ impl Engine {
                 self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Undo); }
                 // a word converted mid-word (Guess on the buffer) is still being typed: it is the buffer again
                 if c.boundary.is_none() && c.extra.is_empty() { self.word = c.typed; }
-                else { self.line.push(Committed { converted: None, with_prev: 0, ..c }); }
+                else { self.line.push(Committed { converted: None, with_prev: 0, auto: false, ..c }); }
                 self.show(vec![], &mut acts);
             }
             Hotkey::ForceConvert => {
@@ -1797,7 +1861,7 @@ impl Engine {
                     let target = if c.rev { self.rev_target(&c.typed) } else { en_to_th(&c.typed) };
                     acts.push(self.replace(&shown, &format!("{target}{}", c.after()), None));
                     self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Retype); }
-                    self.line.push(Committed { converted: Some(target), ..c });
+                    self.line.push(Committed { converted: Some(target), auto: false, ..c });
                 }
                 self.show(vec![], &mut acts);
             }
@@ -1840,7 +1904,7 @@ impl Engine {
                     } else if let Some((shown, c)) = self.last_on_screen() {
                         let c = c.clone();
                         acts.push(self.replace(&shown, &format!("{word}{}", c.after()), None));
-                        self.line.pop(); self.line.push(Committed { converted: Some(word), ..c });
+                        self.line.pop(); self.line.push(Committed { converted: Some(word), auto: false, ..c });
                     },
                 }
                 self.show(vec![], &mut acts);
@@ -2137,7 +2201,7 @@ mod tests {
     }
     #[test] fn legacy_converts_thai_and_keeps_english() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         let o = typ(&mut e, "l;ylfu ");
         let last = o.last().unwrap(); assert!(last.swallow);
         assert_eq!(last.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: Some(Boundary::Space) });
@@ -2147,7 +2211,7 @@ mod tests {
     }
     #[test] fn legacy_undo_restores_and_learns() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         typ(&mut e, "l;ylfu ");
         let o = e.on_key(Key::Hotkey(Hotkey::Undo));
         assert_eq!(o.actions[0], Action::Replace { delete: 7, insert: "l;ylfu ".into(), then: None });
@@ -2221,7 +2285,7 @@ mod tests {
     }
     #[test] fn legacy_tab_converts_as_boundary_when_no_bubble() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         e.opts.live = false;
         typ(&mut e, "l;ylfu"); let o = tab(&mut e);
         assert!(o.swallow); assert_eq!(o.actions[0], Action::Replace { delete: 6, insert: "สวัสดี".into(), then: Some(Boundary::Tab) });
@@ -2229,7 +2293,7 @@ mod tests {
     }
     #[test] fn legacy_bubble_navigation_and_tab_apply() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         e.opts.live = false;
         let o = typ(&mut e, "l;ylfu "); let last = o.last().unwrap();
         assert!(last.actions.contains(&Action::SwitchInput(InputLang::Thai)));
@@ -2249,7 +2313,7 @@ mod tests {
     }
     #[test] fn legacy_esc_dismisses_and_typing_hides() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         e.opts.live = false;
         typ(&mut e, "l;ylfu "); assert!(e.bubble_visible());
         assert!(e.is_bubble_key(&Key::Tab)); assert!(!e.is_bubble_key(&Key::Char('a')));
@@ -2364,29 +2428,29 @@ mod tests {
         typ(e, &typethai_core::reverse::th_text_to_keys(th).expect("typeable on Kedmanee"))
     }
     fn replaced(o: &[Outcome]) -> Vec<String> { o.iter().flat_map(|x| x.actions.iter()).filter_map(|a| if let Action::Replace { insert, .. } = a { Some(insert.clone()) } else { None }).collect() }
-    #[test] fn legacy_reverse_i_dont_know() {
+    #[test] fn auto_reverse_i_dont_know() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Balanced;
         e.opts.live = false;
-        // exactly what the user typed: 'i dont know' on the Thai layout, then Enter
+        // exactly what the user typed: 'i dont know' on the Thai layout, then Enter. Each sure word flips on its own at
+        // its boundary; `i` (one key) never does: no earlier words are flipped with no key pressed
         let mut o = typ_th(&mut e, "ร กนืะ าืนไ"); o.push(e.on_key(Key::Boundary(Boundary::Enter)));
         let r = replaced(&o);
-        assert_eq!(r, vec!["i dont", "know"], "{r:?}"); // "i" (ร) is flipped together with "dont" once it has right context
-        // every flip deletes the Thai reading and re-sends the boundary; then switches to ABC
+        assert!(r.last().is_some_and(|w| w == "know") && !r.iter().any(|w| w.starts_with('i')), "{r:?}");
         assert!(o.iter().flat_map(|x| x.actions.iter()).any(|a| *a == Action::SwitchInput(InputLang::Latin)));
         let all: Vec<&Action> = o.iter().flat_map(|x| x.actions.iter()).collect();
-        assert!(all.contains(&&Action::Replace { delete: 6, insert: "i dont".into(), then: Some(Boundary::Space) })); // ร + space + กนืะ
+        assert!(all.contains(&&Action::Replace { delete: 4, insert: "know".into(), then: Some(Boundary::Enter) }), "{all:?}");
     }
-    #[test] fn legacy_reverse_variants() {
+    #[test] fn auto_reverse_variants() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Balanced;
         e.opts.live = false;
-        for (th, en) in [("กนืะ าืนไ", "dont know"), ("ร กนืงะ าืนไ", "i don't know"), ("ร กนืะ", "i dont"), ("ณ กนืงะ าืนไ", "I don't know")] {
+        for th in ["กนืะ าืนไ", "ร กนืงะ าืนไ", "ณ กนืงะ าืนไ"] {
             e.reset();
             let mut o = typ_th(&mut e, th); o.push(e.on_key(Key::Boundary(Boundary::Enter)));
-            let got = replaced(&o).join(" "); // a replace of "i dont" counts as both words
+            let got = replaced(&o);
             eprintln!("{th} -> {got:?}");
-            if !en.is_empty() { assert_eq!(got, en, "{th}"); }
+            assert_eq!(got.last().map(String::as_str), Some("know"), "{th}");
         }
     }
     #[test] fn reverse_keeps_real_thai() {
@@ -2400,16 +2464,17 @@ mod tests {
             assert!(o.iter().all(|x| !x.swallow), "{th}");
         }
     }
-    #[test] fn legacy_reverse_undo_switches_back_to_thai() {
+    #[test] fn auto_reverse_undo_switches_back_to_thai() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Balanced;
         e.opts.live = false;
-        typ_th(&mut e, "กนืะ าืนไ ");
+        typ_th(&mut e, "าืนไ ");
         // the OS is on ABC now; Tab (bubble key) applies the undo row
         e.set_thai_active(false); assert!(e.bubble_visible());
         let o = tab(&mut e); assert!(o.swallow);
         assert_eq!(o.actions[0], Action::Replace { delete: 5, insert: "าืนไ ".into(), then: None });
         assert!(o.actions.contains(&Action::SwitchInput(InputLang::Thai)));
+        assert!(e.auto_undone.contains("know"), "an undo by its row is remembered too");
     }
     #[test] fn reverse_live_bubble_and_tab() {
         let Some(mut e) = engine() else { return };
@@ -2422,9 +2487,109 @@ mod tests {
     }
     #[test] fn legacy_switch_input_can_be_disabled() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true;
         e.opts.switch_input = false;
         let o = typ(&mut e, "l;ylfu "); assert!(!o.last().unwrap().actions.iter().any(|a| matches!(a, Action::SwitchInput(_))));
+    }
+    // ---------- "Auto-convert when sure" ----------
+    fn auto_on(e: &mut Engine, level: AutoLevel) { e.opts.auto_convert = true; e.opts.auto_level = level; e.auto_safe = true; }
+    fn converted(o: &[Outcome]) -> bool { o.iter().any(|x| x.swallow && x.actions.iter().any(|a| matches!(a, Action::Replace { .. }))) }
+    #[test] fn auto_convert_is_off_by_default() {
+        let Some(mut e) = engine() else { return };
+        assert!(!Options::default().auto_convert && !e.auto_safe);
+        e.auto_safe = true;
+        let o = typ(&mut e, "l;ylfu "); assert!(!converted(&o), "{o:?}");
+        assert!(e.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Convert { .. })), "the bubble offers it");
+    }
+    #[test] fn auto_convert_converts_a_sure_word_at_space_and_switches_the_input() {
+        let Some(mut e) = engine() else { return };
+        auto_on(&mut e, AutoLevel::Cautious);
+        let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu ");
+        assert_eq!(screen(&log), "สวัสดี ");
+        assert!(log.last().unwrap().1.actions.contains(&Action::SwitchInput(InputLang::Thai)));
+        assert!(matches!(e.bubble[0].kind, BubbleKind::UndoConversion), "the bubble shows what was typed, to take it back");
+    }
+    #[test] fn auto_convert_waits_for_a_confirmed_text_field_and_skips_excluded_apps() {
+        let Some(mut e) = engine() else { return };
+        auto_on(&mut e, AutoLevel::Eager);
+        e.auto_safe = false;
+        assert!(!converted(&typ(&mut e, "l;ylfu ")), "focus nobody could classify: the bubble only");
+        e.reset(); e.auto_safe = true; e.auto_app_excluded = true;
+        assert!(!converted(&typ(&mut e, "l;ylfu ")), "a terminal or code editor");
+        e.reset(); e.auto_app_excluded = false; e.paused = true;
+        assert!(!converted(&typ(&mut e, "l;ylfu ")), "paused");
+        e.paused = false; e.reset(); e.never.insert("l;ylfu".into());
+        assert!(!converted(&typ(&mut e, "l;ylfu ")), "don't translate");
+        e.never.clear(); e.reset();
+        assert!(converted(&typ(&mut e, "l;ylfu ")));
+    }
+    #[test] fn auto_convert_leaves_english_short_words_and_addresses_alone() {
+        let Some(mut e) = engine() else { return };
+        for level in AutoLevel::ALL {
+            auto_on(&mut e, level);
+            for line in ["hello world ", "I will send you the file tomorrow ", "www.google.com ", "user@example.com ", "docs.rs ", "lol omg ok ", "git commit -m "] {
+                e.reset(); let o = typ(&mut e, line); assert!(!converted(&o), "{level:?} {line:?}: {:?}", replaced(&o));
+            }
+        }
+        auto_on(&mut e, AutoLevel::Cautious);
+        e.reset(); assert!(!converted(&typ(&mut e, "wo ")), "two keys: offered after Space, never converted on its own");
+    }
+    #[test] fn auto_convert_undo_restores_switches_back_and_is_not_repeated() {
+        let Some(mut e) = engine() else { return };
+        auto_on(&mut e, AutoLevel::Cautious);
+        let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu ");
+        assert_eq!(screen(&log), "สวัสดี ");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu ", "the text comes back");
+        assert!(log.last().unwrap().1.actions.contains(&Action::SwitchInput(InputLang::Latin)), "and the input source");
+        assert!(e.auto_undone.contains("l;ylfu") && e.prefs_dirty);
+        assert_eq!(e.personal.state.events, 1.0, "the personal model learned the undo too");
+        // typed again (on the English layout the undo switched back to): offered, not converted
+        e.set_thai_active(false); e.prefs_dirty = false;
+        let o = typ(&mut e, "l;ylfu "); assert!(!converted(&o));
+        assert!(e.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Convert { .. })));
+        // a manual conversion undone is not remembered: only what typeThai did on its own
+        let mut e2 = engine().unwrap(); auto_on(&mut e2, AutoLevel::Cautious); e2.opts.auto_convert = false;
+        typ(&mut e2, "l;ylfu "); tab(&mut e2); e2.on_key(Key::Hotkey(Hotkey::Undo));
+        assert!(e2.auto_undone.is_empty());
+        // forgetting the word, or resetting learning, lets it convert again
+        assert!(e.apply_settings(SettingsCmd::Forget("l;ylfu".into())) && e.auto_undone.is_empty());
+        e.auto_undone.insert("l;ylfu".into()); e.apply_settings(SettingsCmd::ResetLearning); assert!(e.auto_undone.is_empty());
+    }
+    #[test] fn auto_convert_with_the_live_bubble_up_remembers_the_undo_of_space() {
+        // the default Tab key: Space applies a live row; with auto on that is the automatic conversion
+        let Some(mut e) = engine() else { return };
+        e.opts.live = true; e.opts.tab_key = TabKey::SpaceApplies;
+        auto_on(&mut e, AutoLevel::Cautious);
+        let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu ");
+        assert_eq!(screen(&log), "สวัสดี ");
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "l;ylfu ");
+        assert!(e.auto_undone.contains("l;ylfu"), "undoing the Space conversion is remembered");
+        // next time the bubble still offers it, but Space is a plain space
+        e.set_thai_active(false);
+        let mut log = vec![]; feed(&mut e, &mut log, "l;ylfu");
+        assert!(e.bubble.iter().any(|b| matches!(b.kind, BubbleKind::Live { .. })));
+        feed(&mut e, &mut log, " "); assert_eq!(screen(&log), "l;ylfu ");
+    }
+    #[test] fn auto_convert_settings_round_trip() {
+        let Some(mut e) = engine() else { return };
+        assert!(e.apply_settings(SettingsCmd::SetAutoConvert(true)));
+        assert!(e.apply_settings(SettingsCmd::SetAutoLevel(AutoLevel::Balanced)));
+        let snap = e.settings_snapshot(); assert!(snap.auto_convert); assert_eq!(snap.auto_level, AutoLevel::Balanced);
+        assert!(!e.apply_settings(SettingsCmd::SetAutoLevel(AutoLevel::Balanced)), "no change");
+    }
+    #[test] fn auto_convert_reverse_flips_a_sure_english_word() {
+        let Some(mut e) = engine() else { return };
+        auto_on(&mut e, AutoLevel::Balanced);
+        // "dont know" typed on the Thai layout: `know` is a known English word, `dont` may or may not clear the bar
+        let o = typ_th(&mut e, "กนืะ าืนไ ");
+        let r = replaced(&o); assert!(r.contains(&"know".to_string()), "{r:?}");
+        assert!(o.iter().flat_map(|x| x.actions.iter()).any(|a| *a == Action::SwitchInput(InputLang::Latin)));
+        // real Thai stays
+        for th in ["สวัสดีครับ วันนี้อากาศดี ", "ไม่รู้ ไม่ชี้ ", "ขำมาก ", "ครับ ", "นะ "] {
+            e.reset(); let o = typ_th(&mut e, th); assert!(!converted(&o), "{th}: {:?}", replaced(&o));
+        }
     }
     #[test] fn force_convert_current_word() {
         let Some(mut e) = engine() else { return };
@@ -3958,7 +4123,7 @@ mod tests {
     }
     #[test] fn space_accept_with_auto_convert_converts_once() {
         let Some(mut e) = engine() else { return };
-        e.opts.auto_convert = true; space_accepts(&mut e);
+        e.opts.auto_convert = true; e.auto_safe = true; space_accepts(&mut e);
         let mut log = vec![];
         feed(&mut e, &mut log, "l;ylfu ");
         assert_eq!(log.last().unwrap().1, applied(6, "สวัสดี", Some(Boundary::Space), InputLang::Thai));
@@ -4602,7 +4767,7 @@ mod tests {
     impl Speller for FixingSpeller { fn guesses(&self, _: &str, w: &str) -> Option<Vec<String>> { matches!(w, "ths" | "thiss").then(|| vec!["this".into()]) } }
     #[test] fn a_typo_row_retypes_only_what_differs() {
         let Some(mut e) = engine_typo() else { return };
-        e.opts.auto_convert = true;
+        e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Eager;
         let mut log = vec![]; feed(&mut e, &mut log, "l;ylf ");
         assert_eq!(labels(&e), ["l;ylf", "สวัสดี", "สวัสดิ", "วัด"]);
         hot(&mut e, &mut log, Hotkey::Accept(1));
