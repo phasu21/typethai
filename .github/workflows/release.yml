@@ -54,7 +54,7 @@ jobs:
   macos-build:
     needs: check
     if: needs.check.outputs.built != 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     strategy: { matrix: { target: [aarch64-apple-darwin, x86_64-apple-darwin] } }
     env: { MACOSX_DEPLOYMENT_TARGET: "12.0" }
     steps:
@@ -70,7 +70,7 @@ jobs:
         with: { name: "macos-bin-${{ matrix.target }}", path: "rust/target/${{ matrix.target }}/release/typethai-desktop", retention-days: 1 }
   macos:
     needs: macos-build
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

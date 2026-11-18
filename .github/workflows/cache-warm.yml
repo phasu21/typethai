@@ -11,7 +11,7 @@ on:
 concurrency: { group: cache-warm, cancel-in-progress: true }
 jobs:
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     strategy: { matrix: { target: [aarch64-apple-darwin, x86_64-apple-darwin] } }
     env: { MACOSX_DEPLOYMENT_TARGET: "12.0" }
     steps:
