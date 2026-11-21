@@ -68,15 +68,27 @@ impl Watch {
 
 /// UIA ControlType ids (UIA_*ControlTypeId).
 pub const UIA_EDIT: i32 = 50004; pub const UIA_DOCUMENT: i32 = 50030; pub const UIA_COMBOBOX: i32 = 50003;
-/// UIA focused element: Edit / Document unless read-only, editable ComboBox, else TextPattern (terminals) or a
-/// writable ValuePattern. Chromium's page itself is a read-only Document, its inputs are Edit.
-pub fn uia(control_type: i32, text: bool, value: bool, read_only: bool) -> Field {
+/// UIA focused element: an Edit is writable unless ValuePattern says it's read-only (an Edit with neither pattern is
+/// still a real edit control, so that defaults open); a Document needs the same proof when it has a ValuePattern
+/// (Chromium's page body), else a real insertion caret (Word / RichEdit) — bare TextPattern is not enough, since
+/// read-only selectable text (a web page's own text, a PDF viewer, a document in read mode) exposes it too, only
+/// without a caret of its own; same for any other control type (Windows Terminal's prompt has one, static text does
+/// not). `caret`: TextPattern2's `GetCaretRange` answered with an active range, not merely a selection.
+pub fn uia(control_type: i32, caret: bool, value: bool, read_only: bool) -> Field {
     let writable = !(value && read_only);
-    let t = match control_type { UIA_EDIT | UIA_DOCUMENT => writable, UIA_COMBOBOX => value && !read_only, _ => text || (value && !read_only) };
+    let t = match control_type {
+        UIA_EDIT => writable,
+        UIA_DOCUMENT => if value { writable } else { caret },
+        UIA_COMBOBOX => value && !read_only,
+        _ => (value && writable) || caret,
+    };
     if t { Field::Text } else { Field::NotText }
 }
-/// AX roles that are text whatever else they report.
-pub const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"];
+/// AX roles that are text whatever else they report: a combo box's text part and a search field are never read-only.
+/// AXTextField / AXTextArea are not here: both also cover read-only text (a disabled field, a display-only field
+/// styled as one, Preview's PDF text layer, Console.app's log) and fall to the `editable` check below like any other
+/// role with a selection range.
+pub const TEXT_ROLES: [&str; 2] = ["AXComboBox", "AXSearchField"];
 /// AX focused element (`role` None: nothing answered). Another role is text when it has a selection range and the
 /// range or the value can be set (`editable`): a page in Chromium / Electron and the Finder desktop report a range they
 /// cannot edit. No focused element in an app that has a focused window (games, canvases) is not text, unless the app
@@ -193,12 +205,15 @@ mod tests {
     #[test] fn uia_rules() {
         assert_eq!(uia(UIA_EDIT, true, true, false), Field::Text);
         assert_eq!(uia(UIA_EDIT, false, false, false), Field::Text);           // Win32 edit without patterns
-        assert_eq!(uia(UIA_EDIT, true, true, true), Field::NotText);           // read-only box
-        assert_eq!(uia(UIA_DOCUMENT, true, false, false), Field::Text);        // Word / RichEdit
-        assert_eq!(uia(UIA_DOCUMENT, true, true, true), Field::NotText);       // Chromium page body
+        assert_eq!(uia(UIA_EDIT, false, true, true), Field::NotText);          // read-only box
+        assert_eq!(uia(UIA_DOCUMENT, true, false, false), Field::Text);        // Word / RichEdit: no ValuePattern, a real caret
+        assert_eq!(uia(UIA_DOCUMENT, false, false, false), Field::NotText);    // a read-only Document with no ValuePattern either: a PDF viewer, a document in read mode
+        assert_eq!(uia(UIA_DOCUMENT, false, true, true), Field::NotText);      // Chromium page body
+        assert_eq!(uia(UIA_DOCUMENT, true, true, true), Field::NotText);       // Chromium page body, caret browsing on: ValuePattern still says read-only
         assert_eq!(uia(UIA_COMBOBOX, false, true, false), Field::Text);        // editable combo
         assert_eq!(uia(UIA_COMBOBOX, false, false, false), Field::NotText);    // drop-down list
-        assert_eq!(uia(50020, true, false, false), Field::Text);               // Text + TextPattern: Windows Terminal
+        assert_eq!(uia(50020, true, false, false), Field::Text);               // Text + a real caret: Windows Terminal's prompt
+        assert_eq!(uia(50020, false, false, false), Field::NotText);           // Text, TextPattern, no caret: a web page's own selectable text, a label
         assert_eq!(uia(50033, false, true, false), Field::Text);               // Pane with writable value
         assert_eq!(uia(50033, false, false, false), Field::NotText);           // game window (Pane)
         assert_eq!(uia(50032, false, false, false), Field::NotText);           // Window
@@ -206,6 +221,13 @@ mod tests {
     }
     #[test] fn ax_rules() {
         for r in TEXT_ROLES { assert_eq!(ax(Some(r), false, false, true, false), Field::Text, "{r}"); }
+        // AXTextField / AXTextArea are not fast-pathed: a disabled field, a display-only field styled as one, or a
+        // read-only text view (Preview's PDF text layer, Console.app's log) reports the role but isn't editable
+        for r in ["AXTextField", "AXTextArea"] {
+            assert_eq!(ax(Some(r), true, true, true, false), Field::Text, "{r} editable");
+            assert_eq!(ax(Some(r), true, false, true, false), Field::NotText, "{r} read-only");
+            assert_eq!(ax(Some(r), false, false, true, false), Field::NotText, "{r} no selection range");
+        }
         assert_eq!(ax(Some("AXGroup"), true, true, true, false), Field::Text);        // custom text view, its selection settable
         // the selection range alone is no field: Chromium / Electron pages expose one on the page itself, focused on a
         // settings page with no field (Hermes Agent), and so does the Finder desktop
