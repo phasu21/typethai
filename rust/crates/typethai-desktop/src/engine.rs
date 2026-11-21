@@ -640,11 +640,23 @@ impl Engine {
             || (self.rail == Rail::Tab && self.bubble_visible() && matches!(k, Key::Boundary(Boundary::Space) | Key::TabBack))
     }
     /// `TabKey::SpaceApplies`: Space applies the highlighted option, with the keys outside the bubble. Only while a word
-    /// is being typed and the option finishes or fixes it (`finishes_word`); never over the ⌃⌥R rows, so a Space over a
-    /// selection types as usual.
+    /// is being typed and the option finishes or fixes it (`finishes_word`) in the script on screen (`converts`: never a
+    /// conversion); never over the ⌃⌥R rows, so a Space over a selection types as usual.
     fn space_applies(&self) -> bool {
         self.opts.tab_key == TabKey::SpaceApplies && self.rail == Rail::Out && !self.fixing && !self.rewriting() && !self.word.is_empty()
-            && self.bubble.get(self.sel.idx).is_some_and(|b| self.finishes_word(b))
+            && self.bubble.get(self.sel.idx).is_some_and(|b| self.finishes_word(b) && !self.converts(b))
+    }
+    /// `b` puts the word in the other layout: a live conversion, or a completion or typo fix in the other script than
+    /// the text on screen (`ภาษา` for the keys `ihk`). `space_applies` never takes one: Space, Enter and punctuation pass
+    /// through, and only Tab (then Space), ⌃⌥1-3, auto-convert or the opt-in Accept with: Tab or Space convert.
+    fn converts(&self, b: &BubbleItem) -> bool {
+        let out = match &b.kind {
+            BubbleKind::Live { .. } => return true,
+            BubbleKind::Complete { insert, .. } => insert,
+            BubbleKind::Typo { word } => word,
+            _ => return false,
+        };
+        lang_of(out) != lang_of(&self.screen_of(&self.word))
     }
     /// `b` is about the word being typed and changes it: a live conversion, a completion, a typo fix. Not a next word
     /// (after a Thai run: the run with a word added, labelled with the word alone), not a row that would leave the word
@@ -2455,6 +2467,101 @@ mod tests {
         let o = e.on_key(Key::Boundary(Boundary::Enter)); assert!(!o.swallow); assert!(o.actions.contains(&Action::HideBubble)); assert!(!e.bubble_visible());
         // reverse mode too
         e.reset(); let mut o = typ_th(&mut e, "กนืะ าืนไ"); o.push(e.on_key(Key::Boundary(Boundary::Enter))); assert!(replaced(&o).is_empty()); assert!(!e.bubble_visible()); assert!(o.iter().all(|x| !x.swallow));
+    }
+    /// `engine()` left on the shipped Tab key (`TabKey::SpaceApplies`) and live rows, as a fresh install runs.
+    fn engine_default() -> Option<Engine> { let mut e = engine()?; e.opts.tab_key = Options::default().tab_key; Some(e) }
+    /// No key of these outcomes changed the text: nothing swallowed, nothing replaced.
+    fn untouched(o: &[Outcome]) -> bool { o.iter().all(|x| !x.swallow && !x.actions.iter().any(|a| matches!(a, Action::Replace { .. }))) }
+    #[test] fn space_never_converts_on_the_shipped_tab_key() {
+        let Some(mut e) = engine_default() else { return };
+        assert_eq!(e.opts.tab_key, TabKey::SpaceApplies); assert!(!e.opts.auto_convert); assert!(e.opts.live);
+        // `git` reads as เระ mid-word; Space types a space, not the conversion
+        let mut log = vec![];
+        feed(&mut e, &mut log, "hello git");
+        assert_eq!(labels(&e), ["เระ"], "the live row is up"); assert!(matches!(e.bubble[0].kind, BubbleKind::Live { .. }));
+        assert!(!e.space_hint, "the keycap says Tab, not Space");
+        feed(&mut e, &mut log, " ");
+        assert_eq!(screen(&log), "hello git ");
+        // mid-sentence English
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "so i pushed the git repo to main and it is fine ");
+        assert_eq!(screen(&log), "so i pushed the git repo to main and it is fine ");
+        // a wrong-layout word with its live row up: Space passes, and the bubble re-opens the finished word
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "l;ylfu");
+        assert_eq!(labels(&e), ["สวัสดี"]);
+        assert!(matches!(e.bubble[0].kind, BubbleKind::Live { .. }));
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)), "Space is not pulled into the engine for a live row");
+        feed(&mut e, &mut log, " ");
+        assert!(plain_space(&log.last().unwrap().1), "{:?}", log.last());
+        assert_eq!(screen(&log), "l;ylfu ");
+        assert_eq!(e.bubble[0].kind, BubbleKind::Convert { typed: "l;ylfu".into(), thai: "สวัสดี".into() }, "offered after Space");
+        // ... and a Tab tap then Space applies it, keeping the one space
+        feed(&mut e, &mut log, "\t ");
+        assert_eq!(screen(&log), "สวัสดี ");
+        e.set_thai_active(false);
+        // Enter and punctuation pass through too
+        e.reset(); assert!(untouched(&typ(&mut e, "l;ylfu\n")));
+        e.reset(); assert!(untouched(&typ(&mut e, "hello git, ok! l;ylfu? ")));
+        // English typed on the Thai layout: its reverse live row is not applied by Space or Enter
+        e.reset(); e.opts.rev_live = 0.5;
+        typ_th(&mut e, "าืนไ"); assert_eq!(labels(&e), ["know"]);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        assert!(untouched(&[e.on_key(Key::Boundary(Boundary::Space))]));
+        e.reset(); typ_th(&mut e, "าืนไ"); assert!(untouched(&[e.on_key(Key::Boundary(Boundary::Enter))]));
+        e.set_thai_active(false);
+    }
+    #[test] fn space_never_applies_a_wrong_layout_completion() {
+        let Some(mut e) = engine_default() else { return };
+        completers(&mut e, CompleteMode::Typing);
+        // the keys of ภาษ on the English layout: live row, then completions that convert as they finish
+        typ(&mut e, &keys("ภาษ")); assert_eq!(labels(&e), ["ภาษ", "ภาษา", "ภาษี"]);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        for b in e.bubble.clone() { assert!(e.converts(&b), "{b:?}") }
+        // the first Tab tap lands on option 1 (Space would not have applied it), Esc leaves
+        assert_eq!(tab(&mut e).actions, vec![Action::Focus(Rail::Tab)]); assert_eq!(e.selected(), 0);
+        e.on_key(Key::Arrow(Arrow::Down)); assert_eq!(e.selected(), 0);
+        e.on_key(Key::SelectNext);
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)), "a converting completion is highlighted");
+        assert!(plain_space(&e.on_key(Key::Boundary(Boundary::Space))));
+        // a completion in the script on screen still finishes the word on Space
+        e.reset(); typ(&mut e, "hel"); assert_eq!(labels(&e), ["help", "hello", "helmet"]);
+        assert!(!e.converts(&e.bubble[0].clone()));
+        assert_eq!(first_replace(&e.on_key(Key::Boundary(Boundary::Space))), Some(&Action::Replace { delete: 0, insert: "p".into(), then: Some(Boundary::Space) }));
+        // typo rows: a fix in the script on screen is applied by Space, one in the other script is not
+        e.reset(); typ(&mut e, "ths");
+        let fix = BubbleItem { label: "this".into(), kind: BubbleKind::Typo { word: "this".into() } };
+        let conv = BubbleItem { label: "ทำ".into(), kind: BubbleKind::Typo { word: "ทำ".into() } };
+        assert!(!e.converts(&fix)); assert!(e.converts(&conv));
+        e.show(vec![conv], &mut vec![]); assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        e.show(vec![fix], &mut vec![]); assert!(e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+    }
+    #[test] fn accept_with_tab_or_space_is_still_an_opt_in_for_live_rows() {
+        let Some(mut e) = engine_default() else { return };
+        space_accepts(&mut e);
+        typ(&mut e, "l;ylfu");
+        assert_eq!(e.on_key(Key::Boundary(Boundary::Space)), applied(6, "สวัสดี", Some(Boundary::Space), InputLang::Thai));
+        e.set_thai_active(false);
+    }
+    #[test] fn tab_and_ctrl_alt_digits_still_convert_on_the_shipped_tab_key() {
+        let Some(mut e) = engine_default() else { return };
+        // a Tab tap highlights the live row (it is not skipped: Space did not apply it), then Space applies it
+        typ(&mut e, "l;ylfu"); assert_eq!(labels(&e), ["สวัสดี"]);
+        let o = tab(&mut e); assert!(o.swallow); assert!(first_replace(&o).is_none(), "{o:?}");
+        assert_eq!(e.selected(), 0);
+        assert_eq!(first_replace(&e.on_key(Key::Boundary(Boundary::Space))), Some(&Action::Replace { delete: 6, insert: "สวัสดี".into(), then: Some(Boundary::Space) }));
+        // Tab rolled into Space does the same
+        e.reset(); e.set_thai_active(false); typ(&mut e, "l;ylfu"); e.on_key(Key::Tab);
+        assert_eq!(first_replace(&e.on_key(Key::Boundary(Boundary::Space))), Some(&Action::Replace { delete: 6, insert: "สวัสดี".into(), then: Some(Boundary::Space) }));
+        e.on_key(Key::TabUp);
+        // ⌃⌥1 applies the live row; ⌃⌥2 / ⌃⌥3 the rows after it
+        e.reset(); e.set_thai_active(false); typ(&mut e, "l;ylfu");
+        assert_eq!(e.on_key(Key::Hotkey(Hotkey::Accept(0))), applied(6, "สวัสดี", None, InputLang::Thai));
+        completers(&mut e, CompleteMode::Typing);
+        e.reset(); e.set_thai_active(false); typ(&mut e, &keys("ภาษ"));
+        assert_eq!(first_replace(&e.on_key(Key::Hotkey(Hotkey::Accept(1)))), Some(&Action::Replace { delete: 3, insert: "ภาษา".into(), then: None }));
+        e.reset(); e.set_thai_active(false); typ(&mut e, &keys("ภาษ"));
+        assert_eq!(first_replace(&e.on_key(Key::Hotkey(Hotkey::Accept(2)))), Some(&Action::Replace { delete: 3, insert: "ภาษี".into(), then: None }));
     }
     #[test] fn tab_after_space_converts_previous_word() {
         let Some(mut e) = engine() else { return };
