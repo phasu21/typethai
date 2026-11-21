@@ -6,6 +6,10 @@ description = "typeThai: fix Thai typed on the wrong keyboard layout (macOS + Wi
 repository = "https://github.com/phasu21/typethai"
 license = "MIT"
 
+[build-dependencies]
+# the app icon in the Windows exe (build.rs); already in the tree through gpui
+embed-resource = "3"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -16,6 +20,8 @@ typethai-predict = { path = "../typethai-predict" }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = "0.21"
+# decodes the tray icon images (`tray/*.png`); already in the tree through gpui
+png = "0.18"
 gpui-kit = "0.7.3"
 raw-window-handle = "0.6"
 keyring = "4"

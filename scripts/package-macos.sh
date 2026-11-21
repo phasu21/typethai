@@ -20,6 +20,8 @@ lipo -create -output "$app/Contents/MacOS/typethai-desktop" "${bins[@]}"
 lipo -info "$app/Contents/MacOS/typethai-desktop"
 cp "$model" "$app/Contents/Resources/typethai.ttm"
 cp "$root/LICENSE" "$root/DATA_LICENSES.md" "$app/Contents/Resources/"
+# the app icon (CFBundleIconFile in Info.plist)
+cp "$root/packaging/typethai.icns" "$app/Contents/Resources/typethai.icns"
 sed "s/__VERSION__/${version#v}/g" "$root/packaging/Info.plist" > "$app/Contents/Info.plist"
 
 stage=$(mktemp -d); kcdir=$(mktemp -d); kc=""; search=()

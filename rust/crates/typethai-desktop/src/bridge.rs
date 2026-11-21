@@ -339,9 +339,13 @@ pub static FRONT_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Tray -> capture thread requests (polled by a timer on the capture thread).
 pub static REQ_TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
 pub static REQ_QUIT: AtomicBool = AtomicBool::new(false);
-/// macOS input source, owned by the main thread: on macOS 26 HIToolbox traps when TIS is called off the main queue, and
-/// the event tap runs on its own thread. The tap reads the last answer and leaves switches here for the UI loop.
+/// The input source is Thai. macOS: owned by the main thread (on macOS 26 HIToolbox traps when TIS is called off the main
+/// queue, and the event tap runs on its own thread); the tap reads the last answer and leaves switches here for the UI
+/// loop. Windows: the layout of the window in front, published by the capture thread. The tray icon follows it.
 pub static INPUT_THAI: AtomicBool = AtomicBool::new(false);
+/// The tray icon style (Settings > Word suggestions > Menu bar icon, prefs.json "menu_bar_icon"): false the coloured
+/// cards (default), true the black template. Written by the capture thread, read by the tray in the UI loop.
+pub static TRAY_PLAIN: AtomicBool = AtomicBool::new(false);
 pub static REQ_SWITCH_INPUT: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);
 /// macOS: the main thread saw the source change to this language; the tap thread looks up the caret and asks for the badge.
 pub static REQ_BADGE: Mutex<Option<crate::engine::InputLang>> = Mutex::new(None);

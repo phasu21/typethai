@@ -93,6 +93,8 @@ const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "Tab"), (AcceptKeys::
 const TAB_KEY: [(TabKey, &str); 4] = [(TabKey::SpaceApplies, "Space applies, Tab moves"), (TabKey::Highlight, "Highlight, then Space"), (TabKey::Accept, "Accept right away"), (TabKey::Cycle, "Tab cycle (preview)")];
 const AUTO_LEVEL: [(AutoLevel, &str); 3] = [(AutoLevel::Cautious, "Cautious"), (AutoLevel::Balanced, "Balanced"), (AutoLevel::Eager, "Eager")];
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "Horizontal"), (BubbleLayout::Vertical, "Vertical")];
+/// The menu-bar icon choices (macOS; the Windows tray icon is always in colour).
+const MENU_ICON: [(crate::trayicon::Style, &str); 2] = [(crate::trayicon::Style::Colour, "Colour, shows the language"), (crate::trayicon::Style::Plain, "Plain")];
 /// "Pick with": (pick_arrows, pick_ctrl). Both off (only from a hand-edited prefs.json) shows no choice.
 const PICK: [((bool, bool), &str); 3] = [((true, false), "Arrow keys"), ((false, true), "Ctrl+1–3"), ((true, true), "Arrow keys and Ctrl+1–3")];
 /// The dropdown's "never bring it back" choice.
@@ -608,6 +610,11 @@ impl SettingsView {
                 move |label, cx| if let Some(&(p, _)) = PICK.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_pick(p, cx)) }) };
         let badge = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.input_badge, move |on, cx| write.update(cx, |v, cx| v.set_input_badge(on, cx))) };
+        let menu_icon = { let (read, write) = (view.clone(), view.clone());
+            let options = MENU_ICON.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+            SettingField::dropdown(options,
+                move |cx| MENU_ICON.iter().find(|(s, _)| *s == read.read(cx).snap.menu_bar_icon).map_or("", |(_, l)| l).into(),
+                move |label, cx| if let Some(&(s, _)) = MENU_ICON.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_menu_bar_icon(s, cx)) }) };
         let badge_delay = { let (read, write) = (view.clone(), view.clone());
             let options = std::iter::once((SharedString::from(BADGE_OFF), SharedString::from(BADGE_OFF)))
                 .chain(BADGE_IDLE_CHOICES_MS.iter().map(|&ms| (delay_label(ms), delay_label(ms)))).collect();
@@ -639,7 +646,7 @@ impl SettingsView {
                 TabKey::Accept => "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another; Esc closes the bubble. Space can also accept a word typed in the wrong layout.",
                 TabKey::Cycle => "The bubble can finish the word you are typing, in Thai or English. Tap Tab to put the first suggestion into your text, tap again for the next one, and once more for what you typed (Shift+Tab goes back). Just keep typing to keep it; Esc puts back what you typed.",
             }.into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "next", "next word", "predict", "prediction", "model", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column", "input", "language", "source", "keyboard", "flag", "badge", "caret", "preview", "idle", "stop", "once", "never", "off", "ไทย", "auto", "automatic", "auto-convert", "convert", "sure", "confidence", "cautious", "balanced", "eager"], std::iter::empty()),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "next", "next word", "predict", "prediction", "model", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column", "input", "language", "source", "keyboard", "flag", "badge", "caret", "preview", "menu bar", "icon", "tray", "colour", "color", "plain", "idle", "stop", "once", "never", "off", "ไทย", "auto", "automatic", "auto-convert", "convert", "sure", "confidence", "cautious", "balanced", "eager"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 (self.snap.completion != CompleteMode::Off).then(|| SettingItem::new("Suggest the next word", next).description("Pause after a word (after a space in English) and the bubble offers the word that usually follows it: built-in word pairs, and your own model's guess with them.")),
@@ -649,6 +656,7 @@ impl SettingsView {
                 Some(SettingItem::new("Tab key", tab_key).description("Space applies, Tab moves: while you type a word, Space uses the highlighted suggestion and Tab moves to the next one; after a finished word (next-word suggestions) Space is just a space. Highlight, then Space: each Tab tap highlights the next suggestion and Space (or Enter) uses it; without a Tab tap Space is just a space. Accept right away: a Tab tap uses the highlighted suggestion, as in earlier versions. Tab cycle (preview): each Tab tap puts the next suggestion straight into your text; keep typing to keep it, Esc to undo.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
                 Some(SettingItem::new("Show the input language", badge).description("A flag shows by the caret: when the keyboard switches between Thai and English, and while a text field is focused with nothing typed in it yet.")),
+                cfg!(target_os = "macos").then(|| SettingItem::new("Menu bar icon", menu_icon).description("Colour: the white ท card is in front while you type Thai, the orange T card while you type English, and both turn grey while typeThai is paused. Plain: a black icon that follows the menu bar's colours.")),
                 self.snap.input_badge.then(|| SettingItem::new("Show it again after", badge_delay).description("How long a pause in typing brings the flag back while the same text field still has focus. Off: it shows once when focus lands in the field, and a pause never brings it back.")),
                 Some(SettingItem::new("Pick with", pick).description("Arrow keys: while the bubble is up, Up moves into it, then Left or Right chooses and Enter or Up applies; Down or Esc leaves. Until Up the arrows move the cursor. Ctrl+1–3: Ctrl+1, Ctrl+2 or Ctrl+3 picks that suggestion; otherwise those keys reach the app.")),
                 Some(SettingItem::new("Learn from my typing", learn).description("Words you type often come first, and a word you often type next is offered after a pause. A new word is suggested after you type it three times.")),
@@ -707,6 +715,12 @@ impl SettingsView {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.tab_key = key;
         bridge::push_settings(SettingsCmd::SetTabKey(key));
+        cx.notify();
+    }
+    fn set_menu_bar_icon(&mut self, s: crate::trayicon::Style, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.menu_bar_icon = s;
+        bridge::push_settings(SettingsCmd::SetMenuBarIcon(s));
         cx.notify();
     }
     fn set_bubble(&mut self, bubble: BubbleLayout, cx: &mut Context<Self>) {

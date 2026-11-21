@@ -683,6 +683,8 @@ pub fn run(rx: Receiver<UiMsg>) {
                     let front = bridge::front_app();
                     if front != front_app { if let Some(t) = &tray { t.set_front_app(front.as_ref()) } front_app = front; }
                     #[cfg(target_os = "macos")] super::platform::macos::sync_input_source();
+                    // the tray icon shows the input language (after the source is read, so a switch shows on this turn)
+                    if let Some(t) = &tray { t.tick() }
                     if stop || quit_at.is_some_and(|t| Instant::now() > t) { cx.quit(); }
                 });
                 if stop { break }
@@ -954,6 +956,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,
+        menu_bar_icon: Default::default(),
         off_apps: vec![("com.apple.Terminal".into(), "Terminal".into()), ("com.microsoft.VSCode".into(), "Visual Studio Code".into())],
     }
 }

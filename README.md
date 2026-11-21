@@ -46,6 +46,10 @@ when sure** (off unless you turn it on) converts the words it is sure about by i
   1–10 s, 2 s by default, or **Off** to show it once when focus lands in the field and never bring it back on a pause;
   prefs.json `"badge_idle_ms"`, `0` for Off). Not in password fields or outside a text field,
   not while the bubble is up, and only where the caret or the text field can be found. Clicks pass through it on macOS; on Windows a click on it only takes it down.
+- **Input language in the menu bar.** The typeThai icon in the menu bar (macOS) or the tray (Windows) is two cards: the
+  white ท card is in front while the input source is Thai, the orange T card while it is English, and they swap when
+  you switch. While typeThai is paused they turn grey. On macOS, **Settings… → Word suggestions → Menu bar icon:
+  Plain** (prefs.json `"menu_bar_icon": "plain"`) uses a black icon that follows the menu bar's colours instead.
 - **Why each option is offered.** Every fix is marked: the flag of the language a wrong-layout word becomes
   (🇹🇭 Thai, 🇺🇸 English, as the keys are the US layout's), or a red spell-check mark for a typo fix. In the strip the
   mark sits faint in the button's bottom-right corner, behind the word; stacked rows show it as a small badge.

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod app; mod autoconvert; mod backspace; mod bridge; mod candidate; mod completion; mod engine; mod keys; mod local_setup; mod placement; mod prefs; mod rank; mod rewrite; mod predict;
-mod badge; mod inputsrc; mod evalauto; mod evallive; mod evaltypo; mod platform; mod update; mod whats_new;
+mod badge; mod inputsrc; mod trayicon; mod evalauto; mod evallive; mod evaltypo; mod platform; mod update; mod whats_new;
 #[cfg(any(windows, target_os = "macos"))] mod ui;
 fn main() {
     // --demo-bubble [x,y ...] [--secs N]: show the gpui bubble with sample Thai items, no key capture, no model needed
