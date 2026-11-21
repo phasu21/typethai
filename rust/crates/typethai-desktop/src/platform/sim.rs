@@ -4,6 +4,8 @@
 //! as Thai while Thai is active, as the US letter after a switch to ABC); the sim follows `SwitchInput`.
 //! Focus: `<Focus>` / `<Blur>`: focus is in a text field (the input-language preview shows and stays) or left it. Any
 //! other token is a keystroke, so it takes the preview down like a real key does.
+//! `<Lost>`: the key hook was off for a moment (macOS switches an event tap off when it is too slow, as on a loaded
+//! machine), so the keys typed meanwhile never reached typeThai; the platforms then forget what is on screen.
 //! Editing: `<BS>` Backspace, `<A-BS>` Option/Ctrl+Backspace (word), `<C-BS>` Cmd+Backspace (line).
 //! Bubble keys: `<Tab>` (or a literal tab) presses and releases Tab, `<TabDown>` / `<TabUp>` hold and release it (a digit
 //! 1..3 in between applies that row), `<S-Up>`, `<S-Down>`, `<Esc>`, `<C-1>`..`<C-3>` (Ctrl+digit). `<Idle>`: a typing pause long enough for word
@@ -61,12 +63,13 @@ pub fn run(mut app: App) {
                 app.engine.auto_safe = t == "<FieldText>"; println!("  [field: {}]", if app.engine.auto_safe { "text" } else { "unknown" });
                 i += t.chars().count(); continue
             }
-            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Tab>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>",
+            let tok = ["<Tab>", "<TabDown>", "<TabUp>", "<S-Tab>", "<S-Up>", "<S-Down>", "<Esc>", "<C-1>", "<C-2>", "<C-3>", "<TH>", "<EN>", "<Focus>", "<Blur>", "<Lost>", "<BS>", "<A-BS>", "<C-BS>", "<Idle>",
                 "<Rate+1>", "<Rate+2>", "<Rate+3>", "<Rate+4>", "<Rate-1>", "<Rate-2>", "<Rate-3>", "<Rate-4>"].into_iter().find(|t| rest.starts_with(t));
             // None = the typing pause (`<Idle>`)
             let (k, typed) = if let Some(t) = tok {
                 i += t.chars().count() - 1;
                 if t == "<TH>" || t == "<EN>" { app.engine.set_thai_active(t == "<TH>"); println!("  [input source: {}]", if t == "<TH>" { "Thai" } else { "ABC" }); i += 1; continue }
+                if t == "<Lost>" { for a in app.engine.keys_missed() { println!("  {t} -> {a:?}"); if matches!(a, Action::HideBubble) { bubble.clear(); } } i += 1; continue }
                 if t == "<Focus>" || t == "<Blur>" { for a in app.engine.on_focus(t == "<Focus>") { println!("  {t} -> {a:?}") } i += 1; continue }
                 match t { "<Tab>" | "<TabDown>" => (Some(Key::Tab), Some('\t')), "<TabUp>" => (Some(Key::TabUp), None), "<S-Tab>" => (Some(Key::TabBack), None), "<BS>" => (Some(Key::Backspace), Some('\u{8}')), "<A-BS>" => (Some(Key::WordDelete), Some('\u{17}')), "<C-BS>" => (Some(Key::LineDelete), Some('\u{15}')), "<S-Up>" => (Some(Key::SelectPrev), None), "<S-Down>" => (Some(Key::SelectNext), None), "<Idle>" => (None, None),
                     "<C-1>" | "<C-2>" | "<C-3>" => (Some(Key::PickRow(t.as_bytes()[3] as usize - b'1' as usize)), None),

@@ -431,8 +431,12 @@ fn translate(code: u16, flags: u64) -> Option<Key> {
 }
 fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
     if e.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == MAGIC { return CallbackResult::Keep }
+    // back on first, whatever else is going on: a tap left off would see no key for the rest of the session
+    if matches!(ty, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
+        let port = TAP_PORT.load(Ordering::SeqCst); if !port.is_null() { unsafe { CGEventTapEnable(port, true) } }
+    }
     let r = with(|st| match ty {
-        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => { unsafe { CGEventTapEnable(st.tap_port, true) }; false }
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => { tap_disabled(st, matches!(ty, CGEventType::TapDisabledByTimeout)); false }
         CGEventType::LeftMouseDown | CGEventType::RightMouseDown | CGEventType::OtherMouseDown => {
             let p = e.location();
             match bridge::geom().and_then(|g| g.hit(p.x, p.y, e.get_flags().bits() & 0x20000 != 0)) {
@@ -500,6 +504,18 @@ fn on_event(ty: CGEventType, e: &CGEvent) -> CallbackResult {
     if r { CallbackResult::Drop } else { CallbackResult::Keep }
 }
 
+/// The tap's port, for switching it back on from the callback without the state (`on_event`). Null while there is none.
+static TAP_PORT: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// macOS switched the tap off (`on_event` has switched it back on): its callback overran (a loaded machine, an app
+/// slow to answer Accessibility) or user input did. Keys typed until now went to the app unseen — an Enter, a click
+/// elsewhere — so what is on screen may be about text that is gone: forget the word and the focus verdict, and take
+/// the bubble and the preview down. The look that follows tells the preview whether focus is still in a text field.
+fn tap_disabled(st: &mut State, timeout: bool) {
+    eprintln!("typeThai: macOS switched the event tap off ({}); back on, and the keys typed meanwhile were not seen", if timeout { "too slow" } else { "user input" });
+    st.gate.reset(); st.field_rx = None; seen_input(st);
+    let a = st.app.engine.keys_missed(); run_actions(st, a);
+    arm_focus_look(st, true);
+}
 /// Keys aimed at this process (the Settings window) are left alone, so the field can be typed in.
 fn key_targets_us(target_pid: i64) -> bool {
     let us = std::process::id() as i64;
@@ -638,14 +654,14 @@ fn no_permission() -> bool { std::env::var_os("TYPETHAI_FAKE_UNTRUSTED").is_some
 /// record saved by an older copy answering for us): the app then keeps running without it, says so, and retries, so
 /// granting the permission takes effect without a relaunch.
 fn arm_tap(st: &mut State) -> bool {
-    st.tap = None; st.tap_port = std::ptr::null();
+    st.tap = None; st.tap_port = std::ptr::null(); TAP_PORT.store(std::ptr::null_mut(), Ordering::SeqCst);
     if no_permission() { return false }
     let tap = match CGEventTap::new(CGEventTapLocation::Session, CGEventTapPlacement::HeadInsertEventTap, CGEventTapOptions::Default,
         vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown], |_p, ty, e| on_event(ty, e)) {
         Ok(t) => t,
         Err(_) => return false,
     };
-    st.tap_port = tap.mach_port().as_concrete_TypeRef() as *const c_void;
+    st.tap_port = tap.mach_port().as_concrete_TypeRef() as *const c_void; TAP_PORT.store(st.tap_port as *mut c_void, Ordering::SeqCst);
     let src = tap.mach_port().create_runloop_source(0).expect("runloop source");
     CFRunLoop::get_current().add_source(&src, unsafe { kCFRunLoopCommonModes });
     tap.enable();
