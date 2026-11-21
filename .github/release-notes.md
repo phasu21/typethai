@@ -1,5 +1,8 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.27**
+- **The suggestion no longer stays on screen after Enter or a click when the Mac is busy (macOS).**
+
 **New in 0.5.26**
 - **Auto-convert when sure (optional, off by default).** Turn on Settings → Word suggestions → **Auto-convert when
   sure**: a finished word typeThai is sure you typed on the wrong layout (`l;ylfu` → สวัสดี, or English typed on the
