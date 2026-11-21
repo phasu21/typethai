@@ -563,6 +563,11 @@ impl Engine {
         a.extend(self.hide_badge());
         a
     }
+    /// The key hook was off for a moment (macOS switches an event tap off when its callback overruns, which a loaded
+    /// machine or an app slow to answer Accessibility brings about): keys typed meanwhile — an Enter, a click — went to
+    /// the app unseen, so the rows and the preview on screen are about text that may be gone. Take them down and start
+    /// fresh, as for a click elsewhere.
+    pub fn keys_missed(&mut self) -> Vec<Action> { self.left_field() }
     /// A keystroke the user made, however the platform then routes it (a converted key, a bypassed one, one of ours):
     /// typing takes the preview down, and it comes back `Options::badge_idle` later if focus is still in a text field
     /// (or not at all, when that is None).
@@ -4765,6 +4770,22 @@ mod tests {
         typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
         e.badge_up = true; // the preview is up as well (it came back over the field at some point)
         assert_eq!(e.on_focus(false), vec![Action::HideBubble, Action::Badge(false)]);
+    }
+    #[test] fn keys_the_hook_never_saw_take_the_bubble_down() {
+        // a loaded machine: the app in front answers Accessibility slowly, the key hook overruns and macOS switches it
+        // off for a moment (kCGEventTapDisabledByTimeout). The Enter typed meanwhile went straight to the app, so the
+        // rows are about text that is no longer being typed: when the hook comes back, nothing of them stays up
+        let Some(mut e) = engine() else { return };
+        completers(&mut e, CompleteMode::Pause);
+        e.on_focus(true);
+        typ(&mut e, "hel"); idle(&mut e, 600); assert!(e.bubble_visible());
+        e.badge_up = true;
+        // (Enter, typed here, never reached the engine)
+        assert_eq!(e.keys_missed(), vec![Action::HideBubble, Action::Badge(false)]);
+        assert!(!e.bubble_visible() && e.buffer().is_empty(), "a fresh state");
+        assert_eq!(e.on_idle(Instant::now() + Duration::from_secs(5)), vec![], "and nothing comes back on its own");
+        typ(&mut e, "x"); assert_eq!(e.buffer(), "x", "the next word is not glued onto the keys before the gap");
+        assert_eq!(e.keys_missed(), vec![], "nothing up: nothing to take down");
     }
     #[test] fn focus_leaving_takes_a_held_tab_indicator_down() {
         let Some(mut e) = engine() else { return };
