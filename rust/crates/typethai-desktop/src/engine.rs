@@ -890,8 +890,10 @@ impl Engine {
             self.phrase = 0;
             self.shown.clear();
             if self.bubble.is_empty() {
-                // an earlier ShowBubble queued in this key must not outlive the empty decision
-                acts.retain(|a| !matches!(a, Action::ShowBubble(_) | Action::HideBubble));
+                // an earlier ShowBubble queued in this key must not outlive the empty decision, and an earlier
+                // HideBubble must stay: the rows on screen before this key are still up until it reaches the UI
+                // (Backspace hides, then the refreshed completions are all gated out: dropping the Hide left them up)
+                acts.retain(|a| !matches!(a, Action::ShowBubble(_)));
                 return
             }
             self.bubble.clear(); Action::HideBubble
@@ -5720,5 +5722,84 @@ mod tests {
         e.opts.tab_key = TabKey::Cycle; let mut a = vec![];
         e.show(vec![row("Fix typos", RewriteRow::Notice)], &mut a);
         let o = tab(&mut e); assert_eq!(o.actions, vec![Action::Focus(Rail::Tab)]); assert!(e.cycle.is_none());
+    }
+    // ---------- the bubble on screen always matches the engine's ----------
+    /// What the UI shows after `acts`: the last Show's rows, or nothing after a Hide.
+    fn on_screen(ui: &mut Vec<BubbleItem>, acts: &[Action]) {
+        for a in acts { match a { Action::ShowBubble(items) => *ui = items.clone(), Action::HideBubble => ui.clear(), _ => {} } }
+    }
+    /// Random keys, pauses and settings: after each, what the UI shows is what the engine thinks is up. A mismatch is
+    /// rows left on screen that no later key takes down (the engine sees none to hide).
+    #[test] fn fuzz_bubble_on_screen_matches_engine() {
+        let Some(mut e) = engine() else { return };
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut rnd = |n: u64| { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; (seed % n) as usize };
+        let keys = [Key::Char('d'), Key::Char('a'), Key::Char('s'), Key::Char('h'), Key::Char('l'), Key::Char(';'), Key::Char('y'), Key::Char('f'), Key::Char('u'),
+            Key::Backspace, Key::Backspace, Key::Backspace, Key::Boundary(Boundary::Space), Key::Boundary(Boundary::Enter), Key::WordDelete, Key::LineDelete, Key::Esc, Key::Tab, Key::TabUp, Key::Nav, Key::TabBack, Key::SelectNext, Key::Hotkey(Hotkey::Accept(0)), Key::Hotkey(Hotkey::Undo), Key::Char('k'), Key::Char('o'), Key::Char('e')];
+        for round in 0..4000 {
+            let mode = [CompleteMode::Pause, CompleteMode::Typing][round % 2];
+            dash_words(&mut e, mode);
+            e.opts.tab_key = [TabKey::Accept, TabKey::SpaceApplies, TabKey::Cycle, TabKey::Highlight][round % 4];
+            e.opts.live = round % 3 != 0;
+            e.set_thai_active(round % 5 == 0);
+            e.speller = (round % 7 < 3).then(|| Box::new(FakeSpeller) as Box<dyn Speller + Send>);
+            let mut ui = vec![]; let r = e.reset(); on_screen(&mut ui, &r);
+            let mut trail = vec![];
+            for _ in 0..40 {
+                let acts = if rnd(5) == 0 { trail.push("<Idle>".to_string()); let t = e.last_key.unwrap_or_else(Instant::now); e.on_idle(t + Duration::from_millis(700)) }
+                    else { let k = keys[rnd(keys.len() as u64)].clone(); trail.push(format!("{k:?}")); e.on_key(k).actions };
+                on_screen(&mut ui, &acts);
+                trail.push(format!("  => {:?} word={:?} line={} cycle={}\n", acts.iter().filter(|a| !matches!(a, Action::SpaceKey(_))).map(|a| match a { Action::ShowBubble(i) => format!("Show{:?}", i.iter().map(|b| b.label.clone()).collect::<Vec<_>>()), a => format!("{a:?}") }).collect::<Vec<_>>(), e.word, e.line.len(), e.cycle.is_some()));
+                assert_eq!(ui, e.bubble, "round {round}, after {}", trail.join(" "));
+            }
+        }
+    }
+    fn dash_words(e: &mut Engine, mode: CompleteMode) {
+        completers(e, mode);
+        e.en_comp = Some(Completer::new([("dash", 20.0), ("dashboard", 30.0), ("dashing", 10.0), ("day", 40.0), ("dad", 15.0), ("do", 50.0), ("did", 45.0)].iter().map(|(w, f)| (w.to_string(), *f))));
+    }
+    /// Feed `keys` (`None`: a pause long enough for completions), tracking what the UI shows; it must match the engine.
+    fn on_screen_keys(e: &mut Engine, ui: &mut Vec<BubbleItem>, keys: &[Option<Key>]) {
+        for k in keys {
+            let acts = match k { Some(k) => e.on_key(k.clone()).actions, None => { let t = e.last_key.unwrap_or_else(Instant::now); e.on_idle(t + Duration::from_millis(700)) } };
+            on_screen(ui, &acts);
+            assert_eq!(*ui, e.bubble, "after {k:?}: {acts:?}");
+        }
+    }
+    #[test] fn backspace_to_empty_takes_the_rows_down() {
+        let Some(mut e) = engine() else { return };
+        let bs = || Some(Key::Backspace);
+        let w = |s: &str| s.chars().map(|c| Some(key_of(c))).collect::<Vec<_>>();
+        for mode in [CompleteMode::Pause, CompleteMode::Typing] {
+            // the report: rows up for `dash`, Backspace refreshes them, and the refreshed rows are all under the floor.
+            // The Hide of the first refresh must reach the screen, not be dropped by the empty second decision
+            dash_words(&mut e, mode); let mut ui = vec![]; on_screen(&mut ui, &e.reset());
+            on_screen_keys(&mut e, &mut ui, &[w("dash"), vec![None]].concat()); assert!(!ui.is_empty(), "{mode:?}: rows for dash");
+            e.opts.floors.completion = 1.1;
+            on_screen_keys(&mut e, &mut ui, &[bs()]); assert!(ui.is_empty(), "{mode:?}: gated-out refresh hides");
+            on_screen_keys(&mut e, &mut ui, &[bs(), bs(), bs(), None]); assert!(ui.is_empty()); assert_eq!(e.buffer(), "");
+            e.opts.floors = Floors::default();
+            // dash + 4 x Backspace, quick and with a pause after each
+            on_screen(&mut ui, &e.reset());
+            on_screen_keys(&mut e, &mut ui, &[w("dash"), vec![None, bs(), bs(), bs(), bs(), None]].concat()); assert!(ui.is_empty());
+            on_screen(&mut ui, &e.reset());
+            on_screen_keys(&mut e, &mut ui, &[w("dash"), vec![None, bs(), None, bs(), None, bs(), None, bs(), None, None]].concat()); assert!(ui.is_empty());
+            // back over a space into the previous word, then through it to empty
+            on_screen(&mut ui, &e.reset());
+            on_screen_keys(&mut e, &mut ui, &[w("do dash"), vec![None], vec![bs(); 5], vec![None], vec![bs(); 2], vec![None, None]].concat());
+            assert!(ui.is_empty()); assert_eq!(e.buffer(), "");
+            // a Thai word (wrong layout), then Backspace to empty
+            on_screen(&mut ui, &e.reset());
+            on_screen_keys(&mut e, &mut ui, &[w(&keys("ภาษา")), vec![None], vec![bs(); 4], vec![None]].concat()); assert!(ui.is_empty());
+            // Option+Backspace / Cmd+Backspace over the rows
+            for k in [Key::WordDelete, Key::LineDelete] {
+                on_screen(&mut ui, &e.reset());
+                on_screen_keys(&mut e, &mut ui, &[w("hello dash"), vec![None, Some(k), None]].concat()); assert!(ui.is_empty(), "{mode:?}");
+            }
+        }
+        // a Tab cycle under way, then Backspace to empty
+        dash_words(&mut e, CompleteMode::Pause); e.opts.tab_key = TabKey::Cycle; let mut ui = vec![]; on_screen(&mut ui, &e.reset());
+        on_screen_keys(&mut e, &mut ui, &[w("dash"), vec![None, Some(Key::Tab), Some(Key::TabUp)]].concat()); assert!(e.cycle.is_some());
+        on_screen_keys(&mut e, &mut ui, &[vec![bs(); 12], vec![None, None]].concat()); assert!(ui.is_empty());
     }
 }
