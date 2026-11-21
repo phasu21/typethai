@@ -645,7 +645,13 @@ unsafe fn offer_badge(st: &mut State, fg: HWND, pin: bool) -> bool {
 /// window is ours, or focus is a password field or no text field. A different window with another layout is not a switch.
 unsafe fn watch_layout(st: &mut State) {
     let fg = GetForegroundWindow(); if fg.is_invalid() { return }
-    if st.layouts.see(fg.0 as usize as u64, layout_is_thai(fg)).is_some() { let _ = offer_badge(st, fg, false); }
+    let thai = layout_is_thai(fg);
+    // the tray icon follows the layout of the window in front (a different window with another layout changes it too),
+    // but not the taskbar's or typeThai's own: clicking the tray icon must not flip it
+    if !foreground_is_self(fg) && !matches!(class_of(fg).as_str(), "Shell_TrayWnd" | "NotifyIconOverflowWindow" | "TopLevelWindowForOverflowXamlIsland") {
+        bridge::INPUT_THAI.store(thai, Ordering::SeqCst);
+    }
+    if st.layouts.see(fg.0 as usize as u64, thai).is_some() { let _ = offer_badge(st, fg, false); }
 }
 unsafe fn control(st: &mut State) -> bool {
     take_click(st);

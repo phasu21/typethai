@@ -36,6 +36,15 @@ letters of **Noto Sans** 2.015 (https://github.com/notofonts/latin-greek-cyrilli
 the SIL Open Font License 1.1 (`rust/crates/typethai-desktop/fonts/OFL.txt`). It is renamed typeThai Sans because it is
 a modified version, and it stays under the OFL.
 
+## App and tray icons
+
+The typeThai icon (`packaging/typethai.icns`, `packaging/typethai.ico`, the SVG masters in `packaging/icon/`) and the
+tray images (`rust/crates/typethai-desktop/tray/*.png`) are original artwork for typeThai, under the project's MIT
+license. Their letters ท and T, and the "typeThai" wordmark, are outlines of **IBM Plex Sans Thai Looped** Bold
+(https://github.com/google/fonts/tree/main/ofl/ibmplexsansthailooped), © IBM Corp., under the SIL Open Font License 1.1.
+No font file is shipped; the OFL allows artwork made with the font, and "Plex" is a Reserved Font Name only for
+modified fonts.
+
 ## Bundled flags
 
 `rust/crates/typethai-desktop/flags/th.svg` and `us.svg`, the square flags on the bubble's conversion badges, are from

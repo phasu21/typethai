@@ -42,7 +42,9 @@ pub struct App { pub engine: Engine, pub state_path: PathBuf, pub prefs_path: Pa
     off_apps: std::collections::BTreeMap<String, String>,
     /// The app keys/focus went to last, other than typeThai itself: (raw id, display name). What `refresh_front_off`
     /// recomputes the off state for when the user turns the app on/off from the tray or Settings.
-    front: Option<(String, String)> }
+    front: Option<(String, String)>,
+    /// The menu-bar / tray icon style (prefs.json "menu_bar_icon"), published to the tray through `bridge::TRAY_PLAIN`.
+    pub menu_bar_icon: crate::trayicon::Style }
 /// Writes the state files on a thread of its own, in the order asked: serialising a full words.json takes about 1.5 ms,
 /// too long for the key tap callback that triggers the save.
 struct Saver { tx: mpsc::Sender<Save> }
@@ -100,7 +102,8 @@ impl App {
         if cli.reverse { engine.rev = Some(typethai_core::reverse::Reverse::embedded()); }
         engine.load_completers(&mut m);
         if !cli.no_typo { engine.speller = crate::platform::spell::system(); }
-        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, rank_path, off_apps: p.off_apps, front: None, saver: Saver::spawn() };
+        let mut app = App { engine, state_path: cli.state.clone(), prefs_path, words_path, rank_path, off_apps: p.off_apps, front: None, saver: Saver::spawn(), menu_bar_icon: p.menu_bar_icon };
+        app.publish_menu_bar_icon();
         app.set_predict(app.engine.opts.predict);
         Ok(app)
     }
@@ -138,7 +141,12 @@ impl App {
         else if self.engine.rank.pending() >= rank::FLUSH_EVERY || self.engine.rank.cleared { self.save_rank() }
         if std::mem::take(&mut self.engine.prefs_dirty) { self.save_prefs() }
     }
-    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), offer_last: self.engine.offer_last.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, tab_key: self.engine.opts.tab_key, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, next_word: self.engine.opts.next_word, bubble: self.engine.opts.bubble, auto_convert: self.engine.opts.auto_convert, auto_level: self.engine.opts.auto_level, auto_undone: self.engine.auto_undone.clone(), rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates, off_apps: self.off_apps.clone() }.save(&self.prefs_path); }
+    pub fn save_prefs(&self) { Prefs { never: self.engine.never.clone(), offer_last: self.engine.offer_last.clone(), completion: self.engine.opts.complete, complete_idle: self.engine.opts.complete_idle, tab_hold: self.engine.opts.tab_hold, learn_words: self.engine.opts.learn_words, predict: self.engine.opts.predict, accept: self.engine.opts.accept, tab_key: self.engine.opts.tab_key, pick_ctrl: self.engine.opts.pick_ctrl, pick_arrows: self.engine.opts.pick_arrows, input_badge: self.engine.opts.input_badge, badge_idle: self.engine.opts.badge_idle, next_word: self.engine.opts.next_word, bubble: self.engine.opts.bubble, auto_convert: self.engine.opts.auto_convert, auto_level: self.engine.opts.auto_level, auto_undone: self.engine.auto_undone.clone(), rewrite: self.engine.rewrite.clone(), check_updates: self.engine.check_updates, menu_bar_icon: self.menu_bar_icon, off_apps: self.off_apps.clone() }.save(&self.prefs_path); }
+    /// Settings chose the menu-bar icon style; true when it changed (prefs.json is written).
+    pub fn set_menu_bar_icon(&mut self, s: crate::trayicon::Style) -> bool {
+        let changed = self.menu_bar_icon != s; self.menu_bar_icon = s; self.publish_menu_bar_icon(); changed
+    }
+    fn publish_menu_bar_icon(&self) { crate::bridge::TRAY_PLAIN.store(self.menu_bar_icon == crate::trayicon::Style::Plain, std::sync::atomic::Ordering::SeqCst) }
     /// Keys or focus just went to this app (not typeThai itself): remember it, recompute whether it is off from prefs,
     /// tell the tray/UI and return the engine's actions (a bubble or preview that was up goes away).
     pub fn set_front_app(&mut self, id: &str, name: &str) -> Vec<Action> {
@@ -183,7 +191,7 @@ impl App {
     /// A minimal App around a model-free engine, for tests in other modules that never touch the state files.
     pub(crate) fn for_test(engine: Engine) -> App {
         let dir = std::env::temp_dir().join(format!("typethai-app-test-{}", std::process::id()));
-        App { engine, state_path: dir.join("personal.json"), prefs_path: dir.join("prefs.json"), words_path: dir.join("words.json"), rank_path: dir.join("rank.jsonl"), off_apps: Default::default(), front: None, saver: Saver::spawn() }
+        App { engine, state_path: dir.join("personal.json"), prefs_path: dir.join("prefs.json"), words_path: dir.join("words.json"), rank_path: dir.join("rank.jsonl"), off_apps: Default::default(), front: None, saver: Saver::spawn(), menu_bar_icon: Default::default() }
     }
 }
 

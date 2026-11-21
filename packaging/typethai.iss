@@ -29,6 +29,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\typethai-desktop.exe
+; the installer's own icon (the exe carries the same one, from build.rs)
+SetupIconFile=typethai.ico
 ; typeThai has no window to close, so stop it outright when upgrading.
 CloseApplications=force
 

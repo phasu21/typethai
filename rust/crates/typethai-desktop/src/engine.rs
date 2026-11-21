@@ -1318,11 +1318,11 @@ impl Engine {
             SettingsCmd::SetRewrite(c) => { let changed = self.rewrite != c; self.rewrite = c; changed }
             SettingsCmd::SetCheckUpdates(on) => { let changed = self.check_updates != on; self.check_updates = on; changed }
             // handled by `App` (it owns the off-app list and the app in front), not the engine's own settings
-            SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_) => false,
+            SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_) | SettingsCmd::SetMenuBarIcon(_) => false,
         }
     }
     pub fn settings_snapshot(&self) -> SettingsSnap {
-        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, tab_key: self.opts.tab_key, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, auto_convert: self.opts.auto_convert, auto_level: self.opts.auto_level, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates, off_apps: vec![] }
+        SettingsSnap { never: self.never.iter().cloned().collect(), learned: self.personal.learned(), completion: self.opts.complete, complete_idle: self.opts.complete_idle, tab_hold: self.opts.tab_hold, learn_words: self.opts.learn_words, predict: self.opts.predict, accept: self.opts.accept, tab_key: self.opts.tab_key, pick_ctrl: self.opts.pick_ctrl, pick_arrows: self.opts.pick_arrows, input_badge: self.opts.input_badge, badge_idle: self.opts.badge_idle, next_word: self.opts.next_word, bubble: self.opts.bubble, auto_convert: self.opts.auto_convert, auto_level: self.opts.auto_level, words_learned: self.words.len(), rewrite: self.rewrite.clone(), check_updates: self.check_updates, menu_bar_icon: Default::default(), off_apps: vec![] }
     }
     /// Hide a bubble whose current word was just blocked.
     pub fn hide_if_blocked(&mut self) -> Vec<Action> {
