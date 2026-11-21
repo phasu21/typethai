@@ -93,6 +93,14 @@ once they are up they follow the word as you keep typing. **Settings… → Word
 - **Thai typo suggestions.** For a converted word with a likely typo, extra rows offer corrected spellings.
 - **English spelling suggestions.** A misspelled word left as English (`is ths`) gets the system spell checker's
   corrections (`this`, `the`); when the word is also offered as Thai, the best English spelling is the second row.
+- **English wrong-word fixes.** A real word that is probably the wrong one (`a letter form the bank` → *from*,
+  `is you're car here` → *your*) gets a red-marked row with the word it was likely meant as. The row
+  comes one word late, after the next word and its space, because the next word is what tells: `form the` →
+  **from**. Tab (then Space with the default Tab key), ⌃⌥1 or a click applies it and retypes the words after it; ⌃⌥Z
+  puts it back. Space alone, Enter, typing on and auto-convert never apply it. The sets are the 235 classic mix-ups
+  from tinyfix (`their`/`there`/`they're`, `then`/`than`, `to`/`too`/`two`, `its`/`it's`...), scored with the
+  model's English word pairs (model-v6 adds the contractions); it stays quiet unless the pairs are sure (about 0.1
+  wrong rows per 1,000 words of chat text). It is part of the typo suggestions (`--no-typo` turns it off).
 - **⌃⌥R for a selection or the last word.** With text selected, the bubble offers it in the other layout
   (`l;ylfu` → สวัสดี, or English typed on the Thai layout back to English) and with its typos fixed, both worked
   out on your computer, then the AI rewrite actions. With nothing selected it offers the conversion and spelling
@@ -313,7 +321,7 @@ cd rust
 TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
-gh release download model-v5 -R phasu21/typethai -p typethai.ttm -D target/release
+gh release download model-v6 -R phasu21/typethai -p typethai.ttm -D target/release
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
@@ -349,6 +357,8 @@ scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DA
 python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
 scripts/bigrams/latte/setup.sh "$LATTE"                # optional: build-time LATTE word segmentation for Thai pairs
 LATTE="$LATTE" PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v5 ships 3:all with LATTE (its Thai pairs; English as in model-v4)
+# model-v6 (shipped): model-v5 with the English pairs and frequencies rebuilt to keep contractions (you're, it's, don't)
+PYTHON="$VENV/bin/python" scripts/bigrams/model-v6.sh "$DATA" "$WORK" model-v5.ttm model-v6.ttm
 ```
 
 The TypeScript prototype (`src/`, `scripts/`, `test/`, Node ≥ 23.6) holds the training and evaluation pipeline. The

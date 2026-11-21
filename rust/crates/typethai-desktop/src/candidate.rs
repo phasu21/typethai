@@ -29,6 +29,7 @@ pub enum Src {
     Undo,        // the UndoConversion row; deterministic
     Guess,       // double-Tab / hotkey phrase guess
     Typo,        // corrector suggestions, completer fixes, spell-checker guesses
+    RealWord,    // English real-word fixes from the confusion sets (`form` -> `from`), one word late
     Completion,  // prefix completion (completer, spell-checker extensions, carried rows)
     Prediction,  // typethai-predict: the typed-completion row and the model's next-word row
     NextWord,    // corpus bigram pairs and the user's own pairs
@@ -41,13 +42,13 @@ impl Src {
         match self {
             Src::Completion => Some(Floor::Completion),
             Src::Prediction => Some(Floor::Prediction),
-            Src::Live | Src::Convert | Src::ConvertPrev | Src::Undo | Src::Guess | Src::Typo | Src::NextWord | Src::Rewrite => None,
+            Src::Live | Src::Convert | Src::ConvertPrev | Src::Undo | Src::Guess | Src::Typo | Src::RealWord | Src::NextWord | Src::Rewrite => None,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Src::Live => "live", Src::Convert => "convert", Src::ConvertPrev => "convert_prev",
-            Src::Undo => "undo", Src::Guess => "guess", Src::Typo => "typo",
+            Src::Undo => "undo", Src::Guess => "guess", Src::Typo => "typo", Src::RealWord => "real_word",
             Src::Completion => "completion", Src::Prediction => "prediction",
             Src::NextWord => "next_word", Src::Rewrite => "rewrite",
         }
@@ -98,6 +99,7 @@ pub fn src_of_kind(kind: &BubbleKind) -> Src {
         BubbleKind::UndoConversion => Src::Undo,
         BubbleKind::Convert { .. } => Src::Convert,
         BubbleKind::Typo { .. } => Src::Typo,
+        BubbleKind::RealWord { .. } => Src::RealWord,
         BubbleKind::ConvertPrev { .. } => Src::ConvertPrev,
         BubbleKind::Guess { .. } => Src::Guess,
         BubbleKind::Complete { .. } => Src::Completion,

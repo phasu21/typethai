@@ -17,9 +17,16 @@ fn pairs(v: &[(&str, &str, u64)]) -> Vec<Pair> { v.iter().map(|&(a, b, c)| (a.in
         (Lang::Th, vec!["ฉัน", "ชอบ", "กิน", "ข้าว", "ผัด"]),
         (Lang::En, vec!["i", "like", "fried", "rice"]),
         (Lang::Th, vec!["ไป", "เที่ยว"]),
+        (Lang::En, vec!["don't", "stop"]),
         (Lang::Th, vec!["ฉัน", "ชอบ"]),
         (Lang::Th, vec!["กิน", "ข้าว"]),
     ]);
+}
+#[test] fn contractions_stay_whole_and_quote_marks_end_runs() {
+    let got = |l: &str| -> Vec<Vec<String>> { word_runs(l, &dict()).into_iter().map(|(_, w)| w).collect() };
+    assert_eq!(got("I think you\u{2019}re right and it's fine"), [vec!["i", "think", "you're", "right", "and", "it's", "fine"]]);
+    assert_eq!(got("he said 'go home now' to them"), [vec!["he", "said"], vec!["go", "home", "now"], vec!["to", "them"]]);
+    assert_eq!(got("the students' books are ' here too"), [vec!["the", "students"], vec!["books", "are"], vec!["here", "too"]]);
 }
 #[test] fn counts_adjacent_pairs_within_runs_only() {
     let d = dict(); let mut c = Counts::default();
@@ -57,4 +64,15 @@ fn pairs(v: &[(&str, &str, u64)]) -> Vec<Pair> { v.iter().map(|&(a, b, c)| (a.in
     let a = pairs(&[("ฉัน", "ชอบ", 3), ("ชอบ", "กิน", 1)]);
     let b = pairs(&[("ฉัน", "ชอบ", 2), ("ฉัน", "ไป", 4)]);
     assert_eq!(merge([a, b]), pairs(&[("ฉัน", "ชอบ", 5), ("ฉัน", "ไป", 4), ("ชอบ", "กิน", 1)]));
+}
+#[test] fn contractions_are_told_from_possessives() {
+    use typethai_core::corpus::is_contraction;
+    for w in ["you're", "it's", "let's", "who's", "don't", "can't", "won't", "we've", "i'll", "i'd", "i'm", "they're"] { assert!(is_contraction(w), "{w}") }
+    for w in ["john's", "o'neil", "students", "rock'n'roll", "'s", "n't", "it'", "It's"] { assert!(!is_contraction(w), "{w}") }
+}
+#[test] fn english_runs_match_word_runs() {
+    use typethai_core::corpus::english_runs;
+    let l = "ฉันชอบกินข้าวผัด, I like it's Fried rice 3 times ไป เที่ยว don't stop ฉันกขชอบ ok then";
+    let full: Vec<Vec<String>> = word_runs(l, &dict()).into_iter().filter(|r| r.0 == Lang::En).map(|r| r.1).collect();
+    assert_eq!(english_runs(l, &dict()), full);
 }
