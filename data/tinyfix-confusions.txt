@@ -1,0 +1,238 @@
+# Real-word confusion sets: the first word on a line is the typed word, the rest are the words it is often typed for.
+# From paperweight/tinyfix (https://huggingface.co/paperweight/tinyfix, revision 5b1491e), wrong-word-confusions.txt.
+# MIT License, Copyright (c) 2026 Caleb Fahlgren (full text: data/tinyfix-LICENSE). Copied verbatim below this header.
+their there they're
+there their they're
+they're their there
+your you're
+you're your
+its it's
+it's its
+too two to
+two too to
+to too two
+then than
+than then that
+were where we're
+where were we're wear
+we're were where wear
+wear were where we're
+whose who's
+who's whose
+hear here
+here hear
+weather whether
+whether weather
+peace piece
+piece peace
+affect effect
+effect affect
+lose loose loss
+loose lose loss
+accept except
+except accept
+advice advise
+advise advice
+quiet quite
+quite quiet
+through though thorough threw
+though through thorough threw
+thorough through though threw
+threw through though thorough
+passed past
+past passed
+principal principle
+principle principal
+complement compliment
+compliment complement
+brake break
+break brake
+waist waste
+waste waist
+right write rite
+write right rite
+rite right write
+sight site cite
+site sight cite
+cite sight site
+led lead
+lead led
+meet meat
+meat meet
+week weak
+weak week
+wood would
+would wood
+hole whole
+whole hole
+male mail
+mail male
+sale sell sail
+sell sale cell
+role roll
+roll role
+aloud allowed
+allowed aloud
+board bored
+bored board
+fair fare
+fare fair
+of off
+off of
+no know now
+know no now
+now no know
+by buy bye
+buy by bye
+bye by buy
+for four
+four for
+one won
+won one
+son sun
+sun son
+our hour are
+hour our are
+are our hour
+way weigh
+weigh way
+wait weight
+weight wait
+bear bare
+bare bear
+plane plain
+plain plane
+made maid
+maid made
+pair pear
+pear pair
+tale tail
+tail tale
+flour flower
+flower flour
+knew new
+new knew
+die dye
+dye die
+bee be
+see sea
+sea see
+heard herd
+herd heard
+red read
+steal steel
+steel steal
+feet feat
+feat feet
+night knight
+knight night
+sum some
+some sum
+do due dew
+due do dew
+dew do due
+form from
+from form
+desert dessert
+dessert desert
+breath breathe
+breathe breath
+diary dairy
+dairy diary
+trial trail
+trail trial
+let's lets
+cell sell
+cent scent sent
+scent cent sent
+council counsel
+counsel council
+dear deer
+deer dear
+hair hare
+hare hair
+heal heel
+heel heal
+idle idol
+idol idle
+knot not
+knows nose
+nose knows
+lessen lesson
+lesson lessen
+loan lone
+lone loan
+main mane
+mane main
+miner minor
+minor miner
+morning mourning
+mourning morning
+naval navel
+navel naval
+pail pale
+pale pail
+pain pane
+pane pain
+peak peek
+peek peak
+pole poll
+poll pole
+pray prey
+prey pray
+rain reign rein
+reign rain rein
+rein rain reign
+real reel
+reel real
+road rode rowed
+rode road rowed
+rowed road rode
+root route
+route root
+sail sale
+scene seen
+seen scene
+seam seem
+seem seam
+sole soul
+soul sole
+stair stare
+stare stair
+stationary stationery
+stationery stationary
+suite sweet
+sweet suite
+tide tied
+tied tide
+vain vein
+vein vain
+warn worn
+worn warn
+yoke yolk
+yolk yoke
+throne thrown
+thrown throne
+shone shown
+shown shone
+farther further
+loss lose loose
+chose choose
+choose chose
+that than
+altar alter
+base bass
+bass base
+berth birth
+birth berth
+creak creek
+creek creak
+flea flee
+flee flea
+mist missed
+nun none
+pause paws
+paws pause
+raise rays
+rays raise
+rows rose

@@ -234,6 +234,10 @@ hold Tab = the ⌃⌥R options, never applies · click = apply that option.
 - [ ] Off: no completion rows in any of the above; the live conversion row and Space suggestions still work.
 - [ ] Esc on a completion bubble hides it, and no completion comes back for that word even after a pause; the next word gets completions again.
 - [ ] Space or Enter after a word never shows completions, only the usual conversion / spelling rows.
+- [ ] English wrong-word row (model-v6): in TextEdit type `I got a letter form the ` — after the space following `the`
+  the bubble shows a red-marked *from*; the text is unchanged. Space types a space; typing `b` hides the row. Again,
+  then Tab (and Space) or ⌃⌥1 gives `I got a letter from the `; ⌃⌥Z puts `form` back. With **Auto-convert when sure**
+  on, nothing changes on its own. `I met Form the ` (a name) offers nothing, and so does any text when typeThai runs with `--no-typo`.
 - [ ] Next-word prediction (on by default, `prefs.json` `"predict"`): type the same short line three or four times, ending each with Enter — e.g. `ship the zqorbit` then Enter, twice. On a new line type `zqor` and stop: the bubble offers `zqorbit` (a word no dictionary has, learned from the lines you finished) as the first row, and Tab completes it to `zqorbit`. The same works in Thai for a phrase you type: type `สวัสดีครับ` + Enter, then on a new line type `สวัสดีครั` and stop — the row keeps the whole run (`สวัสดีครับ`).
 - [ ] Next-word prediction off (Settings → Word suggestions → Predict the next word): the rows above disappear, and `<state dir>/ngram.snapshot` is not touched at all (no file is written while it stays off). Turning it back on brings the rows back from what is already in the snapshot.
 - [ ] Forget learned words: the predicted rows stop being offered (the model was cleared with `words.json`), and typing a line again re-learns it.

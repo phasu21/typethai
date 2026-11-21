@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, reverse::{RevDecision, Reverse}, corrector::Corrector, detector::Detector, keymap::{en_to_th, th_to_en_map}, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
+use typethai_core::{completer::{thai_tail, Bigrams, Completer, Completions, Context, WordMemory}, slip::Slips, confusion::RealWords, reverse::{RevDecision, Reverse}, corrector::Corrector, detector::Detector, keymap::{en_to_th, th_to_en_map}, personal::{Feedback, PersonalModel}, reverse::th_text_to_keys, TokenDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary { Space, Enter, Tab }
@@ -103,6 +103,17 @@ fn layout_of(insert: &str) -> Option<InputLang> {
 }
 /// A bubble row as the rank log keeps it: the text that would be applied, why it was offered (`th`, `en`, `typo`;
 /// None for a completion, a next-word row or an AI row), the score its source computed, and the source itself.
+/// The English word a token starts with (letters, with apostrophes inside; ’ is not one) and what follows it:
+/// `("from", ",")` for `from,`. None when the token does not start with a letter.
+fn split_word(t: &str) -> (Option<&str>, &str) {
+    let b = t.as_bytes();
+    if !b.first().is_some_and(u8::is_ascii_alphabetic) { return (None, t) }
+    let mut end = 0;
+    for (i, &c) in b.iter().enumerate() {
+        if c.is_ascii_alphabetic() { end = i + 1 } else if c == b'\'' && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) { continue } else { break }
+    }
+    (Some(&t[..end]), &t[end..])
+}
 fn rank_row(c: &Candidate) -> Row {
     let r = match c.item.reason() {
         Some(Reason::Layout(InputLang::Thai)) => Some("th".into()),
@@ -185,6 +196,10 @@ pub enum BubbleKind {
     /// `prev` > 0 (reverse phrase being edited): the `prev` committed words before the buffer are replaced too.
     Live { typed: String, thai: String, prev: usize },
     UndoConversion, Convert { typed: String, thai: String }, Typo { word: String },
+    /// English real-word fix (`form` -> `from`, `your` -> `you're`) for the committed word `back` words before the last
+    /// one: 1 is the word before the one just finished (its next word is known, so the row comes one word late), 0 the
+    /// last word itself (a run ends after it). `typed` is that word as it is on screen; `word` replaces it.
+    RealWord { back: usize, typed: String, word: String },
     /// Reverse mode, after a boundary: flip the last word plus `k` preceding Thai-looking words back to English.
     ConvertPrev { k: usize },
     /// Guess (double Tab / hotkey): replace the last `k` committed words, and the buffer `typed` when it is Some, with
@@ -205,7 +220,7 @@ impl BubbleItem {
         match &self.kind {
             BubbleKind::Live { .. } | BubbleKind::Convert { .. } | BubbleKind::ConvertPrev { .. } | BubbleKind::Guess { .. } | BubbleKind::UndoConversion =>
                 Some(Reason::Layout(lang_of(&self.label))),
-            BubbleKind::Typo { .. } => Some(Reason::Typo),
+            BubbleKind::Typo { .. } | BubbleKind::RealWord { .. } => Some(Reason::Typo),
             BubbleKind::Rewrite(RewriteRow::Fixed(why, _)) => Some(*why),
             BubbleKind::Rewrite(RewriteRow::Swap(lang, _)) => Some(Reason::Layout(*lang)),
             BubbleKind::Complete { .. } | BubbleKind::Rewrite(RewriteRow::Preset(..) | RewriteRow::Busy(_) | RewriteRow::Result(_) | RewriteRow::Notice) => None,
@@ -253,6 +268,9 @@ struct Committed { typed: String, orig: String, converted: Option<String>, bound
 impl Committed {
     /// The word as it is on screen now.
     fn shown(&self) -> &str { self.converted.as_deref().unwrap_or(&self.orig) }
+    /// On screen as typed: not converted, or "converted" to itself only to carry the undo of a real-word fix of the
+    /// word before it (`Engine::apply_real_word`).
+    fn as_typed(&self) -> bool { self.converted.as_ref().is_none_or(|c| *c == self.orig) }
     /// Everything after the word on screen: its boundary plus any extra spaces/newlines.
     fn after(&self) -> String { format!("{}{}", self.boundary.map_or("", Boundary::text), self.extra) }
 }
@@ -509,6 +527,9 @@ pub struct Engine {
     pub thai_comp: Option<Completer>, pub en_comp: Option<Completer>,
     /// Corpus word pairs that rank completions after the previous word; None ranks without them.
     pub thai_bigrams: Option<Bigrams>, pub en_bigrams: Option<Bigrams>,
+    /// English real-word fixes (`their` -> `there`) scored over `en_bigrams`; None (no English pairs or frequencies in
+    /// the model) offers none. Behind `Options::typo_suggestions`, like the spelling rows.
+    pub real_words: Option<RealWords>,
     /// The words this user finished (words.json). Shared with the save thread, which serialises a snapshot; learning
     /// while a save is still running copies it first.
     pub words: Arc<WordMemory>,
@@ -554,7 +575,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), auto_undone: BTreeSet::new(), auto_safe: false, auto_app_excluded: false, prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false, cycle: None, quiet: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), auto_undone: BTreeSet::new(), auto_safe: false, auto_app_excluded: false, prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, real_words: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false, cycle: None, quiet: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
@@ -563,6 +584,7 @@ impl Engine {
         // taken, not cloned: loaded pairs take tens of MB
         self.thai_bigrams = Some(std::mem::take(&mut m.th_bigrams)).filter(|b| !b.is_empty());
         self.en_bigrams = Some(std::mem::take(&mut m.en_bigrams)).filter(|b| !b.is_empty());
+        self.real_words = (self.en_bigrams.is_some() && !m.english_freq.is_empty()).then(|| RealWords::new(&m.english_freq));
     }
     pub fn buffer(&self) -> &str { &self.word }
     pub fn thai_active(&self) -> bool { self.thai_active }
@@ -1108,6 +1130,20 @@ impl Engine {
                 let (mut old, mut ins) = (String::new(), String::new());
                 for (c, t) in self.line[start..].iter().zip(targets) { old += &c.orig; old += &c.after(); ins += t; ins += &c.after(); }
                 if let Some(t) = typed { old += &self.screen_of(t); ins += targets.get(*k)?; }
+                (old, ins)
+            }
+            // as `apply_real_word`
+            BubbleKind::RealWord { back, typed, word } => {
+                let n = self.line.len();
+                if !self.word.is_empty() || n < back + 1 || n - 1 - back < self.line_start { return None }
+                let j = n - 1 - back;
+                if !self.line[j].as_typed() || self.line[j].rev || self.line[j].orig != *typed { return None }
+                if self.line[j + 1..].iter().any(|c| c.rev || !c.as_typed()) { return None }
+                let (mut old, mut ins) = (String::new(), String::new());
+                for (i, c) in self.line[j..].iter().enumerate() {
+                    old += c.shown(); old += &c.after();
+                    ins += if i == 0 { word.as_str() } else { c.shown() }; ins += &c.after();
+                }
                 (old, ins)
             }
             BubbleKind::Rewrite(_) => return None,
@@ -1790,6 +1826,7 @@ impl Engine {
             items.iter().find_map(|i| match &i.kind {
                 BubbleKind::Live { typed, .. } | BubbleKind::Convert { typed, .. } => Some(typed.clone()),
                 BubbleKind::Typo { word } => Some(word.clone()),
+                BubbleKind::RealWord { typed, .. } => Some(typed.clone()),
                 BubbleKind::UndoConversion => Some(i.label.clone()),
                 _ => None,
             }).or_else(|| self.line.last().map(|c| c.shown().to_string())).unwrap_or_default()
@@ -1830,7 +1867,7 @@ impl Engine {
                 c.extra.pop();
                 if c.extra.is_empty() && c.boundary != Some(Boundary::Enter) { /* only the word's own boundary left */ }
             }
-            Some(c) if c.converted.is_none() && c.rev == self.thai_active => {
+            Some(c) if c.as_typed() && c.rev == self.thai_active => {
                 // the boundary itself is deleted: the caret is back inside that word -> it becomes the buffer again
                 let c = self.line.pop().unwrap();
                 if c.boundary == Some(Boundary::Enter) { self.line_start = 0; }
@@ -1907,8 +1944,10 @@ impl Engine {
             items.truncate(3);
             self.show(items, &mut acts); self.phrase = 1;
         } else {
-            // left as English: offer spelling corrections
-            let en = self.en_items(&self.text_before(self.line.len()), &typed, prev.as_deref());
+            // left as English: offer spelling corrections, else a real-word fix of the word before it (or of this one,
+            // when punctuation ends its run)
+            let mut en = self.en_items(&self.text_before(self.line.len()), &typed, prev.as_deref());
+            if en.is_empty() && b == Boundary::Space { en.extend(self.real_word_row(&typed)) }
             self.show(en, &mut acts); self.phrase = 0;
         }
         let auto = converted.is_some();
@@ -1978,6 +2017,66 @@ impl Engine {
     /// Convert `typed` at its boundary with no key pressed (`auto_rule`, then the scores).
     fn auto_now(&self, typed: &str) -> bool {
         self.auto_rule(typed).is_some_and(|r| r.admits(self.auto_score(typed), self.thai_active))
+    }
+    /// The real-word row for the word before `typed` (the word Space just finished, not in `line` yet): its next word is
+    /// known now. When `typed` ends in punctuation, its run ends there, and `typed` itself is checked on its left alone;
+    /// the bigger gain wins. None when neither clears its margin (`RealWords::check`).
+    fn real_word_row(&self, typed: &str) -> Option<BubbleItem> {
+        if !self.opts.typo_suggestions || self.real_words.is_none() || self.en_bigrams.is_none() { return None }
+        let n = self.line.len();
+        let (lead, post) = split_word(typed);
+        let mut best: Option<(f64, BubbleItem)> = None;
+        // the word before: same run as `typed` when one space is all that is between them
+        if let (Some(next), Some(c)) = (lead, self.line.last()) {
+            if n > self.line_start && c.after() == " " && c.as_typed() && !c.rev && split_word(&c.orig) == (Some(c.orig.as_str()), "") {
+                if let Some((gain, word)) = self.real_word(n - 1, &c.orig, Some(next)) {
+                    best = Some((gain, BubbleItem { label: word.clone(), kind: BubbleKind::RealWord { back: 1, typed: c.orig.clone(), word } }));
+                }
+            }
+        }
+        // `typed` itself, when punctuation ends its run (not a compound or a digit: `form-based`, `form2`)
+        if let Some(w) = lead.filter(|_| post.starts_with([',', '.', ';', ':', '!', '?', ')', '"', '\u{201D}']) && !post.contains(|c: char| c.is_alphanumeric())) {
+            if let Some((gain, fix)) = self.real_word(n, w, None) {
+                if best.as_ref().is_none_or(|b| gain > b.0) {
+                    let word = format!("{fix}{post}");
+                    best = Some((gain, BubbleItem { label: word.clone(), kind: BubbleKind::RealWord { back: 0, typed: typed.to_string(), word } }));
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+    /// The real-word fix of `w`, the word at `line[j]` (`j` = `line.len()` for the word being finished), between the
+    /// word before it in its run and `next`: the gain and the fix, or None. A capital is a name unless the word starts
+    /// the line or a sentence; a word in capitals and a don't-translate word are left alone.
+    fn real_word(&self, j: usize, w: &str, next: Option<&str>) -> Option<(f64, String)> {
+        let (rw, bg) = (self.real_words.as_ref()?, self.en_bigrams.as_ref()?);
+        if self.blocked(w) { return None }
+        let before = j.checked_sub(1).filter(|&i| i >= self.line_start).and_then(|i| self.line.get(i));
+        // the word before is in the run when one space separates them and it is a plain English word as shown
+        let prev = before.filter(|c| c.after() == " " && !c.rev).and_then(|c| match split_word(c.shown()) { (Some(p), "") => Some(p), _ => None });
+        let start = before.is_none_or(|c| c.after().contains('\n') || c.shown().ends_with(['.', '!', '?', ':', '"', '\u{201C}', '(']));
+        let mut cs = w.chars();
+        let first_upper = cs.next().is_some_and(|c| c.is_ascii_uppercase());
+        if cs.any(|c| c.is_ascii_uppercase()) || first_upper && !start { return None }
+        rw.check(bg, prev, w, next).map(|f| (f.gain, f.word))
+    }
+    /// Apply a real-word row, if the word it was made for is still on screen as it was: the words from it to the caret
+    /// are retyped with it replaced. The last word carries the undo (`with_prev`), so Undo puts the typed word back.
+    fn apply_real_word(&mut self, back: usize, typed: &str, word: String, acts: &mut Vec<Action>) -> bool {
+        let n = self.line.len();
+        if !self.word.is_empty() || n < back + 1 || n - 1 - back < self.line_start { return false }
+        let j = n - 1 - back;
+        if !self.line[j].as_typed() || self.line[j].rev || self.line[j].orig != typed { return false }
+        if self.line[j + 1..].iter().any(|c| c.rev || !c.as_typed()) { return false }
+        let (mut old, mut ins) = (String::new(), String::new());
+        for (i, c) in self.line[j..].iter().enumerate() {
+            old += c.shown(); old += &c.after();
+            ins += if i == 0 { word.as_str() } else { c.shown() }; ins += &c.after();
+        }
+        acts.push(self.replace(&old, &ins, None));
+        self.line[j].converted = Some(word); self.line[j].with_prev = 0;
+        if back > 0 { if let Some(c) = self.line.last_mut() { c.converted = Some(c.orig.clone()); c.with_prev = back; } }
+        true
     }
     /// Enter: a new line starts. Only the last word is kept (so the bubble / Tab can still apply to it); contexts and
     /// the reverse lookback start after it.
@@ -2092,7 +2191,8 @@ impl Engine {
                 } else {
                     acts.push(self.replace(&shown, &format!("{}{}", c.orig, c.after()), None));
                 }
-                self.line.pop(); if !c.rev { self.feedback(&c.typed, Feedback::Undo); }
+                // a word "converted" to itself only carries the undo of a real-word fix before it: nothing to learn
+                self.line.pop(); if !c.rev && c.converted.as_deref() != Some(c.orig.as_str()) { self.feedback(&c.typed, Feedback::Undo); }
                 // a word converted mid-word (Guess on the buffer) is still being typed: it is the buffer again
                 if c.boundary.is_none() && c.extra.is_empty() { self.word = c.typed; }
                 else { self.line.push(Committed { converted: None, with_prev: 0, auto: false, ..c }); }
@@ -2155,6 +2255,7 @@ impl Engine {
                         acts.push(self.replace(&shown, &format!("{word}{}", c.after()), None));
                         self.line.pop(); self.line.push(Committed { converted: Some(word), auto: false, ..c });
                     },
+                    BubbleKind::RealWord { back, typed, word } => if !self.apply_real_word(back, &typed, word, &mut acts) { return Outcome::pass() },
                 }
                 self.show(vec![], &mut acts);
             }
@@ -5498,6 +5599,123 @@ mod tests {
         e.reset(); e.en_comp = Some(Completer::new([("stable".to_string(), 9.0)]));
         typ_th(&mut e, "หะฟิ"); idle(&mut e, 600);
         assert!(!labels(&e).contains(&"stab".to_string()), "only words the English list knows");
+    }
+
+    // ---------- English real-word rows (confusion sets: `form` -> `from`), one word late ----------
+    /// Toy English pairs where `from` beats `form` between `letter` and `the`, and a margin of 1 nat.
+    fn real_words(e: &mut Engine) {
+        use typethai_core::confusion::{Confusions, RealWords, Scorer};
+        let bg = Bigrams::new([("a", "letter", 20.0), ("letter", "form", 1.0), ("letter", "from", 40.0), ("from", "the", 500.0), ("form", "the", 5.0), ("the", "form", 30.0), ("the", "bank", 50.0)]);
+        let freq: std::collections::HashMap<String, f64> = [("a", 90000.0), ("form", 100.0), ("from", 3000.0), ("the", 50000.0), ("letter", 200.0), ("bank", 300.0)].into_iter().map(|(w, f)| (w.to_string(), f)).collect();
+        e.real_words = Some(RealWords::with(Confusions::tinyfix(), Scorer::new(&freq, 10.0), 1.0, &[]));
+        e.en_bigrams = Some(bg); e.opts.live = false;
+    }
+    fn real_row(e: &Engine) -> Option<(usize, String, String)> {
+        e.bubble.iter().find_map(|b| match &b.kind { BubbleKind::RealWord { back, typed, word } => Some((*back, typed.clone(), word.clone())), _ => None })
+    }
+    #[test] fn a_real_word_row_comes_one_word_late_and_tab_applies_it() {
+        let Some(mut e) = engine() else { return };
+        real_words(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form ");
+        assert_eq!(real_row(&e), None, "the next word is not known yet");
+        feed(&mut e, &mut log, "the ");
+        assert_eq!(real_row(&e), Some((1, "form".into(), "from".into())));
+        assert_eq!(e.bubble[0].reason(), Some(Reason::Typo), "a typo-style row (red mark)");
+        assert_eq!(screen(&log), "a letter form the ", "offering it changed nothing");
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "a letter from the ");
+        assert!(!e.bubble_visible());
+        hot(&mut e, &mut log, Hotkey::Undo);
+        assert_eq!(screen(&log), "a letter form the ", "Undo puts the typed word back");
+        // typing on takes the row away: it is never applied to the next word
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form the b");
+        assert!(!e.bubble_visible());
+        feed(&mut e, &mut log, "\t");
+        assert!(screen(&log).starts_with("a letter form the b"), "{:?}", screen(&log));
+    }
+    #[test] fn space_never_applies_a_real_word_row() {
+        let Some(mut e) = engine_default() else { return };
+        real_words(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form the ");
+        assert!(real_row(&e).is_some());
+        assert!(!e.space_applies(), "the word is finished: Space is a plain space");
+        assert!(!e.is_bubble_key(&Key::Boundary(Boundary::Space)));
+        let o = e.on_key(Key::Boundary(Boundary::Space)); assert!(plain_space(&o)); log.push((Some(' '), o));
+        assert_eq!(screen(&log), "a letter form the  ");
+        // a Tab tap highlights it, and Space then applies it without typing a space
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form the ");
+        let o = tab(&mut e); assert!(first_replace(&o).is_none()); log.push((None, o));
+        feed(&mut e, &mut log, " ");
+        assert_eq!(screen(&log), "a letter from the ");
+    }
+    #[test] fn ctrl_alt_digits_and_shift_arrows_reach_a_real_word_row() {
+        let Some(mut e) = engine_default() else { return };
+        real_words(&mut e);
+        let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form the ");
+        let o = e.on_key(Key::SelectNext); assert!(o.swallow); assert_eq!(o.actions, vec![Action::Select(0)]);
+        let o = e.on_key(Key::SelectPrev); assert!(o.swallow);
+        log.push((None, e.on_key(Key::Hotkey(Hotkey::Accept(0)))));
+        assert_eq!(screen(&log), "a letter from the ");
+    }
+    #[test] fn auto_convert_never_applies_a_real_word_row() {
+        let Some(mut e) = engine_default() else { return };
+        real_words(&mut e);
+        e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::default();
+        let o = typ(&mut e, "a letter form the bank ");
+        assert!(untouched(&o), "no key, no change");
+        e.reset(); let o = typ(&mut e, "a letter form the ");
+        assert!(untouched(&o)); assert!(real_row(&e).is_some(), "still only offered");
+    }
+    #[test] fn real_word_rows_skip_names_and_follow_punctuation() {
+        let Some(mut e) = engine() else { return };
+        real_words(&mut e);
+        // a capital mid-sentence is a name; at the start of the line it is a word
+        typ(&mut e, "a letter Form the "); assert_eq!(real_row(&e), None);
+        e.reset(); typ(&mut e, "letter FORM the "); assert_eq!(real_row(&e), None, "capitals are left alone");
+        // punctuation ends the run: the word before it is checked on its left alone, with the punctuation kept
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form, ");
+        assert_eq!(real_row(&e), Some((0, "form,".into(), "from,".into())));
+        feed(&mut e, &mut log, "\t");
+        assert_eq!(screen(&log), "a letter from, ");
+        // a compound or a digit after the word is not punctuation
+        e.reset(); typ(&mut e, "a letter form-based "); assert_eq!(real_row(&e), None);
+        e.reset(); typ(&mut e, "a letter form2 "); assert_eq!(real_row(&e), None);
+        // Backspace into the word after an applied fix: it is the buffer again, the fix stays on screen
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "a letter form the \t");
+        log.push((Some('\u{8}'), e.on_key(Key::Backspace)));
+        assert_eq!(e.buffer(), "the"); assert_eq!(screen(&log), "a letter from the");
+        // punctuation between two words: no next word for the first
+        e.reset(); typ(&mut e, "a letter form. the "); assert_eq!(real_row(&e), None);
+        // Enter and Tab boundaries offer none
+        e.reset(); typ(&mut e, "a letter form the\n"); assert!(!e.bubble_visible());
+        // off with the typo switch
+        e.reset(); e.opts.typo_suggestions = false; typ(&mut e, "a letter form the "); assert_eq!(real_row(&e), None);
+    }
+    #[test] fn a_spelling_row_for_the_new_word_wins_over_a_real_word_row() {
+        let Some(mut e) = engine() else { return };
+        real_words(&mut e); e.speller = Some(Box::new(FakeSpeller));
+        typ(&mut e, "a letter form ths ");
+        assert_eq!(real_row(&e), None); assert_eq!(labels(&e)[0], "this");
+    }
+    #[test] fn the_shipped_model_offers_real_word_rows() {
+        let Some(mut m) = model() else { return };
+        let Some(mut e) = engine() else { return };
+        e.load_completers(&mut m);
+        if e.real_words.is_none() { eprintln!("SKIP: no English pairs in this model"); return }
+        e.opts.live = false;
+        typ(&mut e, "i got a letter form the ");
+        assert_eq!(real_row(&e).map(|r| r.2), Some("from".into()));
+        let rows = |o: &[Outcome]| o.iter().filter_map(bubble_items).flatten().filter(|b| matches!(b.kind, BubbleKind::RealWord { .. })).count();
+        for clean in ["i think that is the best way to go home ", "we were there for two days and it was too hot ", "they said they would come here later than us "] {
+            e.reset(); let o = typ(&mut e, clean); assert_eq!(rows(&o), 0, "{clean}");
+        }
     }
 
     // ---------- Tab cycle (`TabKey::Cycle`, docs/tab-cycle.md) ----------

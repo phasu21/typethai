@@ -1,6 +1,9 @@
 //! Pack a model (data/model/*.json dir or an existing .ttm) into the compact TTM1 binary.
-//! usage: tt-pack <model dir|in.ttm> <out.ttm> [--enfreq <freq.txt>] [--thbigrams <pairs.tsv>] [--enbigrams <pairs.tsv>]
+//! usage: tt-pack <model dir|in.ttm> <out.ttm> [--enfreq <freq.txt>] [--enfreq-add <words.tsv>] [--thbigrams <pairs.tsv>]
+//!                [--enbigrams <pairs.tsv>]
 //! `--enfreq` sets the English completion frequencies from a `word count` per line list (FrequencyWords en_50k.txt).
+//! `--enfreq-add` adds the `word<TAB>frequency` lines of a file (`tt-bigrams contractions`) to the English frequencies,
+//! after `--enfreq`; a word the list already has keeps its frequency.
 //! `--thbigrams` / `--enbigrams` set the word pair sections from `prev<TAB>next<TAB>count` files (`tt-bigrams`).
 use std::collections::HashMap;
 /// The stems OpenSubtitles leaves when it splits "wasn't" into "wasn" + "t" (not `won`, a word).
@@ -21,6 +24,16 @@ fn main() {
     let mut m = typethai_core::ModelFiles::load(std::path::Path::new(&a[1])).expect("load");
     let flag = |f: &str| a.iter().position(|x| x == f).map(|i| std::path::Path::new(&a[i + 1]));
     if let Some(p) = flag("--enfreq") { m.english_freq = enfreq(&std::fs::read_to_string(p).expect("enfreq")); }
+    if let Some(p) = flag("--enfreq-add") {
+        let txt = std::fs::read_to_string(p).expect("enfreq-add");
+        let mut added = 0;
+        for l in txt.lines().filter(|l| !l.is_empty()) {
+            let (w, f) = l.split_once('\t').expect("word<TAB>frequency");
+            let f: f64 = f.parse().expect("frequency");
+            if f > 0.0 && !m.english_freq.contains_key(w) { m.english_freq.insert(w.to_string(), f); added += 1 }
+        }
+        eprintln!("--enfreq-add: {added} words added");
+    }
     if let Some(p) = flag("--thbigrams") { m.th_bigrams = typethai_core::model::bigrams_tsv(p).expect("thbigrams"); }
     if let Some(p) = flag("--enbigrams") { m.en_bigrams = typethai_core::model::bigrams_tsv(p).expect("enbigrams"); }
     let b = m.pack(); std::fs::write(&a[2], &b).unwrap();

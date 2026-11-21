@@ -22,15 +22,22 @@ fn class(c: char) -> Class {
 }
 
 /// Splits one line into runs of adjacent words of one language. A run ends at punctuation, a digit, a Thai/English
-/// switch, a Thai piece the dictionary does not cover, or an English token with an apostrophe; spaces do not end it.
-/// Thai is normalised and segmented over `dict`, English words are lowercased. Only runs of 2+ words are returned.
+/// switch, a Thai piece the dictionary does not cover, or a quote mark; spaces do not end it. An apostrophe inside an
+/// English word keeps the word whole (`you're`, `it's`; ’ is read as '), so contractions get pairs like any other word
+/// (model-v6 on). One at the start or end of a token is a quote mark and ends the run there. Thai is normalised and
+/// segmented over `dict`, English words are lowercased. Only runs of 2+ words are returned.
 pub fn word_runs(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> { runs(line, dict, Thai::Segment) }
 /// `word_runs` over a line whose Thai words are already split, by spaces or U+200B (the build-time LATTE
 /// segmentation, `scripts/bigrams/latte/`): each Thai piece is one word, kept when the dictionary has it, else it ends
 /// the run.
 pub fn word_runs_presegmented(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> { runs(line, dict, Thai::Presegmented) }
+/// `word_runs` for the English runs only: a Thai chunk ends the run it is in, as in `word_runs`, without being
+/// segmented. The English runs are the same as `word_runs` gives.
+pub fn english_runs(line: &str, dict: &Dict) -> Vec<Vec<String>> {
+    runs(line, dict, Thai::Skip).into_iter().filter(|r| r.0 == Lang::En).map(|r| r.1).collect()
+}
 #[derive(Clone, Copy, PartialEq)]
-enum Thai { Segment, Presegmented }
+enum Thai { Segment, Presegmented, Skip }
 fn runs(line: &str, dict: &Dict, thai: Thai) -> Vec<(Lang, Vec<String>)> {
     let mut r = Runs::default();
     let mut rest = line;
@@ -40,6 +47,7 @@ fn runs(line: &str, dict: &Dict, thai: Thai) -> Vec<(Lang, Vec<String>)> {
         let (chunk, tail) = rest.split_at(len); rest = tail;
         match k {
             Class::Space => {}
+            Class::Thai if thai == Thai::Skip => r.end(),
             Class::Thai if thai == Thai::Presegmented => {
                 let w = normalize_thai(chunk);
                 if dict.has(&w) { r.push(Lang::Th, w) } else { r.end() }
@@ -47,12 +55,35 @@ fn runs(line: &str, dict: &Dict, thai: Thai) -> Vec<(Lang, Vec<String>)> {
             Class::Thai => for p in dict.segment(&normalize_thai(chunk)) {
                 if dict.has(p) { r.push(Lang::Th, p.to_string()) } else { r.end() }
             },
-            Class::Latin if !chunk.contains(['\'', '\u{2019}']) => r.push(Lang::En, chunk.to_ascii_lowercase()),
-            Class::Latin | Class::Break => r.end(),
+            Class::Latin => {
+                let w = chunk.replace('\u{2019}', "'").to_ascii_lowercase();
+                let core = w.trim_matches('\'');
+                if w.starts_with('\'') { r.end() }
+                if core.is_empty() || core.contains("''") { r.end(); continue }
+                r.push(Lang::En, core.to_string());
+                if w.ends_with('\'') { r.end() }
+            }
+            Class::Break => r.end(),
         }
     }
     r.end();
     r.done
+}
+/// Words in front of `'s` that make it a contraction (`it's` = it is / it has), not a possessive (`john's`).
+const S_STEMS: &[&str] = &["it", "he", "she", "that", "what", "who", "where", "there", "here", "how", "when", "why", "let",
+    "this", "everyone", "everybody", "everything", "someone", "somebody", "something", "nobody", "nothing", "one"];
+/// An English contraction as `word_runs` writes it (lowercase, one inner apostrophe): `don't`, `can't`, `you're`,
+/// `we've`, `i'll`, `i'd`, `i'm`, and `'s` after a pronoun or a question word (`it's`, `who's`, `let's`). Not a
+/// possessive (`john's`) or a name (`o'neil`).
+pub fn is_contraction(w: &str) -> bool {
+    let Some((stem, tail)) = w.split_once('\'') else { return false };
+    if stem.is_empty() || !stem.bytes().chain(tail.bytes()).all(|b| b.is_ascii_lowercase()) { return false }
+    match tail {
+        "t" => stem.len() >= 2 && stem.ends_with('n'),
+        "re" | "ve" | "ll" | "d" | "m" => true,
+        "s" => S_STEMS.contains(&stem),
+        _ => false,
+    }
 }
 #[derive(Default)]
 struct Runs { done: Vec<(Lang, Vec<String>)>, cur: Option<(Lang, Vec<String>)> }
@@ -89,6 +120,8 @@ impl Counts {
     pub fn add_line(&mut self, line: &str, dict: &Dict) {
         for (lang, ws) in word_runs(line, dict) { match lang { Lang::Th => &mut self.th, Lang::En => &mut self.en }.add_run(&ws) }
     }
+    /// `add_line` for the English pairs only (`english_runs`).
+    pub fn add_english_line(&mut self, line: &str, dict: &Dict) { for ws in english_runs(line, dict) { self.en.add_run(&ws) } }
     /// `add_line` for a line whose Thai words are already split (`word_runs_presegmented`).
     pub fn add_presegmented_line(&mut self, line: &str, dict: &Dict) {
         for (lang, ws) in word_runs_presegmented(line, dict) { match lang { Lang::Th => &mut self.th, Lang::En => &mut self.en }.add_run(&ws) }
