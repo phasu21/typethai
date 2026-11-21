@@ -37,6 +37,8 @@ pub struct BubbleView {
     /// Space applies the highlighted option with the keys outside the bubble (`TabKey::SpaceApplies`): its keycap says
     /// Space while `focused` is `Rail::Out`.
     pub space: bool,
+    /// Tab cycle: the highlighted option is in the text for now, as option `.0` of `.1`; its keycap says so.
+    pub cycle: Option<(usize, usize)>,
     /// Tab held over the bubble: the accent sweeps across the highlighted option's Tab key as it fills.
     pub hold: Option<Hold>,
     /// The panel's bounds as actually laid out by gpui in the last frame (logical px, window-relative).
@@ -60,6 +62,12 @@ pub(crate) fn thai_font() -> Font {
     f
 }
 
+/// The keycap of the option a Tab cycle put in the text: `2/3` is option 2 of 3 (keycaps take static text).
+fn cycle_cap((k, n): (usize, usize)) -> Option<&'static str> {
+    const CAPS: [[&str; 5]; 5] = [["1/1", "", "", "", ""], ["1/2", "2/2", "", "", ""], ["1/3", "2/3", "3/3", "", ""], ["1/4", "2/4", "3/4", "4/4", ""], ["1/5", "2/5", "3/5", "4/5", "5/5"]];
+    CAPS.get(n.checked_sub(1)?)?.get(k).copied().filter(|c| !c.is_empty())
+}
+
 impl Render for BubbleView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The key tap owns the shift state (`bridge::SHIFT_HELD`); the run loop repaints on a change of it (20 ms), so
@@ -69,7 +77,7 @@ impl Render for BubbleView {
         if self.marker { return div().size_full().bg(rgb(0xff2d2d)).into_any_element() }
         let t = cx.theme(); let l = &self.layout; let selected = self.selected;
         // the strip's pill is too small for "Enter"; "Space" is too wide for either keycap
-        let (apply_key, apply_pill) = match self.focused { Rail::Arrows => ("Enter", "↵"), Rail::Tab => ("␣", "␣"), Rail::Out if self.space => ("␣", "␣"), Rail::Out => ("Tab", "Tab") };
+        let (apply_key, apply_pill) = match (self.cycle.and_then(cycle_cap), self.focused) { (Some(c), _) => (c, c), (_, Rail::Arrows) => ("Enter", "↵"), (_, Rail::Tab) => ("␣", "␣"), (_, Rail::Out) if self.space => ("␣", "␣"), (_, Rail::Out) => ("Tab", "Tab") };
         let hold = self.hold.map(|h| h.progress(Instant::now()));
         let shift = bridge::SHIFT_HELD.load(std::sync::atomic::Ordering::SeqCst) || window.modifiers().shift;
         let dark = t.is_dark();
@@ -284,7 +292,7 @@ impl Ui {
             // rows only know their height once laid out: the same layout as the bubble on screen (typing on, rows
             // refreshed in place) keeps its real size, so the window is not resized to the guess and back
             let size = if visible && l == view.read(cx).layout { real } else { (l.w, l.h) };
-            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.focused = Rail::Out; v.space = false; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
+            view.update(cx, |v, cx| { v.items = items; v.layout = l; v.selected = 0; v.focused = Rail::Out; v.space = false; v.cycle = None; v.panel.set(None); v.row_bounds.borrow_mut().clear(); cx.notify(); });
             Some(size)
         }).ok().flatten()?;
         self.anchor = Some(anchor); self.size = (0.0, 0.0);
@@ -384,7 +392,7 @@ fn open_popup<V: Render>(w: f32, h: f32, cx: &mut App, build: impl FnOnce(&mut A
 }
 fn open_bubble(cx: &mut App) -> Ui {
     let tip = TooltipWin::open(cx);
-    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: Rail::Out, space: false, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical, false), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false, update: false, tip: Some(tip) }));
+    let (handle, view, n) = open_popup(300., 80., cx, |cx| cx.new(|_| BubbleView { items: vec![], selected: 0, focused: Rail::Out, space: false, cycle: None, hold: None, layout: bridge::layout(&[], &[], 600.0, BubbleLayout::Vertical, false), panel: Default::default(), row_bounds: Default::default(), text_bounds: Default::default(), marker: false, update: false, tip: Some(tip) }));
     Ui { last: None, native: n, handle, view, visible: false, anchor: None, size: (0.0, 0.0), cells: vec![], shift: false }
 }
 
@@ -625,6 +633,7 @@ pub fn run(rx: Receiver<UiMsg>) {
                             if let Some(mut g) = bridge::geom() { g.solid = ui.laid_solid(cx); g.thumbs = ui.laid_thumbs(cx); bridge::set_geom(Some(g)) } }
                         UiMsg::Focus(f) => ui.view.update(cx, |v, cx| { v.focused = f; cx.notify(); }),
                         UiMsg::SpaceKey(on) => ui.view.update(cx, |v, cx| { v.space = on; cx.notify(); }),
+                        UiMsg::Cycle(c) => ui.view.update(cx, |v, cx| { v.cycle = c; cx.notify(); }),
                         UiMsg::Paused(p) => { if p { badge.clicked(cx) } if let Some(t) = &tray { t.set_paused(p) } },
                         UiMsg::Stopped => stop = true,
                         UiMsg::Settings(snap) => { if !snap.input_badge { badge.unpin(cx) } settings::apply_snapshot(&mut settings_win, snap, cx) },
