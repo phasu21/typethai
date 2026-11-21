@@ -1,5 +1,12 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.28**
+- **Tab cycle (preview).** Tab puts suggestion 1 into your text, Tab again cycles 2, 3 and back to what you typed; keep
+  typing to keep it, Esc to undo. Turn on in Settings → Word suggestions → **Tab key**: *Tab cycle (preview)*.
+
+**Fixed in 0.5.28**
+- **The language badge only appears in text fields you can type in (Windows and macOS).**
+
 **Fixed in 0.5.27**
 - **The suggestion no longer stays on screen after Enter or a click when the Mac is busy (macOS).**
 
