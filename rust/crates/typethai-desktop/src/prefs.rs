@@ -2,6 +2,7 @@
 //! Stored beside `personal.json` so a learning reset does not clear them, and so `personal.json`
 //! stays compatible with the TypeScript app.
 use crate::bridge::BubbleLayout;
+use crate::autoconvert::AutoLevel;
 use crate::engine::{AcceptKeys, TabKey, Action, CompleteMode, BADGE_IDLE_CHOICES_MS, BADGE_IDLE_DEFAULT_MS, COMPLETE_IDLE_CHOICES_MS, COMPLETE_IDLE_DEFAULT_MS, TAB_HOLD_CHOICES_MS, TAB_HOLD_DEFAULT_MS};
 use crate::rewrite;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +35,9 @@ pub enum SettingsCmd {
     SetInputBadge(bool),
     SetNextWord(bool),
     SetBubbleLayout(BubbleLayout),
+    /// "Auto-convert when sure" (`Options::auto_convert`), and how sure (`Options::auto_level`).
+    SetAutoConvert(bool),
+    SetAutoLevel(AutoLevel),
     ForgetWords,
     /// Never carries the API key; that goes from the Settings window straight to the keyring.
     SetRewrite(rewrite::Config),
@@ -45,7 +49,7 @@ pub enum SettingsCmd {
 }
 impl SettingsCmd {
     pub fn writes_prefs(&self) -> bool {
-        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetTabKey(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_) | SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_))
+        matches!(self, SettingsCmd::AddNever(_) | SettingsCmd::RemoveNever(_) | SettingsCmd::SetCompletion(_) | SettingsCmd::SetCompleteIdle(_) | SettingsCmd::SetTabHold(_) | SettingsCmd::SetBadgeIdle(_) | SettingsCmd::SetLearnWords(_) | SettingsCmd::SetPredict(_) | SettingsCmd::SetAccept(_) | SettingsCmd::SetTabKey(_) | SettingsCmd::SetPickCtrl(_) | SettingsCmd::SetPickArrows(_) | SettingsCmd::SetInputBadge(_) | SettingsCmd::SetNextWord(_) | SettingsCmd::SetBubbleLayout(_) | SettingsCmd::SetAutoConvert(_) | SettingsCmd::SetAutoLevel(_) | SettingsCmd::SetRewrite(_) | SettingsCmd::SetCheckUpdates(_) | SettingsCmd::AppOff { .. } | SettingsCmd::AppOn(_))
     }
 }
 
@@ -71,6 +75,9 @@ pub struct SettingsSnap {
     /// A pause after a word (after a space in English) offers the word likely to follow it (with completion on).
     pub next_word: bool,
     pub bubble: BubbleLayout,
+    /// "Auto-convert when sure", and how sure.
+    pub auto_convert: bool,
+    pub auto_level: AutoLevel,
     /// Distinct words in the word memory.
     pub words_learned: usize,
     pub rewrite: rewrite::Config,
@@ -93,9 +100,9 @@ fn has_thai(s: &str) -> bool { s.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').conta
 /// What prefs.json holds. `offer_last`: the words whose conversion was rated down (`Engine::offer_last`).
 /// `off_apps`: apps typeThai is turned fully off in, keyed by `app_key(id)`, value the display name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub tab_key: TabKey, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub rewrite: rewrite::Config, pub check_updates: bool, pub off_apps: BTreeMap<String, String> }
+pub struct Prefs { pub never: BTreeSet<String>, pub offer_last: BTreeSet<String>, pub completion: CompleteMode, pub complete_idle: Duration, pub tab_hold: Duration, pub learn_words: bool, pub predict: bool, pub accept: AcceptKeys, pub tab_key: TabKey, pub pick_ctrl: bool, pub pick_arrows: bool, pub input_badge: bool, pub badge_idle: Option<Duration>, pub next_word: bool, pub bubble: BubbleLayout, pub auto_convert: bool, pub auto_level: AutoLevel, pub auto_undone: BTreeSet<String>, pub rewrite: rewrite::Config, pub check_updates: bool, pub off_apps: BTreeMap<String, String> }
 impl Default for Prefs {
-    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, tab_key: TabKey::default(), pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), rewrite: rewrite::Config::default(), check_updates: true, off_apps: BTreeMap::new() } }
+    fn default() -> Self { Prefs { never: BTreeSet::new(), offer_last: BTreeSet::new(), completion: CompleteMode::default(), complete_idle: Duration::from_millis(COMPLETE_IDLE_DEFAULT_MS), tab_hold: Duration::from_millis(TAB_HOLD_DEFAULT_MS), learn_words: true, predict: true, accept: AcceptKeys::Tab, tab_key: TabKey::default(), pick_ctrl: false, pick_arrows: true, input_badge: true, badge_idle: Some(Duration::from_millis(BADGE_IDLE_DEFAULT_MS)), next_word: true, bubble: BubbleLayout::default(), auto_convert: false, auto_level: AutoLevel::default(), auto_undone: BTreeSet::new(), rewrite: rewrite::Config::default(), check_updates: true, off_apps: BTreeMap::new() } }
 }
 /// The key an app id matches on: trimmed and ASCII-lowercased, so `com.apple.Terminal` and `COM.APPLE.TERMINAL` are one
 /// app. An empty id is never a match and is never stored.
@@ -108,6 +115,8 @@ const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "tab"), (AcceptKeys::
 const TAB_KEY: [(TabKey, &str); 3] = [(TabKey::SpaceApplies, "space_applies"), (TabKey::Highlight, "highlight"), (TabKey::Accept, "accept")];
 /// `prefs.json` spelling of the bubble layout.
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "horizontal"), (BubbleLayout::Vertical, "vertical")];
+/// `prefs.json` spelling of the "Auto-convert when sure" levels.
+pub const AUTO_LEVEL: [(AutoLevel, &str); 3] = [(AutoLevel::Cautious, "cautious"), (AutoLevel::Balanced, "balanced"), (AutoLevel::Eager, "eager")];
 impl Prefs {
     pub fn load(path: &Path) -> Prefs {
         let Ok(text) = std::fs::read_to_string(path) else { return Prefs::default() };
@@ -124,7 +133,8 @@ impl Prefs {
         let accept = ACCEPT.iter().find(|(a, _)| *a == self.accept).map_or("tab", |(_, s)| s);
         let bubble = BUBBLE.iter().find(|(b, _)| *b == self.bubble).map_or("horizontal", |(_, s)| s);
         let tab_key = TAB_KEY.iter().find(|(t, _)| *t == self.tab_key).map_or("space_applies", |(_, s)| s);
-        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "tab_key": tab_key, "tab_cycles": self.tab_key != TabKey::Accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates, "off_apps": self.off_apps.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name })).collect::<Vec<_>>() }).to_string()
+        let auto_level = AUTO_LEVEL.iter().find(|(l, _)| *l == self.auto_level).map_or("cautious", |(_, s)| s);
+        serde_json::json!({ "never": self.never.iter().collect::<Vec<_>>(), "offer_last": self.offer_last.iter().collect::<Vec<_>>(), "completion": completion, "complete_idle_ms": self.complete_idle.as_millis() as u64, "tab_hold_ms": self.tab_hold.as_millis() as u64, "learn_words": self.learn_words, "predict": self.predict, "accept_with": accept, "tab_key": tab_key, "tab_cycles": self.tab_key != TabKey::Accept, "pick_with_ctrl": self.pick_ctrl, "pick_with_arrows": self.pick_arrows, "input_badge": self.input_badge, "badge_idle_ms": self.badge_idle.map_or(0, |d| d.as_millis() as u64), "next_word": self.next_word, "bubble_layout": bubble, "auto_convert": self.auto_convert, "auto_convert_level": auto_level, "auto_undone": self.auto_undone.iter().collect::<Vec<_>>(), "rewrite": self.rewrite.to_json(), "check_updates": self.check_updates, "off_apps": self.off_apps.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name })).collect::<Vec<_>>() }).to_string()
     }
     pub fn save(&self, path: &Path) {
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -168,13 +178,18 @@ fn parse(text: &str) -> Option<Prefs> {
     let next_word = v.get("next_word").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let b = v.get("bubble_layout").and_then(|b| b.as_str());
     let bubble = BUBBLE.iter().find(|(_, s)| Some(*s) == b).map_or(BubbleLayout::default(), |(l, _)| *l);
+    // "Auto-convert when sure": off unless the file says so; an unknown level is the most careful one
+    let auto_convert = v.get("auto_convert").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let l = v.get("auto_convert_level").and_then(|l| l.as_str());
+    let auto_level = AUTO_LEVEL.iter().find(|(_, s)| Some(*s) == l).map_or(AutoLevel::default(), |(l, _)| *l);
+    let auto_undone = v.get("auto_undone").and_then(words).unwrap_or_default();
     let check_updates = v.get("check_updates").and_then(serde_json::Value::as_bool).unwrap_or(true);
     let off_apps = v.get("off_apps").and_then(serde_json::Value::as_array).map_or_else(BTreeMap::new, |xs| xs.iter().filter_map(|e| {
         let key = app_key(e.get("id")?.as_str()?);
         if key.is_empty() { return None }
         Some((key, e.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string()))
     }).collect());
-    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, tab_key, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates, off_apps })
+    Some(Prefs { never, offer_last, completion, complete_idle: Duration::from_millis(complete_idle), tab_hold: Duration::from_millis(tab_hold), learn_words, predict, accept, tab_key, pick_ctrl, pick_arrows, input_badge, badge_idle, next_word, bubble, auto_convert, auto_level, auto_undone, rewrite: rewrite::Config::from_json(v.get("rewrite")), check_updates, off_apps })
 }
 
 /// `prefs.json` next to the personal-state file.
@@ -204,6 +219,8 @@ pub fn apply_commands(app: &mut crate::app::App, cmds: Vec<SettingsCmd>) -> (Set
             cmd => if app.engine.apply_settings(cmd) { note_write(prefs_write, &mut personal, &mut prefs) },
         }
     }
+    // a forgotten word or a learning reset can clear the automatic-conversion undos, which live in prefs.json
+    if std::mem::take(&mut app.engine.prefs_dirty) { prefs = true }
     if personal { app.save(); }
     if prefs { app.save_prefs(); }
     acts.extend(app.engine.hide_if_blocked());
@@ -218,6 +235,24 @@ fn note_write(prefs_write: bool, personal: &mut bool, prefs: &mut bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auto_convert_round_trips_and_is_off_in_an_old_file() {
+        let dir = std::env::temp_dir().join(format!("typethai-prefs-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+        std::fs::write(&path, r#"{"never":[]}"#).unwrap();
+        let old = Prefs::load(&path);
+        assert!(!old.auto_convert && old.auto_level == AutoLevel::Cautious && old.auto_undone.is_empty(), "off unless asked for");
+        let on = Prefs { auto_convert: true, auto_level: AutoLevel::Eager, auto_undone: ["l;ylfu".to_string()].into(), ..Prefs::default() };
+        on.save(&path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""auto_convert":true"#) && text.contains(r#""auto_convert_level":"eager""#), "{text}");
+        assert_eq!(Prefs::load(&path), on);
+        std::fs::write(&path, r#"{"auto_convert":true,"auto_convert_level":"reckless"}"#).unwrap();
+        assert_eq!(Prefs::load(&path).auto_level, AutoLevel::Cautious, "an unknown level is the careful one");
+        assert!(SettingsCmd::SetAutoConvert(true).writes_prefs() && SettingsCmd::SetAutoLevel(AutoLevel::Eager).writes_prefs());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn normalize_accepts_ok_and_its_thai_reading() {
         assert_eq!(normalize_word("  OK "), Some("ok".into()));

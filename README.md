@@ -5,7 +5,8 @@ and typeThai offers `สวัสดี`. It also works the other way: `ร ก�
 
 typeThai runs in the menu bar (macOS) or the system tray (Windows). When it recognises a word typed on the wrong layout,
 it shows a small suggestion bubble at your text caret. Tap **Tab** to highlight a suggestion (tap again for the next
-one) and press **Space** to apply it. It never changes your text unless you press a key.
+one) and press **Space** to apply it. By default it never changes your text unless you press a key; **Auto-convert
+when sure** (off unless you turn it on) converts the words it is sure about by itself.
 
 > **Status: v0.1.0-beta.** The macOS builds work on the author's machine. **Windows builds are untested beta.**
 > Please report issues.
@@ -17,6 +18,20 @@ one) and press **Space** to apply it. It never changes your text unless you pres
 - **You decide when to convert.** Space, Enter and punctuation always pass through unchanged. The bubble offers the
   conversion for the word you are typing or the one you just finished. **Tab** then **Space** applies it, and **⌃⌥Z**
   undoes it.
+- **Auto-convert when sure (opt-in, off by default).** **Settings… → Word suggestions → Auto-convert when sure**
+  (prefs.json `"auto_convert": true`) converts a finished word typeThai is sure you typed on the wrong layout as you
+  press Space, Enter or punctuation, with no Tab, and switches the input source to match. **How sure** picks the bar
+  (`"auto_convert_level"`): **Cautious** (default: 4+ keys, probability > 0.995), **Balanced** (4+ keys, > 0.99) or
+  **Eager** (3+ keys, > 0.98; a few mistakes per 10,000 English words). English typed on the Thai layout flips back
+  only when it is a known English word. Measured numbers are under Accuracy below. The bubble then shows what
+  you typed, so **⌃⌥Z** (or applying that row) puts the text *and* the input source back. An undone word is never
+  converted on its own again (prefs.json `"auto_undone"`; **Learning → Forget** or **Reset learning** clears it), and
+  the undo also teaches the personal model. It only acts where accessibility confirms a text field: never in password
+  fields, never where the field cannot be identified, never in terminals or code editors (Terminal, iTerm2, Ghostty,
+  VS Code, Cursor, Zed, JetBrains IDEs, Xcode, …) and never in an app turned off under **Apps**. Web addresses, e-mail
+  addresses, paths and handles are left alone, as are words on the don't-translate list. Mid-word conversion is not
+  automatic: the live bubble still offers it, and the word converts at its end. Windows has the same wiring but is
+  untested.
 - **Keyboard-driven bubble.** **Tab** taps (and **Shift+Tab**) or **Shift+↑ / Shift+↓** choose an option, **Esc** dismisses it, **⌃⌥1 / 2 / 3** apply option 1–3.
   **Backspace** edits the word and keeps the bubble, and stepping back over a space re-opens the finished word.
 - **Mid-word suggestions.** The bubble appears while you are still typing, from the third character, once the word
@@ -213,8 +228,9 @@ press Space to apply the guess (with *Accept right away*, a third Tab applies it
 | `--no-switch-input` | Don't change the OS input source after applying |
 | `--no-reverse` | Disable the Thai-layout → English direction |
 | `--no-typo` | No typo-suggestion rows (Thai or English) |
-| `--auto-convert` | Legacy mode: convert automatically at Space/Enter when confident |
-| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<S-Tab>` is Shift+Tab; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace) |
+| `--auto-convert` | Turn on **Auto-convert when sure** (the setting is saved like any other) |
+| `--eval-auto` | Measure Auto-convert when sure: false conversions and recall per level and over a grid of rules, on the model's word lists and `rust/crates/typethai-desktop/eval/` (prints a report; nothing is changed) |
+| `--simulate` | No key capture: read lines from stdin and print what would happen (try `l;ylfu <Tab>`; `<S-Tab>` is Shift+Tab; `<Idle>` is a typing pause; `<Focus>` / `<Blur>` put focus in a text field and out of it; `^R` is ⌃⌥R, answered with the text of a preceding `<SEL:text>` or as nothing selected; `<APP:com.mitchellh.ghostty>` types into a terminal, which deletes a grapheme per Backspace; `<FieldUnknown>` / `<FieldText>`: focus nobody could classify, where Auto-convert when sure stays off, or a text field again) |
 | `--rank-report [FILE]` | Print what the bubble offered and which row was picked, over the log of this machine (`rank.jsonl` beside the state file, or FILE) |
 | `--list-input-sources` | List the enabled input sources (read-only) |
 | `--probe-caret --secs N` | Diagnostic: log where the caret is detected and mark it on screen |
@@ -271,10 +287,17 @@ Reverse direction (Thai layout → English):
 - **97.6% of English words detected (test).**
 - **False suggestions on real Thai: 0.025% (2 in 8,088 Wikipedia words), and 0 on held-out tweets.**
 
+Auto-convert when sure (`--eval-auto`, model's word lists plus tricky names/code/URLs/slang; details in
+`docs/research/auto-convert-eval.md`):
+- **Cautious (default level): 0 false conversions** on 23,408 English-layout words and 22,658 Thai-layout Thai words;
+  it catches 96.4% of unspaced Thai runs typed on the English layout and 51.7% of English typed on the Thai layout.
+- **Balanced:** 1 false conversion (`aviv`); catches 97.9% and 73.6%.
+- **Eager:** 8 false (short words such as `dvd`, `duh`, `wfh`; 3.4 per 10,000); catches 98.7% and 85.7%.
+
 Typo suggestions (synthetic typos in held-out reviews): **correct word first 81.7%, in the top 3 89.0%.**
 
 Very short slang and abbreviations (2–3 letters) are still often missed. Because conversions now need Tab, a false
-detection only means an unwanted bubble, never changed text.
+detection only means an unwanted bubble, never changed text (unless **Auto-convert when sure** is on: see below).
 
 ## Build from source
 

@@ -28,6 +28,20 @@
 - [ ] Light mode looks right (only dark mode was captured).
 - [ ] Placement is correct near the bottom of the screen with the real size (not captured).
 
+## Auto-convert when sure (opt-in; engine tests, `--simulate` and `--eval-auto` only, not run live by the agent)
+- [ ] Fresh install / old prefs.json: Settings → Word suggestions → **Auto-convert when sure** is off, and `l;ylfu ` only shows the bubble.
+- [ ] Turn it on (Cautious). In TextEdit type `l;ylfu ` → `สวัสดี ` with no Tab, the input source switches to Thai, the badge shows, and the bubble offers `l;ylfu`.
+- [ ] ⌃⌥Z right after: `l;ylfu ` is back and the input source is ABC again. Type `l;ylfu ` again: the bubble offers สวัสดี, nothing converts on its own.
+- [ ] Settings → Learning → Forget that word (or Reset learning): it converts on its own again.
+- [ ] English prose, names, `www.google.com`, `me@example.com`, `git commit -m` and chat slang (`lol omg brb`) never change.
+- [ ] Password field (Safari login, System Settings): nothing converts and no bubble.
+- [ ] Terminal, iTerm2, Ghostty, VS Code, Cursor, Zed, Xcode: the bubble still offers `สวัสดี`, but nothing converts on its own.
+- [ ] An app under Settings → Apps: nothing at all, as before.
+- [ ] A canvas/game where accessibility finds no text field: no automatic conversion even if the bubble shows.
+- [ ] Thai layout: `กนืะ าืนไ ` (dont know) — `know` flips to English by itself at Balanced; real Thai (`ครับ`, `นะ`, `สวัสดีครับ`) never flips.
+- [ ] Cautious and Balanced leave 3-key words (`w,j` → ไม่) to the bubble; Eager converts them.
+- [ ] Windows (untested): the same in Notepad and a browser; nothing converts in Windows Terminal or VS Code.
+
 ## Space applies, Tab moves (default from 0.5.24; engine tests only, not run live by the agent)
 Key map with Settings → Word suggestions → **Tab key: Space applies, Tab moves** (default, prefs.json `"tab_key":
 "space_applies"`): mid-word, with an option that finishes or fixes the word highlighted (its key hint `␣`), Space = apply

@@ -1,0 +1,22 @@
+# Thai lines (chat and everyday writing), used two ways by --eval-auto: typed as their Kedmanee keys on the English
+# layout (they should convert), and typed on the Thai layout (they must never be flipped to English).
+สวัสดีครับ วันนี้อากาศดีมาก
+ขอบคุณมากค่ะ
+ไปกินข้าวกันไหม
+ผมชอบเรียนภาษาอังกฤษ
+นัดประชุมพรุ่งนี้บ่ายสองโมง
+ราคาเท่าไหร่ครับ
+ส่งไฟล์ให้หน่อย
+โอเค เดี๋ยวโทรกลับ
+ไม่เป็นไร
+กำลังไป รอแป๊บนึง
+จริงเหรอ
+เมื่อวานไปไหนมา
+ฝนตกหนักมาก รถติดสุดๆ
+ช่วยตรวจงานให้หน่อยได้ไหม
+ยินดีด้วยนะ
+คิดถึงนะ
+ทำงานเสร็จหรือยัง
+พรุ่งนี้หยุดไหม
+อร่อยมาก ต้องไปอีก
+ขอโทษที่ตอบช้า

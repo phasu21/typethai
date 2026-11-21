@@ -941,6 +941,7 @@ fn demo_snap() -> crate::prefs::SettingsSnap {
         accept: crate::engine::AcceptKeys::default(), tab_key: crate::engine::TabKey::default(), pick_ctrl: false, pick_arrows: true, input_badge: true,
         badge_idle: Some(std::time::Duration::from_millis(crate::engine::BADGE_IDLE_DEFAULT_MS)),
         next_word: true, bubble: bridge::BubbleLayout::default(),
+        auto_convert: true, auto_level: crate::engine::AutoLevel::default(),
         words_learned: 1250,
         rewrite: crate::rewrite::Config::default(),
         check_updates: true,

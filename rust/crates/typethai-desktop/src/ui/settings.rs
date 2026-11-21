@@ -1,7 +1,7 @@
 //! Settings window: when word suggestions show, words that stay as typed, the on-device learning list, AI rewrite and
 //! updates, and the apps typeThai stays out of, one sidebar page each.
 use crate::bridge::{self, BubbleLayout};
-use crate::engine::{AcceptKeys, CompleteMode, TabKey, BADGE_IDLE_CHOICES_MS, COMPLETE_IDLE_CHOICES_MS, TAB_HOLD_CHOICES_MS};
+use crate::engine::{AcceptKeys, AutoLevel, CompleteMode, TabKey, BADGE_IDLE_CHOICES_MS, COMPLETE_IDLE_CHOICES_MS, TAB_HOLD_CHOICES_MS};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
 use crate::{local_setup, rewrite, update, whats_new};
 use crate::ui::thai_font;
@@ -91,6 +91,7 @@ const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "Off"), (Comp
 const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "Tab"), (AcceptKeys::TabOrSpace, "Tab or Space")];
 /// "Tab key" (`TabKey`).
 const TAB_KEY: [(TabKey, &str); 3] = [(TabKey::SpaceApplies, "Space applies, Tab moves"), (TabKey::Highlight, "Highlight, then Space"), (TabKey::Accept, "Accept right away")];
+const AUTO_LEVEL: [(AutoLevel, &str); 3] = [(AutoLevel::Cautious, "Cautious"), (AutoLevel::Balanced, "Balanced"), (AutoLevel::Eager, "Eager")];
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "Horizontal"), (BubbleLayout::Vertical, "Vertical")];
 /// "Pick with": (pick_arrows, pick_ctrl). Both off (only from a hand-edited prefs.json) shows no choice.
 const PICK: [((bool, bool), &str); 3] = [((true, false), "Arrow keys"), ((false, true), "Ctrl+1–3"), ((true, true), "Arrow keys and Ctrl+1–3")];
@@ -616,6 +617,13 @@ impl SettingsView {
                     let ms = if label.as_ref() == BADGE_OFF { None } else { BADGE_IDLE_CHOICES_MS.iter().find(|&&ms| delay_label(ms) == label).map(|&ms| ms) };
                     if let Some(ms) = ms.or_else(|| (label.as_ref() == BADGE_OFF).then_some(0)) { write.update(cx, |v, cx| v.set_badge_idle((ms > 0).then(|| std::time::Duration::from_millis(ms)), cx)) }
                 }) };
+        let auto = { let (read, write) = (view.clone(), view.clone());
+            SettingField::switch(move |cx| read.read(cx).snap.auto_convert, move |on, cx| write.update(cx, |v, cx| v.set_auto_convert(on, cx))) };
+        let auto_level = { let (read, write) = (view.clone(), view.clone());
+            let options = AUTO_LEVEL.iter().map(|(_, label)| (SharedString::from(*label), SharedString::from(*label))).collect();
+            SettingField::dropdown(options,
+                move |cx| AUTO_LEVEL.iter().find(|(l, _)| *l == read.read(cx).snap.auto_level).map_or("", |(_, l)| l).into(),
+                move |label, cx| if let Some(&(l, _)) = AUTO_LEVEL.iter().find(|(_, l)| *l == label.as_ref()) { write.update(cx, |v, cx| v.set_auto_level(l, cx)) }) };
         let next = { let (read, write) = (view.clone(), view.clone());
             SettingField::switch(move |cx| read.read(cx).snap.next_word, move |on, cx| write.update(cx, |v, cx| v.set_next_word(on, cx))) };
         let learn = { let (read, write) = (view.clone(), view.clone());
@@ -630,10 +638,12 @@ impl SettingsView {
                 TabKey::Highlight => "The bubble can finish the word you are typing, in Thai or English. Tap Tab to highlight a suggestion, tap again for the next one (Shift+Tab goes back), then press Space to use it; Esc closes the bubble. Hold Tab and press 1–3 to pick one directly.",
                 TabKey::Accept => "The bubble can finish the word you are typing, in Thai or English. Tab accepts the highlighted word; hold Tab and press 1–3 to pick another; Esc closes the bubble. Space can also accept a word typed in the wrong layout.",
             }.into(),
-            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "next", "next word", "predict", "prediction", "model", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column", "input", "language", "source", "keyboard", "flag", "badge", "caret", "preview", "idle", "stop", "once", "never", "off", "ไทย"], std::iter::empty()),
+            keywords(&["word suggestions", "completion", "complete", "autocomplete", "pause", "delay", "typing", "learn", "forget", "accept", "space", "tab", "shortcut", "key", "ctrl", "control", "1", "2", "3", "number", "digit", "pick", "arrow", "arrows", "next", "next word", "predict", "prediction", "model", "enter", "bubble", "layout", "horizontal", "vertical", "row", "column", "input", "language", "source", "keyboard", "flag", "badge", "caret", "preview", "idle", "stop", "once", "never", "off", "ไทย", "auto", "automatic", "auto-convert", "convert", "sure", "confidence", "cautious", "balanced", "eager"], std::iter::empty()),
             [Some(SettingItem::new("Show suggestions", mode)),
                 (self.snap.completion == CompleteMode::Pause).then(|| SettingItem::new("Pause before suggesting", delay).description("How long to stop typing before the bubble offers words. Shorter is quicker but may flash while you type.")),
                 (self.snap.completion != CompleteMode::Off).then(|| SettingItem::new("Suggest the next word", next).description("Pause after a word (after a space in English) and the bubble offers the word that usually follows it: built-in word pairs, and your own model's guess with them.")),
+                Some(SettingItem::new("Auto-convert when sure", auto).description("Off: nothing changes until you press a key. On: a finished word typeThai is sure you typed on the wrong layout is converted as you press Space, Enter or punctuation, and the keyboard switches to match. ⌃⌥Z undoes it and switches back, and that word is never converted on its own again. Only in text fields: never in password fields, terminals or code editors.")),
+                self.snap.auto_convert.then(|| SettingItem::new("How sure", auto_level).description("Cautious converts only words of four or more keys it is almost certain about; in testing it changed none of 23,000 English words. Balanced catches more, with about one mistake in 20,000 English words. Eager also converts three-key words and catches the most, with a few mistakes per 10,000 words (short words like dvd or wfh).")),
                 Some(SettingItem::new("Bubble layout", layout).description("Horizontal puts the suggestions side by side. Long suggestions and AI rewrite results are always stacked.")),
                 Some(SettingItem::new("Tab key", tab_key).description("Space applies, Tab moves: while you type a word, Space uses the highlighted suggestion and Tab moves to the next one; after a finished word (next-word suggestions) Space is just a space. Highlight, then Space: each Tab tap highlights the next suggestion and Space (or Enter) uses it; without a Tab tap Space is just a space. Accept right away: a Tab tap uses the highlighted suggestion, as in earlier versions.")),
                 Some(SettingItem::new("Accept with", accept).description("Space accepts a word typed in the wrong layout (l;ylfu → สวัสดี), then types the space. Over other suggestions it just types a space.")),
@@ -708,6 +718,18 @@ impl SettingsView {
         (self.confirm_reset, self.confirm_forget) = (false, false);
         self.snap.badge_idle = idle;
         bridge::push_settings(SettingsCmd::SetBadgeIdle(self.snap.badge_idle));
+        cx.notify();
+    }
+    fn set_auto_convert(&mut self, on: bool, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.auto_convert = on;
+        bridge::push_settings(SettingsCmd::SetAutoConvert(on));
+        cx.notify();
+    }
+    fn set_auto_level(&mut self, level: AutoLevel, cx: &mut Context<Self>) {
+        (self.confirm_reset, self.confirm_forget) = (false, false);
+        self.snap.auto_level = level;
+        bridge::push_settings(SettingsCmd::SetAutoLevel(level));
         cx.notify();
     }
     fn set_next_word(&mut self, on: bool, cx: &mut Context<Self>) {
