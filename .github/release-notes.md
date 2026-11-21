@@ -1,5 +1,21 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.29**
+- **The typeThai logo and app icon.**
+- **A live menu-bar / tray icon that shows the input language.** The white ท card in front means Thai, the orange T card
+  in front means English, and grey means typeThai is paused. On macOS, Settings → Word suggestions → **Menu bar icon**
+  chooses *Colour* (the live icon) or *Plain* (a black icon that follows the menu bar's colours).
+- **English wrong-word suggestions.** When a real English word is probably the wrong one (`form` → *from*, `their` →
+  *there*, `you're` ↔ *your*), the bubble offers the fix as a typo row one word later. It is never applied without a key:
+  Tab (then Space), ⌃⌥1–3 or a click applies it, and ⌃⌥Z puts your word back.
+
+**Fixed in 0.5.29**
+- **Suggestions no longer stay on screen after you delete every character of the word.**
+
+**Updated in 0.5.29**
+- **Word data model v6:** English contractions (don't, you're, it's, they're…) are now words, for completions and the
+  wrong-word suggestions.
+
 **New in 0.5.28**
 - **Tab cycle (preview).** Tab puts suggestion 1 into your text, Tab again cycles 2, 3 and back to what you typed; keep
   typing to keep it, Esc to undo. Turn on in Settings → Word suggestions → **Tab key**: *Tab cycle (preview)*.
