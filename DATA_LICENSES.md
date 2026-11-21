@@ -28,6 +28,14 @@ Because the model is derived from Wikipedia text, `typethai.ttm` is distributed 
 Chiang Mai University); Thai word pairs segmented with OpenThai2.0-LATTE-WordSeg-Lite (OpenThai, iApp Technology,
 the LATTE authors)". The code that uses it stays MIT.
 
+## English confusion sets (spike, not used by the app yet)
+
+`data/tinyfix-confusions.txt` is `wrong-word-confusions.txt` from **paperweight/tinyfix**
+(https://huggingface.co/paperweight/tinyfix, revision `5b1491e`), about 235 sets of English words people mix up
+(their/there/they're, form/from). It is copied verbatim below a three-line attribution header, under the **MIT License**,
+Copyright (c) 2026 Caleb Fahlgren; the full licence text is in `data/tinyfix-LICENSE`. `typethai-core`'s `confusion` module embeds the list. Only the list is used, not the
+tinyfix model. See `docs/research/confusion-pairs-spike.md`.
+
 ## Bundled font
 
 `rust/crates/typethai-desktop/fonts/typeThaiSans-*.ttf` (Regular, Medium, SemiBold, Bold) is built by
