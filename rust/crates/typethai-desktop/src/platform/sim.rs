@@ -111,7 +111,7 @@ pub fn run(mut app: App) {
                     Action::ShowBubble(items) => bubble = items.iter().map(|b| b.label.clone()).collect(),
                     Action::HideBubble => bubble.clear(), _ => {}
                 } }
-                if o.actions.iter().any(|a| matches!(a, Action::ShowBubble(_) | Action::Select(_))) {
+                if o.actions.iter().any(|a| matches!(a, Action::ShowBubble(_) | Action::Select(_) | Action::Cycle(_))) {
                     let sel = app.engine.selected();
                     println!("  [bubble: {}]", bubble.iter().enumerate().map(|(j, l)| format!("{}{l}", if j == sel { ">" } else { " " })).collect::<Vec<_>>().join(" | "));
                 }
