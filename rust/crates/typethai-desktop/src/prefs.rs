@@ -112,7 +112,7 @@ const COMPLETION: [(CompleteMode, &str); 3] = [(CompleteMode::Off, "off"), (Comp
 /// `prefs.json` spelling of the accept keys.
 const ACCEPT: [(AcceptKeys, &str); 2] = [(AcceptKeys::Tab, "tab"), (AcceptKeys::TabOrSpace, "tab_or_space")];
 /// `prefs.json` spelling of the Tab key choice. `tab_cycles` is written beside it for an older typeThai reading the file.
-const TAB_KEY: [(TabKey, &str); 3] = [(TabKey::SpaceApplies, "space_applies"), (TabKey::Highlight, "highlight"), (TabKey::Accept, "accept")];
+const TAB_KEY: [(TabKey, &str); 4] = [(TabKey::SpaceApplies, "space_applies"), (TabKey::Highlight, "highlight"), (TabKey::Accept, "accept"), (TabKey::Cycle, "cycle")];
 /// `prefs.json` spelling of the bubble layout.
 const BUBBLE: [(BubbleLayout, &str); 2] = [(BubbleLayout::Horizontal, "horizontal"), (BubbleLayout::Vertical, "vertical")];
 /// `prefs.json` spelling of the "Auto-convert when sure" levels.
@@ -345,8 +345,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("prefs.json");
         assert_eq!(Prefs::default().tab_key, TabKey::SpaceApplies, "Space applies, Tab moves by default");
-        // the three choices round-trip, with `tab_cycles` beside them for an older typeThai
-        for (k, name, cycles) in [(TabKey::SpaceApplies, "space_applies", true), (TabKey::Highlight, "highlight", true), (TabKey::Accept, "accept", false)] {
+        // the choices round-trip, with `tab_cycles` beside them for an older typeThai
+        for (k, name, cycles) in [(TabKey::SpaceApplies, "space_applies", true), (TabKey::Highlight, "highlight", true), (TabKey::Accept, "accept", false), (TabKey::Cycle, "cycle", true)] {
             let p = Prefs { tab_key: k, ..Prefs::default() };
             p.save(&path);
             let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
