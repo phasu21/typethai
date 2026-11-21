@@ -317,7 +317,7 @@ cd rust
 TYPETHAI_MODEL=path/to/typethai.ttm cargo test --release -p typethai-core -p typethai-desktop   # without a model they skip
 cargo build --release -p typethai-desktop
 # get the model (or build your own from data/model with tt-pack):
-gh release download model-v5 -R phasu21/typethai -p typethai.ttm -D target/release
+gh release download model-v6 -R phasu21/typethai -p typethai.ttm -D target/release
 ./target/release/typethai-desktop --simulate <<< 'l;ylfu <Tab>'
 ```
 
@@ -353,7 +353,7 @@ scripts/bigrams/fetch.sh "$DATA"                       # pinned URLs; writes $DA
 python3 -m venv "$VENV" && "$VENV/bin/pip" install pyarrow
 scripts/bigrams/latte/setup.sh "$LATTE"                # optional: build-time LATTE word segmentation for Thai pairs
 LATTE="$LATTE" PYTHON="$VENV/bin/python" scripts/bigrams/build.sh "$DATA" "$WORK" typethai-en.ttm typethai-ctx.ttm 3:all 5:all 2:all   # model-v5 ships 3:all with LATTE (its Thai pairs; English as in model-v4)
-# model-v6: model-v5 with the English pairs and frequencies rebuilt to keep contractions (you're, it's, don't)
+# model-v6 (shipped): model-v5 with the English pairs and frequencies rebuilt to keep contractions (you're, it's, don't)
 PYTHON="$VENV/bin/python" scripts/bigrams/model-v6.sh "$DATA" "$WORK" model-v5.ttm model-v6.ttm
 ```
 
