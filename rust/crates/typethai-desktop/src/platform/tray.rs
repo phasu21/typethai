@@ -74,7 +74,7 @@ fn reduce_motion() -> bool {
         !ws.is_null() && { let b: bool = objc2::msg_send![ws, accessibilityDisplayShouldReduceMotion]; b }
     }
     #[cfg(windows)] unsafe {
-        use windows::Win32::{Foundation::BOOL, UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS}};
+        use windows::{core::BOOL, Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS}};
         let mut on = BOOL(1);
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() && !on.as_bool()
     }
