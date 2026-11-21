@@ -1,5 +1,20 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**New in 0.5.26**
+- **Auto-convert when sure (optional, off by default).** Turn on Settings → Word suggestions → **Auto-convert when
+  sure**: a finished word typeThai is sure you typed on the wrong layout (`l;ylfu` → สวัสดี, or English typed on the
+  Thai layout) is converted at Space, Enter or punctuation with no Tab, and the input source switches to match. *How
+  sure* chooses *Cautious* (the default), *Balanced* or *Eager*. **⌃⌥Z** undoes it and switches the input source back,
+  and that word is never converted automatically again (the bubble still offers it). It only acts in text fields, never
+  in password fields, terminals or code editors. Windows: not tested yet.
+
+**Fixed in 0.5.26**
+- **Space no longer converts a word unless you choose to.** With the default Tab key (*Space applies, Tab moves*),
+  Space could apply the highlighted conversion, so `hello git ` became `hello เระ `. Space, Enter and punctuation now
+  type as usual over a conversion; the bubble still offers it, and Tab (then Space) or ⌃⌥1–3 applies it. Space still
+  uses a completion or spelling fix in the script you are typing. To have Space convert, turn on Auto-convert when sure
+  or choose Settings → Word suggestions → Accept with: *Tab or Space*.
+
 **New in 0.5.25**
 - **Better Thai completions.** The built-in Thai word data (model v5) now also counts word pairs from Thai text split
   into words by OpenThai2.0-LATTE-WordSeg-Lite, a word segmenter used only when the data is built; nothing of it ships
