@@ -73,7 +73,16 @@ fn uia_worker() -> mpsc::Sender<(UiaQuery, mpsc::Sender<UiaResp>)> {
     });
     tx
 }
-const FOCUS_PROPS: [UIA_PROPERTY_ID; 5] = [UIA_IsPasswordPropertyId, UIA_ControlTypePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId, UIA_ValueIsReadOnlyPropertyId];
+const FOCUS_PROPS: [UIA_PROPERTY_ID; 4] = [UIA_IsPasswordPropertyId, UIA_ControlTypePropertyId, UIA_IsValuePatternAvailablePropertyId, UIA_ValueIsReadOnlyPropertyId];
+/// Whether the focused element has an insertion caret of its own (TextPattern2's `GetCaretRange`, `active` true):
+/// proof of real text entry (Word, RichEdit, Windows Terminal's prompt) that bare TextPattern availability is not —
+/// read-only selectable text (a web page's own text, a PDF viewer, a document in read mode) exposes TextPattern too,
+/// for copy, with no caret. A live call (not part of the cache request): cheap, one element, already on this thread.
+unsafe fn has_caret(e: &IUIAutomationElement) -> bool {
+    let Ok(tp) = e.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) else { return false };
+    let mut active = windows::core::BOOL(0);
+    tp.GetCaretRange(&mut active).is_ok() && active.as_bool()
+}
 /// Focused element: (password, text-field verdict), in one cross-process round trip (cache request).
 unsafe fn uia_focus(a: Option<&IUIAutomation>) -> (bool, Field) {
     // The cache request is made per read: made once at startup it can fail (the proxy is not up yet), and then
@@ -85,7 +94,7 @@ unsafe fn uia_focus(a: Option<&IUIAutomation>) -> (bool, Field) {
     // a property the element lacks comes back as the "not supported" sentinel, which is no bool
     let b = |p| e.GetCachedPropertyValue(p).ok().and_then(|v| bool::try_from(&v).ok()).unwrap_or(false);
     let ct = e.CachedControlType().map(|c| c.0).unwrap_or(0);
-    (b(UIA_IsPasswordPropertyId), field::uia(ct, b(UIA_IsTextPatternAvailablePropertyId), b(UIA_IsValuePatternAvailablePropertyId), b(UIA_ValueIsReadOnlyPropertyId)))
+    (b(UIA_IsPasswordPropertyId), field::uia(ct, has_caret(&e), b(UIA_IsValuePatternAvailablePropertyId), b(UIA_ValueIsReadOnlyPropertyId)))
 }
 /// First rectangle of a text range, on screen (physical pixels). A degenerate (caret) range comes back as the
 /// insertion point itself where the provider has one for it (Chromium builds a 1-px rect for UIA, Word answers the
