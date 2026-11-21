@@ -6,6 +6,9 @@
 #   <work dir>  extracted text, pair files, one .ttm and eval report per level
 #   <out.ttm>   base model + the pairs of the FIRST level listed
 # Needs a Python with pyarrow for the Wikipedia parquet (PYTHON, default python3) and a release build of rust/.
+# LATTE=<dir> (from scripts/bigrams/latte/setup.sh) adds the Thai pairs of the same training text split into words by
+# LATTE-WordSeg-Lite (short units): each level's Thai table is then the dictionary pairs and the LATTE pairs, each pruned
+# alike, with the counts of a pair found in both summed. The Thai pairs are built this way from model-v5 on.
 set -eu
 DATA=$1 WORK=$2 BASE=$3 OUT=$4; shift 4
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -16,15 +19,28 @@ PY=${PYTHON:-python3}
 mkdir -p "$WORK"
 [ -d "$WORK/text/train" ] || "$PY" -I "$HERE/extract.py" "$DATA" "$WORK/text"
 [ -s "$WORK/raw-th.tsv" ] || "$BIN/tt-bigrams" count "$BASE" "$WORK/raw-th.tsv" "$WORK/raw-en.tsv" --vocab "$WORK"/text/train/*.txt
+if [ -n "${LATTE:-}" ]; then
+  "$LATTE/venv/bin/python" -I "$HERE/latte/segment.py" "$WORK/text/train" "$WORK/latte-short/train"
+  # English pairs come from the plain text above only
+  [ -s "$WORK/raw-th-latte.tsv" ] || "$BIN/tt-bigrams" count "$BASE" "$WORK/raw-th-latte.tsv" "$WORK/raw-en-latte.tsv" \
+    --presegmented --vocab "$WORK"/latte-short/train/*.txt
+fi
 
 "$BIN/tt-bigram-eval" "$BASE" "$WORK"/text/heldout/*.txt > "$WORK/eval-base.txt"
 for level in "$@"; do
   min=${level%:*} top=${level#*:} L=$WORK/min$min-top$top
   mkdir -p "$L"
-  for lang in th en; do
-    "$BIN/tt-bigrams" prune "$BASE" $lang "$WORK/raw-$lang.tsv" "$L/$lang-bigrams.tsv" --vocab --min-count "$min" \
-      $([ "$top" = all ] || echo --top "$top")
-  done
+  prune() {
+    "$BIN/tt-bigrams" prune "$BASE" $1 "$2" "$3" --vocab --min-count "$min" $([ "$top" = all ] || echo --top "$top")
+  }
+  prune en "$WORK/raw-en.tsv" "$L/en-bigrams.tsv"
+  if [ -n "${LATTE:-}" ]; then
+    prune th "$WORK/raw-th.tsv" "$L/th-dict.tsv"
+    prune th "$WORK/raw-th-latte.tsv" "$L/th-latte.tsv"
+    "$BIN/tt-bigrams" merge "$L/th-bigrams.tsv" "$L/th-dict.tsv" "$L/th-latte.tsv"
+  else
+    prune th "$WORK/raw-th.tsv" "$L/th-bigrams.tsv"
+  fi
   "$BIN/tt-pack" "$BASE" "$L/model.ttm" --thbigrams "$L/th-bigrams.tsv" --enbigrams "$L/en-bigrams.tsv"
   "$BIN/tt-bigram-eval" "$L/model.ttm" "$WORK"/text/heldout/*.txt > "$L/eval.txt"
 done

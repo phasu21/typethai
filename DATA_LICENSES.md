@@ -18,13 +18,15 @@ word lists, word frequencies, word pair counts, and logistic-regression weights.
 | Tatoeba sentences, English and Thai per-language exports (weekly export, downloaded 2026-10-15), https://tatoeba.org/en/downloads | Word pair counts | CC BY 2.0 FR (part CC0 1.0). Sentences © Tatoeba contributors |
 | VISTEC-TP-TH-2021 (VISTEC and Chiang Mai University), https://github.com/mrpeerat/OSKut/tree/main/VISTEC-TP-TH-2021. The raw tweets only; its segmentation and tags are not used | Thai word pair counts (chat-style Thai: slang, netspeak) | CC BY-SA 3.0 (adapted under CC BY-SA 4.0, as its section 4(b) allows). Text from Twitter, 2017–2019 |
 | Wikipedia via the `wikimedia/wikipedia` 2023-11-01 dump (Hugging Face), one parquet shard per language | Word pair counts | CC BY-SA 4.0. Text © Wikipedia contributors |
+| OpenThai2.0-LATTE-WordSeg-Lite 0.1.2 (OpenThai, iApp Technology Co., Ltd. and the LATTE authors), https://huggingface.co/iapp/OpenThai2.0-LATTE-WordSeg-Lite, revision `d5f39bc`. A build tool, not a data source: it is not in the model or the app | At build time only, splits the Thai training text above into words for a second set of Thai word pair counts, which are added to the dictionary-segmented counts (section 12; `scripts/bigrams/latte/`). Only the pair counts ship. Its model, dictionary and character table are not distributed | Model weights, dictionary and character table: CC BY-SA 4.0 (the dictionary's ICU entries also carry the Unicode-DFS-2016 notice). Runtime code: Apache-2.0 |
 | A hand-written brand list (`data/brands_hand.txt`) | Words to keep as English | MIT (this project) |
 | Source code, lines without Thai | English character n-grams and "code" negatives for the classifier (aggregate counts and weights only; no code text or identifiers are in the model) | Used only as statistics. The original files are not distributed |
 
 Because the model is derived from Wikipedia text, `typethai.ttm` is distributed under **CC BY-SA 4.0**. Attribution:
 "Wikipedia contributors; PyThaiNLP; Wisesight; FrequencyWords (Hermit Dave); scb-mt-en-th-2020
 (AIResearch, VISTEC, SCB), including Taskmaster-1 (Google LLC); Tatoeba contributors; VISTEC-TP-TH-2021 (VISTEC,
-Chiang Mai University)". The code that uses it stays MIT.
+Chiang Mai University); Thai word pairs segmented with OpenThai2.0-LATTE-WordSeg-Lite (OpenThai, iApp Technology,
+the LATTE authors)". The code that uses it stays MIT.
 
 ## Bundled font
 
@@ -49,7 +51,8 @@ icon catalog.
   `train` splits (wiki and Wisesight), and `fresh/*` is read only by the evaluation commands.
 
 The word pair sections hold only counts of adjacent dictionary or completion words, and no sentences.
-`scripts/bigrams/` rebuilds them (`fetch.sh` lists the exact URLs and pinned revisions). The other scb-mt-en-th-2020
+`scripts/bigrams/` rebuilds them (`fetch.sh` lists the exact URLs and pinned revisions; `latte/setup.sh` pins the
+LATTE wheel and model by SHA-256). The other scb-mt-en-th-2020
 subsets were left out on purpose: `nus_sms` and `msr_paraphrase` translate corpora whose own terms were not confirmed as CC-compatible, and
 `thai_websites`, `paracrawl`, `apdf` and `assorted_government` are third-party web and government text.
 

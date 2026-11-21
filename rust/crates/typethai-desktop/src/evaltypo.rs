@@ -85,7 +85,7 @@ fn completions(e: &Engine, prev: &str, typed: &str, lang: Lang) -> (Vec<String>,
             let Some(comp) = &e.thai_comp else { return (vec![], false, None) };
             let run = format!("{prev}{typed}");
             let d = &e.det.th_dict;
-            let Some(at) = thai_tail(&run, d, comp, 1, e.opts.slips.as_ref()).filter(|&at| run.chars().count() - at >= 2) else { return (vec![], false, None) };
+            let Some(at) = thai_tail(&run, d, comp, 1, e.opts.slips.as_ref(), Some(&e.det.thai)).filter(|&at| run.chars().count() - at >= 2) else { return (vec![], false, None) };
             let (head, tail) = run.split_at(run.char_indices().nth(at).map_or(run.len(), |(b, _)| b));
             let p = match d.segment(head).last() { Some(w) => d.has(w).then(|| w.to_string()), None => Some(prev.to_string()) };
             (head.to_string(), comp.complete(tail, 3, e.context(p.as_deref(), InputLang::Thai)))

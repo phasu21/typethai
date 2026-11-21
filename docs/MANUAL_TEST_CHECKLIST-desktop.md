@@ -50,15 +50,17 @@ previous (after a Tab tap) · Space / Enter / ↑ after a tap = apply the highli
 a space · hold Tab + 1..3 = apply that option · hold Tab = the ⌃⌥R options, never applies.
 Space is a plain space when: no bubble; after Esc; the word typed is already a whole word (`help` with helpful up); the
 option is the word as typed; next-word options (after `ok ` and a pause, or a Thai run ending on a word with the next
-word offered); the ⌃⌥R options (select text, hold Tab, let go, Space types over the selection).
+word offered); the ⌃⌥R options (select text, hold Tab, let go, Space types over the selection); and any conversion (a live
+row for a word typed in the wrong layout, or a completion that converts it): Space, Enter and punctuation never convert.
 - [ ] Type `hel` and pause: help / hello / helmet, the first with `␣` on it (strip and rows). Press Space: `help `, one
   space, the bubble gone; the next Space is a space.
 - [ ] Type `hel`, pause, tap Tab: hello is highlighted (no tab typed, text unchanged); tap again: helmet; again: help
   (wraps). Shift+Tab goes back. Press Space: that option, then one space. Enter or ↑ instead: no space or newline.
 - [ ] Type `hel`, pause, Esc: the bubble goes; Space types `hel `.
 - [ ] Type `help` (whole word) while helpful is offered: Space types `help `; Tab, Space gives `helpful `.
-- [ ] Wrong layout: type `l;ylfu` (live สวัสดี up): Space gives `สวัสดี ` with one space and the input source changes to
-  Thai; ⌃⌥Z restores `l;ylfu `.
+- [ ] Wrong layout: type `l;ylfu` (live สวัสดี up, its key hint `Tab`, not `␣`): Space types `l;ylfu ` and the bubble
+  offers สวัสดี again; Tab, Space gives `สวัสดี ` with one space and the input source changes to Thai; ⌃⌥Z restores
+  `l;ylfu `. Type `hello git `: it stays `hello git ` (no เระ).
 - [ ] Thai: type `ภาษ` on the Thai layout, pause: ภาษา highlighted with `␣`; Space gives `ภาษา `.
 - [ ] Next word: type `ok `, pause: the next words show with `Tab` (not `␣`) on the first; Space types a space. Tab
   highlights the first, Space inserts it with no extra space.

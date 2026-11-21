@@ -24,7 +24,14 @@ fn class(c: char) -> Class {
 /// Splits one line into runs of adjacent words of one language. A run ends at punctuation, a digit, a Thai/English
 /// switch, a Thai piece the dictionary does not cover, or an English token with an apostrophe; spaces do not end it.
 /// Thai is normalised and segmented over `dict`, English words are lowercased. Only runs of 2+ words are returned.
-pub fn word_runs(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> {
+pub fn word_runs(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> { runs(line, dict, Thai::Segment) }
+/// `word_runs` over a line whose Thai words are already split, by spaces or U+200B (the build-time LATTE
+/// segmentation, `scripts/bigrams/latte/`): each Thai piece is one word, kept when the dictionary has it, else it ends
+/// the run.
+pub fn word_runs_presegmented(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> { runs(line, dict, Thai::Presegmented) }
+#[derive(Clone, Copy, PartialEq)]
+enum Thai { Segment, Presegmented }
+fn runs(line: &str, dict: &Dict, thai: Thai) -> Vec<(Lang, Vec<String>)> {
     let mut r = Runs::default();
     let mut rest = line;
     while let Some(c) = rest.chars().next() {
@@ -33,6 +40,10 @@ pub fn word_runs(line: &str, dict: &Dict) -> Vec<(Lang, Vec<String>)> {
         let (chunk, tail) = rest.split_at(len); rest = tail;
         match k {
             Class::Space => {}
+            Class::Thai if thai == Thai::Presegmented => {
+                let w = normalize_thai(chunk);
+                if dict.has(&w) { r.push(Lang::Th, w) } else { r.end() }
+            }
             Class::Thai => for p in dict.segment(&normalize_thai(chunk)) {
                 if dict.has(p) { r.push(Lang::Th, p.to_string()) } else { r.end() }
             },
@@ -78,6 +89,10 @@ impl Counts {
     pub fn add_line(&mut self, line: &str, dict: &Dict) {
         for (lang, ws) in word_runs(line, dict) { match lang { Lang::Th => &mut self.th, Lang::En => &mut self.en }.add_run(&ws) }
     }
+    /// `add_line` for a line whose Thai words are already split (`word_runs_presegmented`).
+    pub fn add_presegmented_line(&mut self, line: &str, dict: &Dict) {
+        for (lang, ws) in word_runs_presegmented(line, dict) { match lang { Lang::Th => &mut self.th, Lang::En => &mut self.en }.add_run(&ws) }
+    }
 }
 
 /// Pruning: drop pairs `keep` rejects, then pairs seen fewer than `min_count` times, then all but the `top` most
@@ -97,6 +112,14 @@ pub fn prune(mut pairs: Vec<Pair>, p: &Prune) -> Vec<Pair> {
 }
 pub fn sort(pairs: &mut [Pair]) { pairs.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)).then_with(|| a.1.cmp(&b.1))); }
 
+/// Pair lists summed: a pair in several lists gets the sum of its counts. Sorted like `prune`.
+pub fn merge(lists: impl IntoIterator<Item = Vec<Pair>>) -> Vec<Pair> {
+    let mut m: HashMap<(String, String), u64> = HashMap::new();
+    for l in lists { for (a, b, c) in l { *m.entry((a, b)).or_default() += c } }
+    let mut out: Vec<Pair> = m.into_iter().map(|((a, b), c)| (a, b, c)).collect();
+    sort(&mut out);
+    out
+}
 /// `prev\tnext\tcount` lines.
 pub fn to_tsv(pairs: &[Pair]) -> String { pairs.iter().map(|(a, b, c)| format!("{a}\t{b}\t{c}\n")).collect() }
 pub fn from_tsv(s: &str) -> Result<Vec<Pair>, String> {

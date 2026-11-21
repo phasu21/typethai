@@ -1,4 +1,4 @@
-use typethai_core::{corpus::{from_tsv, prune, sort, to_tsv, word_runs, Counts, Lang, Pair, Prune}, dict::Dict};
+use typethai_core::{corpus::{from_tsv, merge, prune, sort, to_tsv, word_runs, word_runs_presegmented, Counts, Lang, Pair, Prune}, dict::Dict};
 
 fn dict() -> Dict { Dict::new(["ฉัน", "ชอบ", "กิน", "ข้าว", "ผัด", "ไป", "เที่ยว", "ไปเที่ยว", "ตา", "ตาก", "ลม", "กลม"].map(String::from)) }
 fn pairs(v: &[(&str, &str, u64)]) -> Vec<Pair> { v.iter().map(|&(a, b, c)| (a.into(), b.into(), c)).collect() }
@@ -40,4 +40,21 @@ fn pairs(v: &[(&str, &str, u64)]) -> Vec<Pair> { v.iter().map(|&(a, b, c)| (a.in
     assert_eq!(to_tsv(&p), "ฉัน\tชอบ\t3\ni\tam\t12\n");
     assert_eq!(from_tsv(&to_tsv(&p)).unwrap(), p);
     assert_eq!(from_tsv("a\tb\t1\na\tb\n"), Err("line 2: expected prev<TAB>next<TAB>count".to_string()));
+}
+#[test] fn presegmented_runs_keep_the_given_words() {
+    let d = dict(); let z = '\u{200B}';
+    // the dictionary would read ตากลม as ตาก|ลม; a presegmented line keeps ตา|กลม, and a word it lacks ends the run
+    let line = format!("ฉัน{z}ชอบ{z}ตา{z}กลม, I{z}like ไป{z}ปุ๊กกี้{z}กิน{z}ข้าว");
+    let got: Vec<(Lang, Vec<String>)> = word_runs_presegmented(&line, &d);
+    let want: Vec<(Lang, Vec<String>)> = vec![(Lang::Th, vec!["ฉัน", "ชอบ", "ตา", "กลม"]), (Lang::En, vec!["i", "like"]), (Lang::Th, vec!["กิน", "ข้าว"])]
+        .into_iter().map(|(l, w)| (l, w.into_iter().map(String::from).collect())).collect();
+    assert_eq!(got, want);
+    assert_eq!(word_runs(&line.replace(z, ""), &d)[0].1, ["ฉัน", "ชอบ", "ตาก", "ลม"]);
+    let mut c = Counts::default(); c.add_presegmented_line(&format!("ตา{z}กลม"), &d);
+    assert_eq!(c.th.into_pairs(), pairs(&[("ตา", "กลม", 1)]));
+}
+#[test] fn merge_sums_pairs_found_in_several_lists() {
+    let a = pairs(&[("ฉัน", "ชอบ", 3), ("ชอบ", "กิน", 1)]);
+    let b = pairs(&[("ฉัน", "ชอบ", 2), ("ฉัน", "ไป", 4)]);
+    assert_eq!(merge([a, b]), pairs(&[("ฉัน", "ชอบ", 5), ("ฉัน", "ไป", 4), ("ชอบ", "กิน", 1)]));
 }
