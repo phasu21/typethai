@@ -38,13 +38,13 @@ impl AutoLevel {
         }
     }
 }
-/// (forward probability, reverse probability, fewest keys) per level; see `AutoLevel::rule`. `--eval-auto`, model-v4,
+/// (forward probability, reverse probability, fewest keys) per level; see `AutoLevel::rule`. `--eval-auto`, model-v6,
 /// fresh personal model, false conversions on 23,408 English-layout words (top 20,000 English words in lines, the top
 /// 3,000 alone, and `eval/auto-english.txt`) and 22,658 Thai-layout Thai words; recall on 19,633 top Thai words,
 /// 3,000 unspaced two-word runs and the chat lines (as keys), and 19,999 English words on the Thai layout:
 /// - Cautious: 0 false | Thai words 82.5%, runs 96.4%, chat 23/25 | reverse 51.7%
-/// - Balanced: 1 false (`aviv`, 0.4 per 10k) | 84.6%, 97.9%, 24/25 | reverse 73.6%
-/// - Eager: 8 false (`dvd duh lulu ryo siu zhu aviv wfh`, 3.4 per 10k) | 95.2%, 98.7%, 24/25 | reverse 85.7%
+/// - Balanced: 0 false | 84.6%, 97.9%, 24/25 | reverse 73.7%
+/// - Eager: 4 false (`dvd duh ryo wfh`, 1.7 per 10k) | 95.2%, 98.7%, 24/25 | reverse 85.8%
 /// No level flipped any of the Thai-layout Thai. The full grid is in `docs/research/auto-convert-eval.md`.
 pub const AUTO_CAUTIOUS: (f64, f64, usize) = (0.995, 0.995, 4);
 pub const AUTO_BALANCED: (f64, f64, usize) = (0.99, 0.98, 4);

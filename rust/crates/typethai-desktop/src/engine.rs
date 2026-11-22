@@ -4,6 +4,7 @@
 use crate::backspace::{self, DeleteUnit};
 use crate::bridge::BubbleLayout;
 use crate::candidate::{src_of_kind, Candidate, Floors, Src};
+use crate::english::English;
 use crate::predict;
 pub use crate::autoconvert::{looks_like_address, AutoLevel, AutoRule, AutoScore};
 use crate::prefs::{normalize_word, SettingsCmd, SettingsSnap};
@@ -452,6 +453,9 @@ pub const REV_PREV: f64 = 0.8;
 /// English words offered back from the Thai layout whatever the model says, because their Thai reading is a real word
 /// (`ok` -> นา). Words on the don't-translate list are offered the same way.
 pub const REV_ALWAYS: [&str; 2] = ["ok", "it"];
+/// Offered back from the Thai layout once Space ends exactly these keys, that word alone, whatever the model says
+/// (`go` -> เน, which is no Thai word). Not `REV_ALWAYS`: those show at a pause, and เน starts เนื้อ, เนี่ย, เน็ต…
+const REV_AT_SPACE: [&str; 1] = ["go"];
 /// Pauses Settings offers for the input-language preview to come back after: long enough to read as a real stop, and
 /// past the pause that brings up word completions. The default is the second: two seconds.
 pub const BADGE_IDLE_CHOICES_MS: [u64; 5] = [1000, 2000, 3000, 5000, 10000];
@@ -525,6 +529,7 @@ pub struct Engine {
     last_req: ReqId,
     /// Word completion sources; None disables that language.
     pub thai_comp: Option<Completer>, pub en_comp: Option<Completer>,
+    english: English,
     /// Corpus word pairs that rank completions after the previous word; None ranks without them.
     pub thai_bigrams: Option<Bigrams>, pub en_bigrams: Option<Bigrams>,
     /// English real-word fixes (`their` -> `there`) scored over `en_bigrams`; None (no English pairs or frequencies in
@@ -575,12 +580,14 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(det: Detector, personal: PersonalModel, corrector: Option<Corrector>, opts: Options) -> Self {
-        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), auto_undone: BTreeSet::new(), auto_safe: false, auto_app_excluded: false, prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, thai_bigrams: None, en_bigrams: None, real_words: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false, cycle: None, quiet: false }
+        Engine { rev: None, thai_active: false, det, personal, corrector, opts, paused: false, off: false, word: String::new(), tab_pending: false, tab: TabChord::Up, tab_at: None, hold_up: false, line: vec![], line_start: 0, bubble: vec![], shown: vec![], sel: Selection::default(), rail: Rail::Out, space_hint: false, hushed: false, live_streak: 0, live: false, phrase: 0, events_since_save: 0, never: BTreeSet::new(), offer_last: BTreeSet::new(), auto_undone: BTreeSet::new(), auto_safe: false, auto_app_excluded: false, prefs_dirty: false, speller: None, rewrite: rewrite::Config::default(), check_updates: true, capturing: None, last_req: ReqId::default(), thai_comp: None, en_comp: None, english: English::default(), thai_bigrams: None, en_bigrams: None, real_words: None, words: Arc::default(), last_key: None, focus: false, badge_up: false, typed_at: None, comp_muted: false, spell_lead: None, predict: None, pred_ask: None, pred_answer: None, pred_unshown: false, pred_shown: None, pred_next_ask: None, pred_next_answer: None, line_learned: false, delete_unit: DeleteUnit::default(), rank: RankLog::default(), pick: How::default(), fixing: false, cycle: None, quiet: false }
     }
     /// Completion sources from the model; English only when it carries English word frequencies (TTM section 11).
     pub fn load_completers(&mut self, m: &mut typethai_core::ModelFiles) {
         self.thai_comp = Some(m.thai_completer());
         self.en_comp = (!m.english_freq.is_empty()).then(|| m.english_completer());
+        // the detector the classifier reads has no brands (`learn_detector`): the English rule takes them from the model
+        self.english.add(&m.english_words); self.english.add(&m.brands);
         // taken, not cloned: loaded pairs take tens of MB
         self.thai_bigrams = Some(std::mem::take(&mut m.th_bigrams)).filter(|b| !b.is_empty());
         self.en_bigrams = Some(std::mem::take(&mut m.en_bigrams)).filter(|b| !b.is_empty());
@@ -827,9 +834,16 @@ impl Engine {
         let mut toks: Vec<&str> = self.line[start..].iter().filter(|c| !c.rev).map(|c| c.typed.as_str()).collect(); toks.push(last);
         self.det.decide_line(&toks)
     }
-    /// Personal flip probability for `last` given the line context, plus its decisions (for feedback).
+    /// Personal flip probability for `last` given the line context, plus its decisions (for feedback); 0 for a word
+    /// that stays English (`keeps_english`).
     pub fn prob(&self, last: &str) -> (f64, Vec<TokenDecision>) {
-        let ds = self.decisions(last); let p = *self.personal.line_probs(&ds).last().unwrap_or(&0.0); (p, ds)
+        let ds = self.decisions(last);
+        let p = if self.keeps_english(last) { 0.0 } else { *self.personal.line_probs(&ds).last().unwrap_or(&0.0) };
+        (p, ds)
+    }
+    /// English with no Thai reading (`English::only`), unless the user taught it as Thai.
+    fn keeps_english(&self, typed: &str) -> bool {
+        self.english.only(typed, &self.det, self.en_comp.as_ref()) && !self.personal.taught(typed)
     }
     /// What completion and spelling rows in `lang` are ranked by: `prev` (the word before, when it is in `lang`), the
     /// corpus pairs, the user's words and the slips.
@@ -1389,7 +1403,11 @@ impl Engine {
         if self.blocked(typed) { return false }
         if typed.chars().count() < self.opts.live_min_len { return false }
         if self.thai_active { let (p, ok) = self.rev_prob(typed); ok && p > self.opts.rev_live }
-        else { let (p, ds) = self.prob(typed); ds.last().is_some_and(|d| d.valid) && p > self.band(&en_to_th(typed), self.opts.live_show) }
+        else {
+            let (p, ds) = self.prob(typed);
+            ds.last().is_some_and(|d| d.valid) && p > self.band(&en_to_th(typed), self.opts.live_show)
+                && (self.personal.taught(typed) || !self.english.starts(typed, &self.det, self.en_comp.as_ref()))
+        }
     }
     /// Confidence a forward conversion must clear: `band` when `thai` is a dictionary word, `STRICT_BAND` otherwise.
     /// Short English prefixes and typos (`wo` -> ไน, `riht` -> พร้ะ) score in the middle band and read as nonsense Thai.
@@ -1981,6 +1999,8 @@ impl Engine {
             let mut label = String::new(); for c in &self.line[start..] { label += &self.rev_target(&c.typed); label += &c.after(); }
             label += &target;
             self.show(vec![BubbleItem { label, kind: BubbleKind::ConvertPrev { k } }], &mut acts); self.phrase = k + 1;
+        } else if b == Boundary::Space && REV_AT_SPACE.contains(&typed.as_str()) {
+            self.show(vec![BubbleItem { label: typed.clone(), kind: BubbleKind::ConvertPrev { k: 0 } }], &mut acts); self.phrase = 1;
         } else { self.show(vec![], &mut acts); }
         let auto = converted.is_some();
         self.line.push(Committed { typed, orig: thai, converted, boundary: Some(b), rev: true, with_prev: 0, extra: String::new(), learned: false, auto });
@@ -2390,7 +2410,7 @@ impl Engine {
         if !fwd.is_empty() {
             let ds = self.det.decide_line(&fwd.iter().map(|&i| words[i]).collect::<Vec<_>>());
             for ((&i, d), p) in fwd.iter().zip(&ds).zip(self.personal.line_probs(&ds)) {
-                if d.valid && !self.blocked(words[i]) && p > self.band(&d.candidate, self.opts.suggest_band) { to[i] = Some((d.candidate.clone(), false)) }
+                if d.valid && !self.blocked(words[i]) && !self.keeps_english(words[i]) && p > self.band(&d.candidate, self.opts.suggest_band) { to[i] = Some((d.candidate.clone(), false)) }
             }
         }
         let rev: Vec<(usize, String)> = (0..words.len()).filter(|&i| lang_of(words[i]) == InputLang::Thai).filter_map(|i| Some((i, th_text_to_keys(words[i])?))).collect();
@@ -2778,6 +2798,140 @@ mod tests {
         typ(e, &typethai_core::reverse::th_text_to_keys(th).expect("typeable on Kedmanee"))
     }
     fn replaced(o: &[Outcome]) -> Vec<String> { o.iter().flat_map(|x| x.actions.iter()).filter_map(|a| if let Action::Replace { insert, .. } = a { Some(insert.clone()) } else { None }).collect() }
+    #[test] fn go_on_the_thai_layout_is_offered_after_space() {
+        let Some(mut e) = engine() else { return };
+        e.opts.complete = CompleteMode::Pause;
+        for before in ["", "ไป ", "ทำ "] {
+            e.reset(); typ_th(&mut e, before);
+            let o = typ_th(&mut e, "เน");
+            assert!(o.iter().all(|x| x.actions.iter().all(|a| !matches!(a, Action::Replace { .. }))));
+            e.on_idle(Instant::now() + Duration::from_secs(5));
+            assert!(e.bubble.iter().all(|b| b.label != "go"), "{before:?}: not while typing: {:?}", e.bubble);
+            assert!(!e.on_key(Key::Boundary(Boundary::Space)).swallow);
+            assert_eq!(e.bubble, [BubbleItem { label: "go".into(), kind: BubbleKind::ConvertPrev { k: 0 } }], "{before:?}: that word alone");
+            let o = tab(&mut e);
+            assert!(o.actions.contains(&Action::Replace { delete: 3, insert: "go ".into(), then: None }), "{before:?}: {o:?}");
+            assert!(o.actions.contains(&Action::SwitchInput(InputLang::Latin)));
+        }
+    }
+    #[test] fn only_space_offers_go() {
+        // no model: the offer does not depend on one, and this runs in CI
+        for (b, offered) in [(Boundary::Space, true), (Boundary::Tab, false), (Boundary::Enter, false)] {
+            let mut e = bare_engine(&[], &[]);
+            e.set_thai_active(true); typ(&mut e, "go");
+            assert!(e.bubble.is_empty(), "nothing while typing: {:?}", e.bubble);
+            e.on_key(Key::Boundary(b));
+            assert_eq!(e.bubble.iter().any(|i| i.label == "go"), offered, "{b:?}: {:?}", e.bubble);
+        }
+        for th in ["เนื้อ", "เนี่ย", "เน็ต", "อยากเน"] {
+            let mut e = bare_engine(&[], &[]);
+            e.set_thai_active(true); typ(&mut e, &th_text_to_keys(th).unwrap());
+            e.on_key(Key::Boundary(Boundary::Space));
+            assert!(e.bubble.is_empty(), "{th}: {:?}", e.bubble);
+        }
+    }
+    #[test] fn the_english_rule_without_a_model() {
+        // a classifier that is sure every word is Thai: only the English rule keeps a word English
+        let sure = |english: &[&str]| {
+            let mut e = bare_engine(&["สวัสดี", "เพราะ", "ดี"], &[]);
+            e.personal.base.stage2.b = 10.0;
+            for n in [&mut e.det.thai, &mut e.det.english] { (n.vocab, n.lambdas) = (100.0, [0.0, 0.0, 0.0, 1.0]); } // finite scores
+            e.english.add(&english.iter().map(|w| w.to_string()).collect::<Vec<_>>());
+            e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Eager;
+            e
+        };
+        let mut e = sure(&[]);
+        e.opts.auto_convert = false;
+        // at Space: while typing it is already held back as the start of gridlines
+        typ(&mut e, "grid ");
+        assert_eq!(layout_rows(&e), ["เพรก"], "offered without the list");
+        for word in ["grid", "Grid", "grid,"] {
+            let mut e = sure(&["grid", "fu"]);
+            for c in word.chars() { e.on_key(Key::Char(c)); assert!(layout_rows(&e).is_empty(), "{word} at {c}: {:?}", e.bubble); }
+            assert!(!e.auto_now(word) && !e.guess_anchor_ok(word, false), "{word}");
+            let o = e.on_key(Key::Boundary(Boundary::Space));
+            assert!(!o.swallow && layout_rows(&e).is_empty(), "{word} + Space: {o:?}");
+        }
+        for th in ["สวัสดี", "เพราะ", "ดี"] {
+            let mut e = sure(&["grid", "fu"]);
+            e.opts.auto_convert = false;
+            typ(&mut e, &th_text_to_keys(th).unwrap());
+            e.on_key(Key::Boundary(Boundary::Space));
+            assert_eq!(layout_rows(&e), [th]);
+        }
+    }
+    #[test] fn thai_words_that_start_like_go_are_left_alone() {
+        let Some(mut e) = engine() else { return };
+        e.opts.complete = CompleteMode::Pause;
+        for th in ["เนื้อ", "เนี่ย", "เน็ต", "เนย", "เนอะ", "เนื่องจาก", "เน้น", "อยากเน"] {
+            e.reset();
+            for c in th_text_to_keys(th).unwrap().chars() {
+                e.set_thai_active(true); e.on_key(Key::Char(c)); e.on_idle(Instant::now() + Duration::from_secs(5));
+                assert!(e.bubble.iter().all(|b| b.label != "go"), "{th}: {:?}", e.bubble);
+            }
+            e.on_key(Key::Boundary(Boundary::Space));
+            assert!(e.bubble.iter().all(|b| b.label != "go"), "{th} + Space: {:?}", e.bubble);
+        }
+    }
+    /// The personal model at the most it can add to every word (`max_drift`): what a user who converts a lot ends with.
+    fn drifted(e: &mut Engine) { e.personal.state.db = DEFAULT_PERSONAL.max_drift; }
+    fn layout_rows(e: &Engine) -> Vec<String> {
+        e.bubble.iter().filter(|b| matches!(b.kind, BubbleKind::Live { .. } | BubbleKind::Convert { .. } | BubbleKind::Guess { .. } | BubbleKind::UndoConversion)).map(|b| b.label.clone()).collect()
+    }
+    #[test] fn english_with_no_thai_reading_is_not_offered_as_thai() {
+        let Some(mut e) = engine_typo() else { return };
+        e.load_completers(&mut model().unwrap());
+        e.opts.live = true; e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Eager;
+        for drift in [false, true] {
+            if drift { drifted(&mut e) }
+            for before in ["", "use the ", "wx ", "wx dbo "] {
+                for word in ["grid", "Grid", "GRID", "grid,", "grid.", "(grid)", "grids", "gridlines", "grip", "desk", "disk", "skip", "milk", "risk", "i'm", "csv", "zbrush", "grid;", "grid:", "grid-cols", "grid_size", "TikTok"] {
+                    let case = format!("{before:?} {word} drift={drift}");
+                    e.reset(); e.set_thai_active(false); typ(&mut e, before); e.set_thai_active(false);
+                    for c in word.chars() {
+                        e.on_key(Key::Char(c)); e.on_idle(Instant::now() + Duration::from_secs(5));
+                        // part of a word may be Thai by itself (`ski` หาร of skip); a word is not
+                    let part = e.word != word;
+                    assert!(layout_rows(&e).iter().all(|l| part && e.det.th_dict.has(l)), "{case}, at {c}: {:?}", e.bubble);
+                    }
+                    e.on_key(Key::Hotkey(Hotkey::Guess));
+                    assert!(layout_rows(&e).is_empty(), "{case}, guess: {:?}", e.bubble);
+                    assert!(e.word_rows("", word, false, None).iter().all(|b| !matches!(b.kind, BubbleKind::Convert { .. })), "{case}, word rows");
+                    assert!(!e.auto_now(word), "{case}, auto-convert");
+                    let o = e.on_key(Key::Boundary(Boundary::Space));
+                    assert!(!o.swallow && layout_rows(&e).is_empty(), "{case}, Space: {o:?}");
+                    let o = tab(&mut e);
+                    assert!(!o.actions.iter().any(|a| matches!(a, Action::Replace { insert, .. } if lang_of(insert) == InputLang::Thai)), "{case}, Tab: {o:?}");
+                }
+            }
+            assert!(e.selection_flips("use grid", &word_spans("use grid")).iter().all(Option::is_none), "selection, drift={drift}");
+        }
+        // asked for by name, the conversion is still there
+        e.reset(); e.set_thai_active(false); typ(&mut e, "grid");
+        let o = e.on_key(Key::Hotkey(Hotkey::ForceConvert));
+        assert!(o.actions.contains(&Action::Replace { delete: 4, insert: "เพรก".into(), then: None }), "{o:?}");
+    }
+    #[test] fn thai_typed_on_the_english_layout_is_still_offered() {
+        let Some(mut e) = engine_typo() else { return };
+        e.load_completers(&mut model().unwrap());
+        e.opts.live = true;
+        // words, slang, and keys that are English as well: `fu` ดี, `ok` นา, `div` กรอ, `gm` เท
+        for th in ["สวัสดี", "ครับ", "ขอบคุณ", "เพราะ", "เพราะว่า", "นี่", "ไป", "ดี", "นา", "กรอ", "เท", "โอเค", "เน็ต", "จริงเหรอ", "แป๊บ", "ไม่เป็นไร", "สวัสดีครับ", "เมม", "แงง", "งอล", "ทำไม"] {
+            e.reset(); e.set_thai_active(false);
+            let keys = th_text_to_keys(th).unwrap();
+            typ(&mut e, &keys);
+            if ["สวัสดี", "เพราะ", "เพราะว่า", "ขอบคุณ"].contains(&th) { assert!(layout_rows(&e).iter().any(|l| l == th), "{th}, while typing: {:?}", e.bubble) }
+            e.on_key(Key::Boundary(Boundary::Space));
+            assert!(layout_rows(&e).iter().any(|l| l == th), "{th}: {:?}", e.bubble);
+        }
+    }
+    #[test] fn a_word_taught_as_thai_is_still_offered() {
+        let Some(mut e) = engine_typo() else { return };
+        e.load_completers(&mut model().unwrap());
+        for _ in 0..4 { e.reset(); e.set_thai_active(false); typ(&mut e, "grid"); e.on_key(Key::Hotkey(Hotkey::ForceConvert)); }
+        e.reset(); e.set_thai_active(false); typ(&mut e, "grid ");
+        assert_eq!(layout_rows(&e), ["เพรก"]);
+    }
     #[test] fn auto_reverse_i_dont_know() {
         let Some(mut e) = engine() else { return };
         e.opts.auto_convert = true; e.auto_safe = true; e.opts.auto_level = AutoLevel::Balanced;
@@ -2978,13 +3132,18 @@ mod tests {
     #[test] fn space_never_converts_on_the_shipped_tab_key() {
         let Some(mut e) = engine_default() else { return };
         assert_eq!(e.opts.tab_key, TabKey::SpaceApplies); assert!(!e.opts.auto_convert); assert!(e.opts.live);
-        // `git` reads as เระ mid-word; Space types a space, not the conversion
+        // `dvd` is English and reads as กอก, a Thai word: Space types a space, not the conversion
         let mut log = vec![];
-        feed(&mut e, &mut log, "hello git");
-        assert_eq!(labels(&e), ["เระ"], "the live row is up"); assert!(matches!(e.bubble[0].kind, BubbleKind::Live { .. }));
+        feed(&mut e, &mut log, "hello dvd");
+        assert_eq!(labels(&e), ["กอก"], "the live row is up"); assert!(matches!(e.bubble[0].kind, BubbleKind::Live { .. }));
         assert!(!e.space_hint, "the keycap says Tab, not Space");
         feed(&mut e, &mut log, " ");
-        assert_eq!(screen(&log), "hello git ");
+        assert_eq!(screen(&log), "hello dvd ");
+        // `git` reads as เระ, which is no Thai word: no row at all
+        e.reset(); let mut log = vec![];
+        feed(&mut e, &mut log, "hello git");
+        assert!(labels(&e).is_empty(), "{:?}", labels(&e));
+        e.reset();
         // mid-sentence English
         e.reset(); let mut log = vec![];
         feed(&mut e, &mut log, "so i pushed the git repo to main and it is fine ");

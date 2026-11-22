@@ -15,6 +15,11 @@ when sure** (off unless you turn it on) converts the words it is sure about by i
 
 - **Both directions.** English keys meant as Thai (Kedmanee), and English typed while the Thai layout is active.
   Multi-word phrases work too (`i dont know`).
+- **English stays English.** A word from the English lists (the model's, plus programming, design and game-development
+  terms) is not offered as Thai when its Thai reading is no Thai word (`grid` is not `เพรก`), and while one is
+  being typed (`gri`) the Thai waits for the next key. Where both readings are words (`fu` = `ดี`, `div` = `กรอ`), the
+  scores decide as before. **⌃⌥X** still converts any word, and a word you converted by hand four times is offered
+  again.
 - **You decide when to convert.** Space, Enter and punctuation always pass through unchanged. The bubble offers the
   conversion for the word you are typing or the one you just finished. **Tab** then **Space** applies it, and **⌃⌥Z**
   undoes it.
@@ -73,7 +78,8 @@ once they are up they follow the word as you keep typing. **Settings… → Word
   list lacks is offered once you have typed it three times. **Learn from my typing** turns this off, and **Forget
   learned words** clears it. One letter or one Thai key is enough once you pause — `t` offers *the / to / that*, the
   way a code editor's ghost text does. Typing English keys on the Thai layout also offers that English back as the
-  first row (notably `ok` ≈ `นา`), with the Thai words under it.
+  first row (notably `ok` ≈ `นา`), with the Thai words under it. `go` (`เน`) is offered back once Space ends it, not
+  before: เน starts เนื้อ, เนี่ย and เน็ต.
 - **Finish words from my typing.** Beside the dictionary completions, a small model of *your own* typing finishes the
   word you are typing, in Thai or English, and can offer words the built-in lists do not have (a name, jargon, or a
   word you misspell the same way twice). It learns from the lines you finish, stays on your machine, and is on by
@@ -303,8 +309,8 @@ Auto-convert when sure (`--eval-auto`, model's word lists plus tricky names/code
 `docs/research/auto-convert-eval.md`):
 - **Cautious (default level): 0 false conversions** on 23,408 English-layout words and 22,658 Thai-layout Thai words;
   it catches 96.4% of unspaced Thai runs typed on the English layout and 51.7% of English typed on the Thai layout.
-- **Balanced:** 1 false conversion (`aviv`); catches 97.9% and 73.6%.
-- **Eager:** 8 false (short words such as `dvd`, `duh`, `wfh`; 3.4 per 10,000); catches 98.7% and 85.7%.
+- **Balanced:** 0 false conversions (model-v6); catches 97.9% and 73.7%.
+- **Eager:** 4 false (`dvd`, `duh`, `ryo`, `wfh`; 1.7 per 10,000); catches 98.7% and 85.8%.
 
 Typo suggestions (synthetic typos in held-out reviews): **correct word first 81.7%, in the top 3 89.0%.**
 

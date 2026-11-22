@@ -56,6 +56,11 @@ impl PersonalModel {
     fn mem_pure(&self, k: &str) -> bool {
         match self.state.mem.get(k) { None => false, Some(m) => m.conv.max(m.kept) / (m.conv + m.kept).max(1e-9) >= self.state.config.mem_purity }
     }
+    /// The user converted `word` by hand often enough that the memory decides alone (`mem_override`).
+    pub fn taught(&self, word: &str) -> bool {
+        let k = word.to_lowercase();
+        self.mem_net(&k) >= self.state.config.mem_override.unwrap_or(f64::INFINITY) && self.mem_pure(&k)
+    }
     fn z2(&self, ds: &[TokenDecision], p1: &[f64], i: usize) -> Vec<f64> {
         let mut x = token_features(&ds[i]); x.extend(context_features(p1, i));
         let s = &self.base.stage2; x.iter().enumerate().map(|(k, v)| (v - s.mu[k]) / s.sd[k]).collect()
