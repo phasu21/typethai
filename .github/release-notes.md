@@ -1,5 +1,12 @@
 **typeThai** fixes Thai typed on the wrong keyboard layout, in both directions, from a suggestion bubble at your caret.
 
+**Fixed in 0.5.30**
+- **English words like `grid` are no longer offered as Thai nonsense like `เพรก`.** Words that are real in both
+  languages (`fu` and ดี, `dvd` and กอก) work as before. Tech words that typeThai does not know can still get a wrong
+  suggestion. To convert a word anyway, press ⌃⌥X.
+- **`go` typed on the Thai layout (`เน`) now offers *go* after Space.** It changes only that word. Words like เนื้อ,
+  เนี่ย and เน็ต are left alone.
+
 **New in 0.5.29**
 - **The typeThai logo and app icon.**
 - **A live menu-bar / tray icon that shows the input language.** The white ท card in front means Thai, the orange T card
