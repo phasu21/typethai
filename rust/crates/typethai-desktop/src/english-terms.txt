@@ -1,0 +1,26 @@
+# English the model's lists do not have (src/english.rs): programming, design and game development, then chat.
+# One line can hold several words.
+aabb airflow albedo aoe api argc args argv asc ascii astc async atan auth autolayout avif awk axios bazel
+bezier bgm binormal bisect bitmask bitwise bool boolean bootstrap breadcrumb breakpoint bvh byte calloc canva
+cdn ceil cfg changelog checkbox chmod chown cli clippy cmake col cols colspan concat conda config const cors
+cron crosshair csg css csv ctor cubemap currentcolor dds debian debuff debug deno deref desc dict directx dist
+dither dns dotenv dps dropdown dtor easein easeout embed embedding emissive emscripten endpoint enum env
+eslint euler fastapi fbx figma firebase fixme flexbox flipbook fmt footer foreach fps framer frustum func
+gacha gcc gdb gdscript gibs gif gimbal giphy giscus github gitignore gitlab glb glew glfw glsl gltf glyph
+godhand golang gpt gpu gradle grafana graphql grep griddata gridded gridlines gridmap grpc gunicorn gzip
+hadoop hashmap heroku hitbox hitscan hlsl hostname hotfix hsl html http https hurtbox idx impl indexof init
+inline inode inset italic iterator jpeg jpg json jsx jupyter jwt kanban kerning keyframe killcam knockback
+kotlin ktx kubectl kwargs laravel lerp lgtm linker lldb llm localhost lockfile lod logout lowpoly macos malloc
+merkle minimap mipmap mkdir mockup modal modulo monorepo mut mutex mypy mysql navbar navmesh nerf netcode
+netlify nextjs nginx normals nowrap npc npm numpy nuxt oauth obb obj oklch opacity opengl parallax param
+params php pixi pkg platformer png pnpm podman polygon popover postgres prefab prisma psql ptr pytest
+quaternion ragdoll raycast rebase redis redux refactor regex regexp respawn reticle rgba rigidbody rmdir
+roguelike rollback rowspan runtime rustc rustfmt schema scrum scss sdf sdk semaphore semver serde serif sfx
+shader signup sklearn skybox slerp specular spritesheet sql sqlite sqrt src ssl stderr stdin stdout stepper
+strace struct subgrid subnet substr supabase svelte svg svgr swatch symlink syscall tailwind tarball tcp
+tensor texel textarea threejs tickrate tilemap tileset tls tmpfs tmux toggle tokio toml tooltip tooltips trie
+tsx tuple ubuntu udp uint undefined underflow unicode url useeffect usememo usestate utf uuid valgrind var vec
+venv vercel vertex vertices vfx viewbox viewport vignette vim vitest vlan voxel vulkan wasm webgl webgpu
+webhook webp webpack wget wgsl wip wireframe xcode xml xor yaml zbrush zsh zustand
+# chat abbreviations
+idk ikr imo irl lmk rofl
